@@ -265,3 +265,12 @@ Phase 3 (tool schemas) and Phase 5 (retrieval).
   `sidecar.out.log` is the child's raw stdout/stderr captured by Electron.
 - New JSON-RPC methods: register with `@method("name")` in `rpc/handlers.py`.
   Unregistered methods return -32601 rather than a stub.
+- **Vite hot-reloads the renderer; the sidecar is spawned once.** Python edits
+  need "Restart Brain" in the tray (or killing the process — Electron respawns
+  it). A new method lands as *"Unknown method 'x'. Available in this build: …"*,
+  which is the old process answering, not a registration bug. `sidecar.ready`
+  logs the method list at startup — compare it before reading further.
+- The venv's `python.exe` spawns the base interpreter as a child on Windows, so
+  `Started server process [pid]` names a pid whose exe is `…\Python311\`, not
+  `.venv\`. That is the venv launcher and it is normal; site-packages still
+  resolve to the venv.
