@@ -94,14 +94,13 @@ CATALOG: list[ModelInfo] = [
         persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
         best_for=(
-            "The fastest model here, and the best local one at following an "
-            "exact format. Good when you know what you are asking for."
+            "The default. Fastest model here, crisp and consistent, and the "
+            "best local one at following an exact format."
         ),
         ttft_ms_seed=325,
         caveat=(
-            "Invents answers about things that do not exist — it described a "
-            "fake npm package and a fake git flag as though both were real. "
-            "Prefer the 4B for anything you cannot check yourself."
+            "Will describe things that do not exist as though they were real — "
+            "a made-up npm package, a made-up git flag. Check anything obscure."
         ),
         local=True,
     ),
@@ -115,13 +114,17 @@ CATALOG: list[ModelInfo] = [
         persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
         best_for=(
-            "The default. By far the most honest local model — it says it does "
-            "not know instead of inventing an answer, and needs the least VRAM."
+            "Lowest VRAM here. Declines unanswerable questions more reliably "
+            "than the 7B, so useful as a second opinion on obscure facts."
         ),
         # Slower than the 7B despite being smaller: it is a reasoning model and
         # pays for that even with think=false. Still inside the 700ms gate.
         ttft_ms_seed=560,
-        caveat="Slower than the 7B, and slightly weaker at exact formatting.",
+        caveat=(
+            "Rambles, sometimes quotes its own instructions back at you, and "
+            "occasionally states a confident falsehood about a real topic. "
+            "Slower than the 7B despite being smaller."
+        ),
         local=True,
     ),
     # ── Gemini ───────────────────────────────────────────────────────
@@ -249,14 +252,26 @@ def local_models() -> list[ModelInfo]:
     return [m for m in CATALOG if m.local]
 
 
-# Measured, `eval_quality.py --suite hallucination`: the 4B fabricates on 5% of
-# unanswerable probes against the 7B's 27%, and both clear the 700ms Phase 1
-# gate (560ms vs 325ms). Honesty was the deciding axis, so the smaller model
-# wins the default despite being slower and one probe weaker on instructions.
+# The 4B scores better on the probe battery (92% against 79%) and this was
+# briefly set to it on that basis. Reading real transcripts reversed the call:
 #
-# Phase 2 may want this back: voice budgets ~1000ms end-to-end, and 235ms is a
-# meaningful share of it. Reverting is this one constant.
-PREFERRED_LOCAL = "qwen3.5:4b"
+#   - Asked why Einstein won the Nobel for relativity, the 4B answered that he
+#     "never won the Nobel Prize" and that the 1921 physics prize "went instead
+#     to Henri Poincare" — fluent, confident and entirely invented. The 7B gets
+#     this right 5 times out of 5, in nearly identical words.
+#   - The 4B hedges settled facts into mush: "Canberra is approximated as the
+#     capital. It is an approximation since official status may vary by source."
+#   - It recites its own system prompt at the user mid-refusal, and takes 60
+#     words to say what the 7B says in eight.
+#
+# The 7B's weakness is narrower: it describes non-existent packages and flags
+# as though they were real. That is on adversarial probes about obscure things,
+# and `quality` bias routes substantive questions to cloud anyway. Its caveat
+# says so in the picker.
+#
+# The lesson, recorded in CLAUDE.md: an aggregate score over single-turn probes
+# is not a substitute for reading a conversation.
+PREFERRED_LOCAL = "qwen2.5:7b"
 
 
 def default_local(pulled: Iterable[str] | None = None) -> ModelInfo:
