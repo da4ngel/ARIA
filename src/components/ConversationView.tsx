@@ -26,6 +26,13 @@ function Bubble({ turn }: { turn: Turn }): JSX.Element {
             )}
             {turn.error && <p className="mt-1 text-xs text-aria-bad">{turn.error}</p>}
             {turn.cancelled && <p className="mt-1 text-xs text-aria-muted">stopped</p>}
+            {/* A failover is never silent: say who actually answered. */}
+            {turn.note && <p className="mt-1 text-xs text-aria-warn">{turn.note}</p>}
+            {turn.modelLabel && !turn.streaming && (
+              <p className="mt-1 text-[10px] text-aria-muted" title={turn.routeReason}>
+                {turn.modelLabel}
+              </p>
+            )}
           </>
         )}
       </div>

@@ -32,6 +32,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "sidecar/tests/*" = ["ANN201", "ANN001", "S101"]
+# Developer CLIs, not the sidecar. Rule 9 bans print() because a running service
+# must emit structured logs a user can grep at 2am; a report script printing its
+# report to stdout is the opposite case. E402 covers the sys.path insert these
+# need to import `sidecar` when run directly rather than as a module.
+"scripts/*" = ["T201", "E402"]
 
 [tool.mypy]
 python_version = "3.11"

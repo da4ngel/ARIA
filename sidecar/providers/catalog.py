@@ -81,13 +81,18 @@ CATALOG: list[ModelInfo] = [
         provider=ProviderName.OLLAMA,
         label="Qwen2.5 7B (local)",
         klass=ModelClass.BALANCED,
-        persona=PersonaLevel.FULL,
+        # Measured, 8 runs of `eval_quality.py --category honesty`: under FULL
+        # this model invented a breakfast every single time ("Oatmeal.", "Bagel
+        # with cream cheese.") when asked what the user ate. Under MINIMAL it
+        # declined all 8. The battery scores 41/41 on MINIMAL against 40/41 on
+        # FULL. Character is not worth a model that fabricates.
+        persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
         best_for=(
             "Everyday conversation and quick tasks, entirely on this machine. "
             "Instruction-tuned, so it follows explicit formats reliably."
         ),
-        ttft_ms_seed=None,  # measured on first use
+        ttft_ms_seed=356,
         local=True,
     ),
     ModelInfo(
@@ -99,11 +104,15 @@ CATALOG: list[ModelInfo] = [
         # inventing context. It gets the stripped prompt.
         persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
-        best_for="Fastest replies and lowest VRAM. Good for short exchanges.",
-        ttft_ms_seed=491,
+        best_for="Lowest VRAM of any model here. Useful if the 7B will not fit.",
+        # 591ms median over the battery, against 356ms for the 7B. The 4B is a
+        # reasoning model and pays for that even with think=false, so it is
+        # slower *and* weaker than the larger model — the same trap as
+        # gpt-5-mini below.
+        ttft_ms_seed=591,
         caveat=(
-            "Follows detailed instructions poorly and can wander off-topic. "
-            "Prefer the 7B unless you need the speed."
+            "Slower than the 7B despite being smaller, and follows detailed "
+            "instructions less reliably. It saves VRAM, not time."
         ),
         local=True,
     ),

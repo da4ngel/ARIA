@@ -18,12 +18,22 @@ export interface Turn {
   streaming?: boolean
   cancelled?: boolean
   error?: string
+  /** Which model actually answered — never what was merely chosen. */
+  modelLabel?: string
+  /** Why the router picked it, so routing is never a black box. */
+  routeReason?: string
+  /** Set when a provider failed and another one answered instead. */
+  note?: string
 }
 
 interface TurnCompletePayload {
   turn_id: string
   full_text: string
   route?: string
+  model?: string
+  model_label?: string
+  route_reason?: string
+  note?: string | null
   cancelled?: boolean
   error?: string
   first_token_ms?: number | null
@@ -34,6 +44,8 @@ export interface UseConversation {
   busy: boolean
   send: (text: string) => Promise<void>
   cancel: () => Promise<void>
+  /** Clear the view and start a new session in the sidecar. */
+  newChat: () => Promise<void>
   /** First-token latency of the last turn — the Phase 1 gate, visible in the UI. */
   lastFirstTokenMs: number | null
 }
@@ -84,6 +96,16 @@ export function useConversation(connected: boolean): UseConversation {
         return
       }
 
+      // A provider died after streaming part of a reply. What is on screen
+      // belongs to a model that will not finish it, so drop it before the
+      // replacement starts — otherwise the two answers concatenate.
+      if (event.method === 'turn.reset') {
+        const { turn_id: turnId } = event.params as { turn_id: string }
+        if (turnId !== activeTurnId.current) return
+        setTurns((prev) => clearStreaming(prev))
+        return
+      }
+
       if (event.method === 'turn.complete') {
         const payload = event.params as unknown as TurnCompletePayload
         if (payload.turn_id !== activeTurnId.current) return
@@ -131,7 +153,16 @@ export function useConversation(connected: boolean): UseConversation {
     }
   }, [])
 
-  return { turns, busy, send, cancel, lastFirstTokenMs }
+  const newChat = useCallback(async () => {
+    const started = await window.aria.call<{ session_id: string }>('chat.new', {})
+    sessionId.current = started.session_id
+    activeTurnId.current = null
+    setBusy(false)
+    setLastFirstTokenMs(null)
+    setTurns([])
+  }, [])
+
+  return { turns, busy, send, cancel, newChat, lastFirstTokenMs }
 }
 
 // ── reducers ──────────────────────────────────────────────────────────
@@ -141,6 +172,14 @@ function appendToStreaming(turns: Turn[], text: string): Turn[] {
   if (index === -1) return turns
   const next = [...turns]
   next[index] = { ...next[index], content: next[index].content + text }
+  return next
+}
+
+function clearStreaming(turns: Turn[]): Turn[] {
+  const index = turns.findIndex((t) => t.streaming)
+  if (index === -1) return turns
+  const next = [...turns]
+  next[index] = { ...next[index], content: '' }
   return next
 }
 
@@ -156,6 +195,9 @@ function finalise(turns: Turn[], payload: TurnCompletePayload): Turn[] {
     streaming: false,
     cancelled: payload.cancelled,
     error: payload.error,
+    modelLabel: payload.model_label,
+    routeReason: payload.route_reason,
+    note: payload.note ?? undefined,
   }
   return next
 }

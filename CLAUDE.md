@@ -34,8 +34,31 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - Error messages must say what to do next, not just what failed.
 
 ## Current phase
-Phase 1 complete (acceptance gate passed). Next: Phase 2 — Voice.
-Update this line when a phase's acceptance gate passes.
+Phase 1.5 complete (multi-provider routing, model control, quality fix).
+Next: Phase 2 — Voice. Update this line when a phase's acceptance gate passes.
+
+## Phase 1.5 outcomes (2026-08-06)
+Run `python scripts/eval_quality.py` before and after any prompt or model change.
+41 probes, mechanically scored. Baseline after this phase: **qwen2.5:7b 40/41,
+qwen3.5:4b 41/41**, both clean of `<think>` leakage and invented context.
+
+- **`qwen2.5:7b` is the local default**, at `PersonaLevel.MINIMAL`. Measured over
+  8 runs: under `FULL` it invented a breakfast *every time* it was asked what the
+  user ate ("Oatmeal.", "Bagel with cream cheese."); under `MINIMAL` it declined
+  every time. Character is not worth a model that fabricates. Do not raise this
+  without re-running `--category honesty` several times.
+- **Ollama's `qwen2.5:7b` tag already is 7.6B/Q4_K_M.** The catalog previously
+  said `qwen2.5:7b-instruct-q4_K_M`, which `ollama list` never reports, so the
+  model was greyed out as "not pulled" while sitting on disk.
+- **The 4B is slower than the 7B** — 591ms vs 356ms median TTFT — because it is a
+  reasoning model and pays for that even with `think=false`. It saves VRAM, not
+  time. Same trap as `gpt-5-mini`.
+- **Smart-mode bias is a persisted setting**, not a constant: `fastest`,
+  `balanced`, `quality` (default). Phase 2 should flip it to `fastest` rather
+  than editing the router, which rule 10 freezes.
+- `send()` with no `session_id` continues the latest session. It used to mint a
+  new one per call, so any client that forgot to echo the id back lost all
+  context one turn at a time. `chat.new` is the only way to start fresh.
 
 ## Open issue from Phase 1: TTFT scales with conversation length
 The gate ("first token < 700ms, warm model, **short prompt**") passes at
@@ -64,9 +87,9 @@ offline/no-key fallback, not merely the "cheap" path.
 - Design the Phase 1 Ollama client against that interface from the start.
   Rule 10 forbids refactoring it later, so the seam has to be right now.
 - Keys go in Windows Credential Manager via `keyring` (§11), never `.env`.
-  `keyring`, `openai`, `google-genai` are all absent from §4 — add them in the
-  phase that needs them. All three are pure HTTP clients, so §2.3's torch-free
-  constraint is safe.
+  Done in Phase 1.5: `keyring` is in `requirements.txt`; `openai` and
+  `google-genai` are deliberately *not* — both vendors are reached over `httpx`,
+  which is two fewer dependency trees to survive PyInstaller (§2.3).
 - Route indicator in the UI must name the provider, not just "cloud".
 
 ## Local model (decided 2026-08-06)

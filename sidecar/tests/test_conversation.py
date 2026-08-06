@@ -180,6 +180,41 @@ async def test_cancel_stops_mid_stream_and_keeps_partial(database: Database) -> 
     assert history.messages[-1].content == emitted
 
 
+async def test_send_without_a_session_id_continues_the_conversation(service) -> None:
+    """A client that forgets to echo the id back must not silently lose context."""
+    svc, _p, _b = service
+    first = await svc.send("my name is Eyaas")
+    await _drain(svc)
+    second = await svc.send("what is my name")
+    await _drain(svc)
+
+    assert second.session_id == first.session_id
+    history = await svc.history(None)
+    assert [m.content for m in history.messages] == [
+        "my name is Eyaas",
+        "Hello there.",
+        "what is my name",
+        "Hello there.",
+    ]
+
+
+async def test_new_session_is_the_only_way_to_start_fresh(service) -> None:
+    svc, _p, _b = service
+    first = await svc.send("remember this")
+    await _drain(svc)
+
+    fresh = await svc.new_session()
+    assert fresh != first.session_id
+
+    after = await svc.send("a new topic")
+    await _drain(svc)
+    assert after.session_id == fresh
+
+    # The old conversation is still in SQLite, just not the active one.
+    old = await svc.history(first.session_id)
+    assert [m.content for m in old.messages] == ["remember this", "Hello there."]
+
+
 async def test_cancel_unknown_turn_returns_false(service) -> None:
     svc, _p, _b = service
     assert await svc.cancel("t_nope") is False

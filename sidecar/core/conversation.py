@@ -140,11 +140,19 @@ class ConversationService:
     async def send(
         self, text: str, session_id: str | None = None, model: str | None = None
     ) -> TurnStarted:
-        """Start a turn. Returns immediately; the reply streams as events."""
+        """Start a turn. Returns immediately; the reply streams as events.
+
+        Omitting `session_id` continues the most recent conversation rather than
+        starting one. `ensure_session(None)` mints a new session every call, so
+        a client that forgot to echo the id back silently lost all context one
+        turn at a time. Starting fresh is `new_session`, and only that.
+        """
         if not text.strip():
             raise ValueError("Cannot send an empty message.")
 
-        resolved_session = await self._store.ensure_session(session_id)
+        resolved_session = await self._store.ensure_session(
+            session_id or await self._store.latest_session_id()
+        )
         turn_id = f"t_{uuid.uuid4().hex[:12]}"
 
         await self._store.add_message(resolved_session, Role.USER, text)
