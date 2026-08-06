@@ -38,6 +38,7 @@ from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
 from sidecar.providers.openai import OpenAIProvider
+from sidecar.providers.stt import TranscriptionUnavailable, WhisperSTT
 from sidecar.providers.tts import KokoroTTS, SpeechUnavailable
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
@@ -134,6 +135,7 @@ async def _start_conversation(settings: Settings) -> None:
     local_default = catalog.default_local(runtime.local_models)
     runtime.local_model = local_default.id
     runtime.tts = _build_tts(settings)
+    runtime.stt = _build_stt(settings)
     runtime.conversation = ConversationService(
         store=ConversationStore(runtime.require_db()),
         provider=ollama,
@@ -206,6 +208,30 @@ def _build_tts(settings: Settings) -> KokoroTTS | None:
     return engine
 
 
+def _build_stt(settings: Settings) -> WhisperSTT | None:
+    """Speech recognition, warmed in the background like the voice.
+
+    The first load downloads ~150MB and takes ~33s here. Doing that while
+    someone holds the talk button would look broken, so it happens on startup
+    and `voice.transcribe` refuses politely until it is ready.
+    """
+    if not settings.voice_enabled:
+        return None
+
+    engine = WhisperSTT(settings.models_dir / "whisper")
+
+    async def warm() -> None:
+        try:
+            await engine.start()
+        except TranscriptionUnavailable as exc:
+            log.warning("stt.unavailable", error=str(exc))
+        except Exception:
+            log.exception("stt.warm_failed")
+
+    runtime.stt_warm = asyncio.create_task(warm())
+    return engine
+
+
 def _resolve_bias(stored: object) -> RoutingBias:
     """A hand-edited settings row must not stop the sidecar booting."""
     try:
@@ -226,6 +252,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await connectivity.stop()
         if runtime.tts is not None:
             await runtime.tts.aclose()
+        if runtime.stt is not None:
+            await runtime.stt.aclose()
         if runtime.conversation is not None:
             await runtime.conversation.shutdown()
         # Every provider holds an httpx pool, not just the local one. One that

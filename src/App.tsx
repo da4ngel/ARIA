@@ -25,6 +25,7 @@ import { Shortcuts } from '@/components/Shortcuts'
 import { useAudio } from '@/hooks/useAudio'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
+import { usePushToTalk } from '@/hooks/usePushToTalk'
 import { useRpc } from '@/hooks/useRpc'
 import { useWindowMode } from '@/hooks/useWindowMode'
 
@@ -40,13 +41,21 @@ export default function App(): JSX.Element {
     useConversation(connected)
   const models = useModels(connected)
   const audio = useAudio()
+  // A spoken turn is marked as such: the sidecar answers it on this machine
+  // whatever the Smart bias says, because the network hop alone costs more
+  // than the whole voice budget.
+  const voice = usePushToTalk((text) => void send(text, { spoken: true }), connected)
   const { expanded, toggle: toggleExpanded } = useWindowMode()
   const [overlay, setOverlay] = useState<Overlay>(null)
 
   const started = turns.length > 0
   // Real playback beats the sidecar's own state here: `speaking` should mean
   // sound is coming out, not that a turn finished and audio may be queued.
-  const orbState = audio.speaking ? 'speaking' : assistantState
+  const orbState = voice.listening
+    ? 'listening'
+    : audio.speaking
+      ? 'speaking'
+      : assistantState
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -188,6 +197,12 @@ export default function App(): JSX.Element {
             <EmptyState state={orbState} connected={connected} onPick={send} />
           )}
 
+          {voice.error && (
+            <p className="mx-3 mb-1 truncate text-micro text-aria-warn" title={voice.error}>
+              {voice.error}
+            </p>
+          )}
+
           {lastLog && (
             <p className="mx-3 mb-1 truncate text-micro text-aria-warn" title={lastLog.message}>
               {lastLog.message}
@@ -195,7 +210,7 @@ export default function App(): JSX.Element {
           )}
 
           <div className="px-3 pb-3" style={noDrag}>
-            <ComposerBar busy={busy} disabled={!connected} onSend={send} onCancel={() => {
+            <ComposerBar busy={busy} disabled={!connected} voice={voice} onSend={send} onCancel={() => {
               audio.stop()
               void cancel()
             }} />

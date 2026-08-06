@@ -589,3 +589,28 @@ async def test_only_one_rollup_per_session_at_a_time(
     first = len(svc._jobs)  # noqa: SLF001
     svc._schedule_roll_up("s_1", turns, None)  # noqa: SLF001
     assert len(svc._jobs) == first, "a second roll-up for the same session was queued"  # noqa: SLF001
+
+
+async def test_a_spoken_turn_is_answered_locally(database: Database, make_service) -> None:
+    """End to end through the service: the modality reaches the router, so a
+    question that would otherwise go to GPT-5 is answered on this machine."""
+    local = FakeProvider(chunks=["Local."])
+    cloud = FakeProvider(chunks=["Cloud."])
+    bus = RecordingBus()
+
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=local,
+        bus=bus,
+        model="qwen2.5:7b",
+        providers={"openai": cloud, "gemini": cloud, "ollama": local},
+        router=Router(HealthTracker(), RoutingBias.QUALITY),
+        usable_models=lambda: {m.id for m in catalog.CATALOG},
+    )
+
+    await svc.send("compare Postgres and SQLite for this project", spoken=True)
+    await _drain(svc)
+
+    complete = bus.of(Event.TURN_COMPLETE)
+    assert complete[0]["full_text"] == "Local."
+    assert catalog.get(complete[0]["model"]).local, complete[0]["model"]

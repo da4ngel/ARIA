@@ -131,6 +131,7 @@ class Router:
         selected: str = catalog.SMART_ID,
         available: set[str] | None = None,
         step: int = 0,
+        spoken: bool = False,
     ) -> RouteDecision:
         """Pick a model.
 
@@ -139,8 +140,19 @@ class Router:
         `catalog.resolve_availability`; None means "assume everything works",
         which is only correct in tests.
         `step` is the agent-loop step (Phase 6); >=3 implies a hard task.
+        `spoken` marks a turn that arrived by voice and will be answered aloud.
         """
         usable = self._usable(available)
+
+        # Stage 0 — a spoken turn is answered on this machine, whatever the bias
+        # says. Measured: the same reply routed to Gemini put first audio at
+        # 1707ms against 872ms locally, because the network hop lands before
+        # synthesis can even start. §10 budgets ~1000ms end to end for voice.
+        #
+        # An explicit model choice still wins below: picking a cloud model is a
+        # deliberate act, and silently overriding it would be worse than slow.
+        if spoken and selected == catalog.SMART_ID:
+            return self._local(usable, "Spoken, so it stayed on this machine to keep up.")
 
         # Stage 1 — explicit choice always wins, including over privacy: the
         # user picking a cloud model IS the consent (§9.7 stage 1).

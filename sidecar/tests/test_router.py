@@ -246,3 +246,46 @@ def test_is_trivial_rejects_real_questions(message: str) -> None:
 )
 def test_needs_deep_model_detects_real_work(message: str) -> None:
     assert needs_deep_model(message)
+
+
+# ── spoken turns ──────────────────────────────────────────────────────
+# Voice has a ~1000ms end-to-end budget (§10) and the network hop alone eats
+# most of it, so speech overrides the bias — but never an explicit choice.
+
+
+@pytest.mark.parametrize("bias", list(RoutingBias))
+def test_a_spoken_turn_stays_local_whatever_the_bias(
+    health: HealthTracker, bias: RoutingBias
+) -> None:
+    decision = router(health, bias).choose(
+        "compare Postgres and SQLite for this project",
+        available=ALL_MODELS,
+        spoken=True,
+    )
+    assert is_local(decision), decision.reason.detail
+
+
+def test_the_same_question_typed_is_free_to_go_to_the_cloud(health: HealthTracker) -> None:
+    """The contrast is the point: only the modality changed."""
+    decision = router(health, RoutingBias.QUALITY).choose(
+        "compare Postgres and SQLite for this project", available=ALL_MODELS
+    )
+    assert not is_local(decision)
+
+
+def test_a_spoken_turn_says_why_it_stayed_local(health: HealthTracker) -> None:
+    decision = router(health, RoutingBias.QUALITY).choose(
+        "explain how a diesel engine works", available=ALL_MODELS, spoken=True
+    )
+    assert "keep up" in decision.reason.detail.lower()
+
+
+def test_speech_never_overrides_an_explicit_cloud_choice(health: HealthTracker) -> None:
+    """Picking a model is deliberate. Silently ignoring it is worse than slow."""
+    decision = router(health, RoutingBias.QUALITY).choose(
+        "explain how a diesel engine works",
+        selected="gpt-5",
+        available=ALL_MODELS,
+        spoken=True,
+    )
+    assert decision.model.id == "gpt-5"

@@ -323,7 +323,11 @@ class ConversationService:
         return removed
 
     async def send(
-        self, text: str, session_id: str | None = None, model: str | None = None
+        self,
+        text: str,
+        session_id: str | None = None,
+        model: str | None = None,
+        spoken: bool = False,
     ) -> TurnStarted:
         """Start a turn. Returns immediately; the reply streams as events.
 
@@ -346,7 +350,9 @@ class ConversationService:
         await self._store.add_message(resolved_session, Role.USER, text)
 
         task = asyncio.create_task(
-            self._run_turn(turn_id, resolved_session, text, model or self._selected)
+            self._run_turn(
+                turn_id, resolved_session, text, model or self._selected, spoken=spoken
+            )
         )
         self._tasks[turn_id] = task
         self._turn_sessions[turn_id] = resolved_session
@@ -393,14 +399,23 @@ class ConversationService:
     # ── the turn itself ─────────────────────────────────────────────────
 
     async def _run_turn(
-        self, turn_id: str, session_id: str, user_text: str, selected: str
+        self,
+        turn_id: str,
+        session_id: str,
+        user_text: str,
+        selected: str,
+        spoken: bool = False,
     ) -> None:
         started = time.perf_counter()
         collected: list[str] = []
+        # A spoken turn ignores the quality bias and stays on this machine.
+        # Measured in stage 1: routed to Gemini, first audio landed at 1707ms
+        # against 872ms locally — the network hop alone eats the budget.
         decision = self._router.choose(
             user_text,
             selected=selected,
             available=self._usable_models() if self._usable_models else None,
+            spoken=spoken,
         )
         log.info(
             "turn.routed",

@@ -30,6 +30,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("ARIA_DEV", "true")
     # Transport tests must not depend on a running Ollama.
     monkeypatch.setenv("ARIA_WARM_ON_STARTUP", "false")
+    # Nor on the speech models. The lifespan warms both on startup, and the
+    # first Whisper load downloads ~150MB and takes ~33s — which turned an
+    # 11-second suite into minutes of silence.
+    monkeypatch.setenv("ARIA_VOICE_ENABLED", "false")
     get_settings.cache_clear()
     try:
         # TestClient's context manager is what runs the lifespan.

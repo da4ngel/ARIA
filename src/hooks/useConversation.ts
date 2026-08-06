@@ -42,7 +42,7 @@ interface TurnCompletePayload {
 export interface UseConversation {
   turns: Turn[]
   busy: boolean
-  send: (text: string) => Promise<void>
+  send: (text: string, options?: { spoken?: boolean }) => Promise<void>
   cancel: () => Promise<void>
   /** Clear the view and start a new session in the sidecar. */
   newChat: () => Promise<void>
@@ -124,7 +124,7 @@ export function useConversation(connected: boolean): UseConversation {
     })
   }, [])
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, options?: { spoken?: boolean }) => {
     const trimmed = text.trim()
     if (!trimmed) return
 
@@ -138,7 +138,13 @@ export function useConversation(connected: boolean): UseConversation {
     try {
       const started = await window.aria.call<{ turn_id: string; session_id: string }>(
         'chat.send',
-        { text: trimmed, session_id: sessionId.current ?? undefined },
+        {
+          text: trimmed,
+          session_id: sessionId.current ?? undefined,
+          // Marks a turn that arrived by voice, so the sidecar answers it
+          // locally and fast rather than following the Smart bias.
+          spoken: options?.spoken ?? false,
+        },
       )
       activeTurnId.current = started.turn_id
       sessionId.current = started.session_id

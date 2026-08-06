@@ -7,12 +7,19 @@ interface Props {
   disabled: boolean
   onSend: (text: string) => void
   onCancel: () => void
+  /** Push-to-talk, when speech is available. Held, not toggled. */
+  voice?: {
+    listening: boolean
+    transcribing: boolean
+    start: () => void
+    stop: () => void
+  }
 }
 
 const MAX_ROWS = 6
 const LINE_HEIGHT = 21
 
-export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.Element {
+export function ComposerBar({ busy, disabled, onSend, onCancel, voice }: Props): JSX.Element {
   const [value, setValue] = useState('')
   const [focused, setFocused] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
@@ -66,9 +73,54 @@ export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.El
         onKeyDown={onKeyDown}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        placeholder={disabled ? 'Waiting for the brain…' : 'Message Aria…'}
+        placeholder={
+          disabled
+            ? 'Waiting for the brain…'
+            : voice?.listening
+              ? 'Listening…'
+              : voice?.transcribing
+                ? 'Transcribing…'
+                : 'Message Aria…'
+        }
         className="flex-1 resize-none self-center bg-transparent py-1.5 text-small leading-[21px] text-aria-text placeholder:text-aria-faint focus:outline-none disabled:opacity-50"
       />
+
+      {/* Held, not toggled — press and hold, exactly like the keyboard path.
+          `pointerleave` matters: dragging off the button while held would
+          otherwise leave the microphone open with nothing listening for the
+          release. */}
+      {voice && !busy && (
+        <button
+          type="button"
+          aria-label="Hold to talk"
+          title="Hold to talk (Ctrl+Shift+Space)"
+          disabled={disabled}
+          onPointerDown={voice.start}
+          onPointerUp={voice.stop}
+          onPointerLeave={() => voice.listening && voice.stop()}
+          className={`interactive grid h-8 w-8 shrink-0 place-items-center rounded-xl transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+            voice.listening
+              ? 'bg-aria-listening/20 text-aria-listening'
+              : voice.transcribing
+                ? 'text-aria-accent'
+                : 'text-aria-faint hover:text-aria-text'
+          }`}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            aria-hidden
+          >
+            <rect x="5" y="1.6" width="4" height="7" rx="2" />
+            <path d="M2.8 6.6a4.2 4.2 0 0 0 8.4 0M7 10.8v1.6" />
+          </svg>
+        </button>
+      )}
 
       {/* One control in one place. A separate Stop button appearing beside Send
           moves the target mid-turn, exactly when you are reaching for it. */}

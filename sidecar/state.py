@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from sidecar.memory.settings_store import SettingsStore
     from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
+    from sidecar.providers.stt import WhisperSTT
     from sidecar.providers.tts import KokoroTTS
 
 
@@ -44,6 +45,9 @@ class Runtime:
     # Speech. None when voice is off or the weights are missing — she types.
     tts: KokoroTTS | None = None
     tts_warm: asyncio.Task[None] | None = None
+    # Speech recognition. None when voice is off or the model is missing.
+    stt: WhisperSTT | None = None
+    stt_warm: asyncio.Task[None] | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -85,6 +89,8 @@ class Runtime:
         self.availability = None
         self.tts = None
         self.tts_warm = None
+        self.stt = None
+        self.stt_warm = None
 
 
 runtime = Runtime()

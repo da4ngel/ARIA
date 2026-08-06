@@ -112,6 +112,7 @@ async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
         text,
         session_id if isinstance(session_id, str) else None,
         model if isinstance(model, str) else None,
+        spoken=params.get("spoken") is True,
     )
     return started.model_dump()
 
@@ -264,6 +265,45 @@ async def settings_set_key(params: dict[str, Any]) -> dict[str, Any]:
     if runtime.availability is not None:
         runtime.availability.refresh_keys()
     return {"ok": True, "status": status(key).model_dump(mode="json")}
+
+
+@method("voice.transcribe")
+async def voice_transcribe(params: dict[str, Any]) -> dict[str, Any]:
+    """Turn a held-button recording into text.
+
+    Takes base64 int16 PCM from the renderer's microphone capture. Returns the
+    transcript and how long it took, so the per-stage latency the Phase 2 gate
+    asks for is visible rather than buried in one end-to-end number.
+    """
+    import base64
+    import time
+
+    from sidecar.providers.stt import TranscriptionUnavailable
+    from sidecar.state import runtime
+
+    stt = runtime.stt
+    if stt is None or not stt.ready:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Speech recognition is not ready yet. It loads in the background on "
+            "startup; try again in a moment, or type instead.",
+        )
+
+    encoded = params.get("pcm")
+    if not isinstance(encoded, str) or not encoded:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "pcm (base64 int16) is required.")
+    sample_rate = params.get("sample_rate", 16_000)
+
+    started = time.perf_counter()
+    try:
+        text = await stt.transcribe(
+            base64.b64decode(encoded),
+            int(sample_rate) if isinstance(sample_rate, int) else 16_000,
+        )
+    except TranscriptionUnavailable as exc:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, str(exc)) from exc
+
+    return {"text": text, "took_ms": round((time.perf_counter() - started) * 1000, 1)}
 
 
 @method("chat.sessions")
