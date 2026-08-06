@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from sidecar.core.context import PersonaLevel
 from sidecar.providers import catalog
 from sidecar.providers.catalog import ProviderName
 from sidecar.providers.health import HealthTracker
@@ -130,3 +131,38 @@ def test_persona_for_unknown_model_is_the_safe_minimal_prompt() -> None:
     from sidecar.core.context import PersonaLevel
 
     assert catalog.persona_for("no-such-model") is PersonaLevel.MINIMAL
+
+
+# ── temperature ───────────────────────────────────────────────────────
+
+# GPT-5 and the other reasoning models accept only the default temperature and
+# return HTTP 400 for anything else. `openai.py` forwards whatever it is given,
+# so a well-meaning "let's make it more factual" edit here would break every
+# turn on those models — with a 400, not an obvious validation error.
+REASONING_MODELS = ("gpt-5", "gpt-5-mini", "gemini-3.1-pro-preview")
+
+
+@pytest.mark.parametrize("model_id", REASONING_MODELS)
+def test_reasoning_models_carry_no_temperature(model_id: str) -> None:
+    assert catalog.require(model_id).temperature is None
+
+
+def test_temperatures_are_in_range() -> None:
+    for info in catalog.CATALOG:
+        if info.temperature is not None:
+            assert 0.0 <= info.temperature <= 2.0, info.id
+
+
+def test_temperature_defaults_to_none() -> None:
+    """None means "send nothing and let the provider decide" — the only safe
+    default, since every vendor disagrees about the valid range."""
+    probe = catalog.ModelInfo(
+        id="probe",
+        provider=ProviderName.OPENAI,
+        label="Probe",
+        klass=catalog.ModelClass.FAST,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.LOW,
+        best_for="test",
+    )
+    assert probe.temperature is None

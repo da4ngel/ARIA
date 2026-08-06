@@ -209,16 +209,19 @@ def test_everything_tripped_still_returns_a_model(health: HealthTracker) -> None
 # ── local preference ──────────────────────────────────────────────────
 
 
-def test_prefers_the_7b_when_it_is_pulled(health: HealthTracker) -> None:
+def test_prefers_the_default_local_model_when_it_is_pulled(health: HealthTracker) -> None:
     decision = router(health, RoutingBias.FASTEST).choose("hi", available=ALL_MODELS)
     assert decision.model.id == catalog.PREFERRED_LOCAL
 
 
-def test_falls_back_to_the_4b_when_the_7b_is_not_pulled(health: HealthTracker) -> None:
-    """The 7B is a 4.7GB download that may not have finished."""
+def test_falls_back_to_another_local_model_when_the_default_is_not_pulled(
+    health: HealthTracker,
+) -> None:
+    """Local models are multi-GB downloads that may not have finished."""
     available = ALL_MODELS - {catalog.PREFERRED_LOCAL}
     decision = router(health, RoutingBias.FASTEST).choose("hi", available=available)
-    assert decision.model.id == "qwen3.5:4b"
+    assert decision.model.local
+    assert decision.model.id != catalog.PREFERRED_LOCAL
 
 
 # ── signal helpers ────────────────────────────────────────────────────

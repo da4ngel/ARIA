@@ -109,6 +109,9 @@ class ConversationService:
         self._registry = ProviderRegistry(
             providers=providers or {str(catalog.ProviderName.OLLAMA): provider}
         )
+        # Which local model Ollama currently holds in VRAM, so switching models
+        # can evict the old one first (see `_free_vram_for`).
+        self._resident_local: str | None = model if catalog.get(model) else None
         # Roll-up notes are per-session and rebuilt on demand; not yet durable.
         # Phase 5 moves this into `episodes` where it belongs.
         self._summaries: dict[str, str] = {}
@@ -273,12 +276,16 @@ class ConversationService:
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms."""
         provider = self._registry.for_model(info)
+        await self._free_vram_for(info)
         first_token_ms: float | None = None
 
         async for delta in provider.stream_chat(
             messages,
             model=info.id,
-            options=GenerationOptions(num_ctx=min(self._num_ctx, info.context_tokens)),
+            options=GenerationOptions(
+                num_ctx=min(self._num_ctx, info.context_tokens),
+                temperature=info.temperature,
+            ),
         ):
             if delta.text:
                 if first_token_ms is None:
@@ -297,6 +304,29 @@ class ConversationService:
             if delta.done:
                 break
         return first_token_ms
+
+    async def _free_vram_for(self, info: ModelInfo) -> None:
+        """Evict the previous local model before loading a different one.
+
+        CLAUDE.md rule 2: one model on the GPU. Ollama holds a model for
+        `keep_alive=30m`, so switching local models in the picker would ask a
+        6GB card to hold both — measured, that stalls generation for minutes
+        rather than failing, which the user experiences as a hang.
+        """
+        if not info.local or info.id == self._resident_local:
+            return
+
+        previous = self._resident_local
+        self._resident_local = info.id
+        if previous is None:
+            return
+
+        provider = self._registry.providers.get(str(catalog.ProviderName.OLLAMA))
+        unload = getattr(provider, "unload", None)
+        if unload is None:
+            return
+        log.info("model.switch", was=previous, now=info.id)
+        await unload(previous)
 
     async def _finish(
         self,

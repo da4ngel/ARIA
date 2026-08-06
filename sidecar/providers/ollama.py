@@ -101,6 +101,30 @@ class OllamaProvider:
         log.info("ollama.warmed", model=model, took_ms=round(took_ms, 1))
         return took_ms
 
+    async def unload(self, model: str) -> None:
+        """Evict `model` from VRAM now, instead of after `keep_alive`.
+
+        CLAUDE.md rule 2: one model on the GPU, 6GB ceiling. `keep_alive=30m`
+        means a model the user switched away from stays resident for half an
+        hour, so selecting the 7B (4.7GB) after the 4B (3.2GB) asks a 6GB card
+        to hold both. Measured, that does not fail cleanly — generation slows to
+        a stall for minutes as Ollama thrashes, which reads as a hang.
+
+        Best-effort: failing to unload is not worth breaking a turn over, and
+        the next request will still work, only slowly.
+        """
+        try:
+            response = await self._client.post(
+                "/api/chat",
+                json={"model": model, "messages": [], "keep_alive": 0},
+                timeout=CONNECT_TIMEOUT_S,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("ollama.unload_failed", model=model, error=str(exc))
+            return
+        log.info("ollama.unloaded", model=model)
+
     async def stream_chat(
         self,
         messages: list[ChatMessage],

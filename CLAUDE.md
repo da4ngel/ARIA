@@ -37,28 +37,77 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 Phase 1.5 complete (multi-provider routing, model control, quality fix).
 Next: Phase 2 — Voice. Update this line when a phase's acceptance gate passes.
 
-## Phase 1.5 outcomes (2026-08-06)
-Run `python scripts/eval_quality.py` before and after any prompt or model change.
-41 probes, mechanically scored. Baseline after this phase: **qwen2.5:7b 40/41,
-qwen3.5:4b 41/41**, both clean of `<think>` leakage and invented context.
+## Measuring answer quality
+Two suites, both mechanical — no model grades another model.
 
-- **`qwen2.5:7b` is the local default**, at `PersonaLevel.MINIMAL`. Measured over
-  8 runs: under `FULL` it invented a breakfast *every time* it was asked what the
-  user ate ("Oatmeal.", "Bagel with cream cheese."); under `MINIMAL` it declined
-  every time. Character is not worth a model that fabricates. Do not raise this
-  without re-running `--category honesty` several times.
+    python scripts/eval_quality.py                     # both suites, local models
+    python scripts/eval_quality.py --suite hallucination --all-models
+    python scripts/soak_conversation.py                # 30-turn contamination soak
+
+Run them before and after any prompt, persona or model change.
+
+**Always read `fabricated` and `over-refused` together.** A model that invents
+nothing because it refuses everything has been broken, not fixed. The `grounded`
+category is the control group and must stay at 100%.
+
+### Measured baseline (2026-08-06, 117 probes)
+
+| model | fabricated | quality | TTFT |
+|---|---|---|---|
+| `qwen3.5:4b` (local default) | **5%** | 40/41 | 560ms |
+| `qwen2.5:7b` | 27% | 41/41 | 325ms |
+| `gpt-4.1-mini` | 3% | — | 866ms |
+| `gpt-4o` | 5% | — | 822ms |
+| `gpt-5` | 0% | — | 7116ms |
+
+- **`qwen3.5:4b` is the local default**, chosen on honesty. The 7B is faster and
+  one probe better at exact formatting, but it describes things that do not
+  exist as though they were real — a fake npm package, a fake git flag, an
+  invented ISBN and git SHA. Both clear the 700ms gate, so speed bought nothing
+  the gate values. Revert by changing `PREFERRED_LOCAL` in `providers/catalog.py`.
+- **Persona is per model and `MINIMAL` is not a downgrade.** Over 8 runs, `FULL`
+  made `qwen2.5:7b` invent a breakfast *every time*; `MINIMAL` declined every
+  time. Do not raise a model's level without re-running `--category honesty`
+  several times.
+- **The prompt is the only lever that worked.** Adding the "you have no tools /
+  you know nothing beyond this conversation / never state an identifier you
+  cannot verify" block to `core/context.py` took the 7B from 57% fabrication to
+  27%, and false-capability from 30% to 90%.
+- **Temperature does nothing for hallucination.** Swept 0.0 / 0.3 / 0.8: the 7B
+  scored 57 / 57 / 54%, the 4B 16 / 30 / 16%. Flat within noise. `ModelInfo`
+  carries the field, unset. Do not re-litigate this without new evidence.
+- **Never set `temperature` on a reasoning model.** GPT-5, GPT-5 mini and the
+  Gemini Pro preview reject any value but their default, and `openai.py`
+  forwards whatever it is given. `test_catalog.py` guards this.
+- **The 30-turn soak is clean.** The Phase 1 failure — an invented rotting roof
+  referenced for 25 turns — does not reproduce on either local model.
 - **Ollama's `qwen2.5:7b` tag already is 7.6B/Q4_K_M.** The catalog previously
   said `qwen2.5:7b-instruct-q4_K_M`, which `ollama list` never reports, so the
   model was greyed out as "not pulled" while sitting on disk.
-- **The 4B is slower than the 7B** — 591ms vs 356ms median TTFT — because it is a
-  reasoning model and pays for that even with `think=false`. It saves VRAM, not
-  time. Same trap as `gpt-5-mini`.
+- **Switching local models evicts the old one first** (`OllamaProvider.unload`).
+  `keep_alive=30m` plus a 6GB card means two models do not fit; measured, that
+  does not fail cleanly, it stalls generation for minutes and reads as a hang.
 - **Smart-mode bias is a persisted setting**, not a constant: `fastest`,
   `balanced`, `quality` (default). Phase 2 should flip it to `fastest` rather
   than editing the router, which rule 10 freezes.
 - `send()` with no `session_id` continues the latest session. It used to mint a
   new one per call, so any client that forgot to echo the id back lost all
   context one turn at a time. `chat.new` is the only way to start fresh.
+
+### Writing probes: the checks lie before the model does
+Most "failures" in the first passes were bugs in the checker, not the model.
+Verify a new check against known-good *and* known-bad strings before believing
+a score. Ones that actually bit:
+- GPT-5 writes `don’t` with U+2019. Every `don'?t` pattern missed it and scored
+  a perfect refusal as a fabrication — 78% vs the real 0%. `probes.normalise()`
+  now folds punctuation before matching.
+- Correcting a false premise requires negation, so premise probes read as
+  refusals. They have their own `Expect.CORRECTION` and are excluded from the
+  over-refusal metric.
+- Reasoning tokens count against `max_tokens`, so GPT-5 returned empty strings
+  and scored them as inventions.
+- OpenAI's quota error does not contain the string "429"; detect rate limiting
+  on `ProviderRateLimited`, not on message text.
 
 ## Open issue from Phase 1: TTFT scales with conversation length
 The gate ("first token < 700ms, warm model, **short prompt**") passes at

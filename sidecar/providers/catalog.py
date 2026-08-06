@@ -67,6 +67,11 @@ class ModelInfo(BaseModel):
     caveat: str | None = None
     local: bool = False
     context_tokens: int = 8192
+    # Sampling temperature, opt-in per model. `None` means "send nothing and let
+    # the provider default apply" — which is required, not merely tidy: GPT-5
+    # and the other reasoning models reject any value but 1.0, and `openai.py`
+    # forwards whatever it is given. Set this only where it was measured.
+    temperature: float | None = None
 
 
 SMART_ID = "smart"
@@ -89,10 +94,15 @@ CATALOG: list[ModelInfo] = [
         persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
         best_for=(
-            "Everyday conversation and quick tasks, entirely on this machine. "
-            "Instruction-tuned, so it follows explicit formats reliably."
+            "The fastest model here, and the best local one at following an "
+            "exact format. Good when you know what you are asking for."
         ),
-        ttft_ms_seed=356,
+        ttft_ms_seed=325,
+        caveat=(
+            "Invents answers about things that do not exist — it described a "
+            "fake npm package and a fake git flag as though both were real. "
+            "Prefer the 4B for anything you cannot check yourself."
+        ),
         local=True,
     ),
     ModelInfo(
@@ -104,16 +114,14 @@ CATALOG: list[ModelInfo] = [
         # inventing context. It gets the stripped prompt.
         persona=PersonaLevel.MINIMAL,
         cost=Cost.FREE,
-        best_for="Lowest VRAM of any model here. Useful if the 7B will not fit.",
-        # 591ms median over the battery, against 356ms for the 7B. The 4B is a
-        # reasoning model and pays for that even with think=false, so it is
-        # slower *and* weaker than the larger model — the same trap as
-        # gpt-5-mini below.
-        ttft_ms_seed=591,
-        caveat=(
-            "Slower than the 7B despite being smaller, and follows detailed "
-            "instructions less reliably. It saves VRAM, not time."
+        best_for=(
+            "The default. By far the most honest local model — it says it does "
+            "not know instead of inventing an answer, and needs the least VRAM."
         ),
+        # Slower than the 7B despite being smaller: it is a reasoning model and
+        # pays for that even with think=false. Still inside the 700ms gate.
+        ttft_ms_seed=560,
+        caveat="Slower than the 7B, and slightly weaker at exact formatting.",
         local=True,
     ),
     # ── Gemini ───────────────────────────────────────────────────────
@@ -241,7 +249,14 @@ def local_models() -> list[ModelInfo]:
     return [m for m in CATALOG if m.local]
 
 
-PREFERRED_LOCAL = "qwen2.5:7b"
+# Measured, `eval_quality.py --suite hallucination`: the 4B fabricates on 5% of
+# unanswerable probes against the 7B's 27%, and both clear the 700ms Phase 1
+# gate (560ms vs 325ms). Honesty was the deciding axis, so the smaller model
+# wins the default despite being slower and one probe weaker on instructions.
+#
+# Phase 2 may want this back: voice budgets ~1000ms end-to-end, and 235ms is a
+# meaningful share of it. Reverting is this one constant.
+PREFERRED_LOCAL = "qwen3.5:4b"
 
 
 def default_local(pulled: Iterable[str] | None = None) -> ModelInfo:
