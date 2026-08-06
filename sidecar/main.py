@@ -296,7 +296,6 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
         mode=mode,
         barge_in=settings.barge_in_enabled,
         armed_window_s=settings.armed_window_s,
-        follow_up_window_s=settings.follow_up_window_s,
     )
     runtime.listener = listener
 

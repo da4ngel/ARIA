@@ -19,6 +19,7 @@ from sidecar.core.listener import (
     Listener,
     ListenerState,
     WakeMode,
+    is_stop_word,
     starts_with_wake_phrase,
     strip_wake_word,
 )
@@ -150,7 +151,6 @@ def build(mode: WakeMode, text: str = "aria what time is it", windows: float = 3
         # Long by default so a test never races the window shut; the one test
         # that cares about expiry passes a short one.
         armed_window_s=windows,
-        follow_up_window_s=windows,
     )
     _BUILT.append(listener)
     return listener, wake, vad, stt, conversation, bus
@@ -252,8 +252,7 @@ async def test_a_full_utterance_becomes_a_spoken_turn(parts) -> None:
 
     await drain(listener)
     assert conversation.sent == [("what time is it", True)]
-    # Not WAITING: a conversation stays open for a follow-up.
-    assert listener.state is ListenerState.OPEN
+    assert listener.state is ListenerState.WAITING
 
 
 async def test_a_cough_is_not_a_turn(parts) -> None:
@@ -306,26 +305,28 @@ async def test_waiting_never_endpoints_on_its_own(parts) -> None:
 # ── barge-in ──────────────────────────────────────────────────────────
 
 
-async def test_talking_over_her_stops_the_audio_and_the_turn(parts) -> None:
+async def test_talking_over_her_ducks_before_it_decides(parts) -> None:
+    """It cannot stop her yet: whether this is an interruption depends on what
+    was said, which is a transcription away."""
     listener, _wake, vad, _stt, conversation, bus = parts
     await listener.enable()
-    await bus.set_state(AssistantState.SPEAKING)
+    listener.set_playing(True)
 
     vad.speech = True
     for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
         await listener.feed(frame(FRAME_SAMPLES))
 
     assert listener.state is ListenerState.CAPTURING
-    assert conversation.cancelled == 1
-    stops = bus.of(Event.AUDIO_STOP)
-    assert stops and stops[0]["reason"] == "barge_in"
+    assert bus.of(Event.AUDIO_DUCK), "volume must drop immediately"
+    assert not bus.of(Event.AUDIO_STOP), "and nothing may stop yet"
+    assert conversation.cancelled == 0
 
 
 async def test_a_single_frame_of_noise_does_not_interrupt_her(parts) -> None:
     """One frame is a cough or her own voice leaking past echo cancellation."""
     listener, _wake, vad, _stt, conversation, bus = parts
     await listener.enable()
-    await bus.set_state(AssistantState.SPEAKING)
+    listener.set_playing(True)
 
     vad.speech = True
     await listener.feed(frame(FRAME_SAMPLES))
@@ -333,6 +334,7 @@ async def test_a_single_frame_of_noise_does_not_interrupt_her(parts) -> None:
     await listener.feed(frame(FRAME_SAMPLES))
 
     assert listener.state is ListenerState.WAITING
+    assert not bus.of(Event.AUDIO_DUCK)
     assert conversation.cancelled == 0
 
 
@@ -340,7 +342,7 @@ async def test_barge_in_can_be_turned_off(parts) -> None:
     listener, _wake, vad, _stt, conversation, bus = parts
     listener.barge_in_enabled = False
     await listener.enable()
-    await bus.set_state(AssistantState.SPEAKING)
+    listener.set_playing(True)
 
     vad.speech = True
     for _ in range(20):
@@ -577,22 +579,23 @@ async def test_the_question_after_her_name_needs_no_name(phrase) -> None:
     assert conversation.sent == [("what is the capital of Australia", True)]
 
 
-async def test_a_follow_up_needs_no_name_either(phrase) -> None:
-    """"I want it to be a proper conversation" — this is that."""
+async def test_a_follow_up_still_needs_her_name(phrase) -> None:
+    """The opposite of what this file asserted an hour ago, on purpose.
+
+    A 12s window once let any speech through after an answer, which is how she
+    ends up answering a sentence meant for someone else in the room.
+    """
     listener, _wake, vad, stt, conversation, _bus = phrase
     await listener.enable()
 
     stt.text = "aria what is the capital of Australia"
     await speak(listener, vad)
-    assert listener.state is ListenerState.OPEN
+    assert listener.state is ListenerState.WAITING
 
     stt.text = "and how many people live there"
     await speak(listener, vad)
 
-    assert conversation.sent == [
-        ("what is the capital of Australia", True),
-        ("and how many people live there", True),
-    ]
+    assert conversation.sent == [("what is the capital of Australia", True)]
 
 
 async def test_one_breath_still_works(phrase) -> None:
@@ -635,3 +638,95 @@ async def test_a_miss_is_shown_rather_than_swallowed(phrase) -> None:
     assert conversation.sent == []
     misheard = bus.of(Event.MISHEARD)
     assert misheard and misheard[0]["text"] == "so then he said he would be late"
+
+
+# ── interrupting her ──────────────────────────────────────────────────
+# The guard on all of this used to read `AssistantState.SPEAKING`, which
+# nothing in the sidecar ever set. The branch was unreachable, so saying
+# "stop" over her did nothing at all — zero barge-in events across the whole
+# log. `set_playing` is what makes any of it happen.
+
+
+@pytest.mark.parametrize("word", ["stop", "Stop.", "wait", "never mind", "SHUT UP", "quiet"])
+def test_stop_words_are_recognised(word: str) -> None:
+    assert is_stop_word(word)
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["stop by the shop later", "wait until Tuesday", "I need quiet to think", "stopping now"],
+)
+def test_a_sentence_containing_one_is_not_an_interruption(said: str) -> None:
+    """Matched whole, never as a prefix."""
+    assert not is_stop_word(said)
+
+
+async def interrupt(listener: Listener, vad: ScriptedVAD, heard: str, stt: ScriptedSTT) -> None:
+    """Talk over her, long enough to trip the sustained-speech guard."""
+    stt.text = heard
+    listener.set_playing(True)
+    await speak(listener, vad, frames_of_speech=12)
+
+
+async def test_stop_cuts_her_off_and_asks_nothing(phrase) -> None:
+    listener, _wake, vad, stt, conversation, bus = phrase
+    await listener.enable()
+
+    await interrupt(listener, vad, "Stop.", stt)
+
+    assert bus.of(Event.AUDIO_DUCK), "it drops the volume first"
+    assert bus.of(Event.AUDIO_STOP), "then stops once it knows"
+    assert conversation.cancelled == 1
+    assert conversation.sent == [], '"stop" is not a question'
+
+
+async def test_her_name_over_her_stops_her_and_listens(phrase) -> None:
+    listener, _wake, vad, stt, conversation, bus = phrase
+    await listener.enable()
+
+    await interrupt(listener, vad, "Aria, what about Sydney?", stt)
+
+    assert bus.of(Event.AUDIO_STOP)
+    assert conversation.cancelled == 1
+    assert conversation.sent == [("what about Sydney?", True)]
+
+
+async def test_anything_else_lets_her_carry_on(phrase) -> None:
+    """A cough, someone else in the room, or her own voice through the
+    speakers. The volume dips and comes back; the sentence is not lost."""
+    listener, _wake, vad, stt, conversation, bus = phrase
+    await listener.enable()
+
+    await interrupt(listener, vad, "mm, right, yeah", stt)
+
+    assert bus.of(Event.AUDIO_DUCK)
+    assert bus.of(Event.AUDIO_RESUME), "it must come back"
+    assert not bus.of(Event.AUDIO_STOP)
+    assert conversation.cancelled == 0
+    assert conversation.sent == []
+
+
+async def test_a_stop_word_when_she_is_quiet_does_nothing(phrase) -> None:
+    """Otherwise "stop" said to someone else in the room is a command to her."""
+    listener, _wake, vad, stt, conversation, bus = phrase
+    stt.text = "Stop."
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    assert conversation.cancelled == 0
+    assert conversation.sent == []
+    assert not bus.of(Event.AUDIO_STOP)
+
+
+async def test_playing_is_reported_not_guessed(phrase) -> None:
+    """The bug this whole section exists for: the guard read a state that
+    nothing ever wrote."""
+    listener, _wake, vad, _stt, _conversation, bus = phrase
+    await listener.enable()
+
+    # Same speech, the only difference being whether audio is playing.
+    vad.speech = True
+    for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
+        await listener.feed(frame(FRAME_SAMPLES))
+    assert not bus.of(Event.AUDIO_DUCK)

@@ -387,6 +387,22 @@ async def voice_frame(params: dict[str, Any]) -> None:
     return None
 
 
+@method("voice.playing")
+async def voice_playing(params: dict[str, Any]) -> None:
+    """The renderer reporting whether sound is coming out of the speakers.
+
+    A notification, and transitions only. The sidecar cannot work this out for
+    itself — generation finishing is not playback finishing, and the gap
+    between them is precisely when someone talks over her.
+    """
+    from sidecar.state import runtime
+
+    listener = runtime.listener
+    if listener is not None:
+        listener.set_playing(params.get("playing") is True)
+    return None
+
+
 @method("chat.sessions")
 async def chat_sessions(params: dict[str, Any]) -> dict[str, Any]:
     """Past conversations for the history panel, most recently active first.

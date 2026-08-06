@@ -39,11 +39,14 @@ Case = tuple[str, bool, str]
 # that what happened a moment ago changes what should happen next.
 SCRIPT: list[Case] = [
     ("Aria.", False, "her name alone: arms her, no turn yet"),
-    ("What is the capital of Australia?", True, "the question, no name"),
-    ("And how many people live there?", True, "follow-up, no name"),
-    ("So then he said he would be late again.", True, "still inside the window"),
+    ("What is the capital of Australia?", True, "the question, no name needed"),
+    # These three asserted the opposite an hour ago, when a 12s window let any
+    # speech through after an answer. Flipped rather than deleted: the old
+    # behaviour was wrong and the record should show it.
+    ("And how many people live there?", False, "follow-up now needs her name"),
+    ("So then he said he would be late again.", False, "room speech, never hers"),
     ("Aria, what time is it?", True, "one breath, must not regress"),
-    ("Tell me about the aria project.", True, "inside the follow-up window"),
+    ("Tell me about the aria project.", False, "name mid-sentence is not a wake"),
 ]
 
 # Said cold, with the windows shut. None of these may produce a turn.
@@ -62,6 +65,12 @@ class Bus(EventBus):
 
     async def broadcast(self, method: Event | str, params: dict) -> None:
         self.seen.append(str(method))
+
+    def saw(self, event: Event) -> bool:
+        return str(event) in self.seen
+
+    def forget(self) -> None:
+        self.seen.clear()
 
 
 class Conv:
@@ -127,6 +136,55 @@ async def run(
     return right, len(cases)
 
 
+# (spoken over her, must cut her off, must produce a turn, note)
+Interrupt = tuple[str, bool, bool, str]
+
+INTERRUPTS: list[Interrupt] = [
+    ("Stop.", True, False, "stops her, and asks nothing"),
+    ("Wait.", True, False, "same"),
+    ("Aria, what about Sydney?", True, True, "her name cuts in and asks"),
+    ("Mm, right, yeah.", False, False, "not for her — dips and resumes"),
+    ("So anyway I told him it was fine.", False, False, "someone else in the room"),
+]
+
+
+async def run_interrupts(tts: KokoroTTS, stt: WhisperSTT, vad: SileroVAD) -> tuple[int, int]:
+    """Talk over her and see what happens.
+
+    This is the part that was unreachable: the guard read a state nothing ever
+    wrote, so every one of these did nothing at all.
+    """
+    print("\ninterrupting her while she is speaking")
+    print("-" * 72)
+    conv = Conv()
+    bus = Bus()
+    listener = Listener(vad=vad, stt=stt, conversation=conv, bus=bus, mode=WakeMode.PHRASE)
+    await listener.enable()
+
+    right = 0
+    for phrase, want_stop, want_turn, note in INTERRUPTS:
+        bus.forget()
+        before = len(conv.sent)
+        listener.set_playing(True)
+        await utter(listener, await say(tts, phrase))
+        listener.set_playing(False)
+
+        ducked = bus.saw(Event.AUDIO_DUCK)
+        stopped = bus.saw(Event.AUDIO_STOP)
+        resumed = bus.saw(Event.AUDIO_RESUME)
+        turned = len(conv.sent) > before
+        # Ducking is unconditional on sustained speech; what follows is the
+        # decision, and it must be exactly one of stop or resume.
+        ok = ducked and stopped == want_stop and resumed != want_stop and turned == want_turn
+        right += ok
+        outcome = "stopped" if stopped else ("resumed" if resumed else "nothing")
+        print(f"  {'ok ' if ok else 'BAD'} duck={ducked!s:5} {outcome:8} turn={turned!s:5} {note}")
+        print(f"      said {phrase!r} over her")
+
+    await listener.aclose()
+    return right, len(INTERRUPTS)
+
+
 async def main() -> int:
     tts = KokoroTTS(MODELS)
     await tts.start()
@@ -137,11 +195,12 @@ async def main() -> int:
 
     a = await run("a conversation, in order", SCRIPT, False, tts, stt, vad)
     b = await run("cold, windows shut — none of these may answer", COLD, True, tts, stt, vad)
+    c = await run_interrupts(tts, stt, vad)
 
     await tts.aclose()
     await stt.aclose()
 
-    right, total = a[0] + b[0], a[1] + b[1]
+    right, total = a[0] + b[0] + c[0], a[1] + b[1] + c[1]
     print("\n" + "=" * 72)
     print(f"correct: {right}/{total}  ({right / total:.0%})")
     print("baseline before this change: 12/80 utterances answered (15%)")

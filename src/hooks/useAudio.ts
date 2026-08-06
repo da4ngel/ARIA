@@ -27,6 +27,11 @@ interface AudioChunk {
  *  rather than racing it, which would clip the first few milliseconds. */
 const SCHEDULE_LEAD_S = 0.02
 
+/** How far playback drops while the sidecar works out whether the speech over
+ *  her was an interruption. Quiet enough to talk across, loud enough that a
+ *  false alarm reads as a dip rather than a dropout. */
+const DUCKED_GAIN = 0.2
+
 function decodePcm16(base64: string): Float32Array<ArrayBuffer> {
   const binary = atob(base64)
   const view = new DataView(new ArrayBuffer(binary.length))
@@ -60,12 +65,35 @@ export function useAudio(): UseAudio {
   const [speaking, setSpeaking] = useState(false)
   const context = useRef<AudioContext | null>(null)
   const analyser = useRef<AnalyserNode | null>(null)
+  // Everything plays through this, so ducking is one ramp rather than a walk
+  // over live source nodes.
+  const volume = useRef<GainNode | null>(null)
   const scratch = useRef<Uint8Array<ArrayBuffer> | null>(null)
   const sources = useRef<AudioBufferSourceNode[]>([])
   const playHead = useRef(0)
+  const announced = useRef(false)
   const nextIndex = useRef(0)
   const pending = useRef<Map<number, AudioChunk>>(new Map())
   const activeTurn = useRef<string | null>(null)
+
+  /** Tell the sidecar whether sound is coming out. It has no other way to
+   *  know: generation finishing is not playback finishing, and the gap between
+   *  them is exactly when someone interrupts. */
+  const announce = useCallback((playing: boolean) => {
+    if (playing === announced.current) return
+    announced.current = playing
+    window.aria.notify('voice.playing', { playing })
+  }, [])
+
+  const setGain = useCallback((value: number, seconds = 0.08) => {
+    const ctx = context.current
+    const gain = volume.current
+    if (!ctx || !gain) return
+    gain.gain.cancelScheduledValues(ctx.currentTime)
+    gain.gain.setValueAtTime(gain.gain.value, ctx.currentTime)
+    // Ramped, not switched: an instant gain change is an audible click.
+    gain.gain.linearRampToValueAtTime(value, ctx.currentTime + seconds)
+  }, [])
 
   const stop = useCallback(() => {
     for (const source of sources.current) {
@@ -80,8 +108,10 @@ export function useAudio(): UseAudio {
     nextIndex.current = 0
     playHead.current = 0
     activeTurn.current = null
+    setGain(1, 0.01)
+    announce(false)
     setSpeaking(false)
-  }, [])
+  }, [announce, setGain])
 
   const play = useCallback((chunk: AudioChunk) => {
     context.current ??= new AudioContext()
@@ -91,10 +121,14 @@ export function useAudio(): UseAudio {
     // One analyser for the whole graph, between every source and the speakers.
     // 512 bins is plenty for an envelope — this is not a spectrum display.
     if (!analyser.current) {
+      const gain = ctx.createGain()
+      gain.connect(ctx.destination)
+      volume.current = gain
+
       const node = ctx.createAnalyser()
       node.fftSize = 512
       node.smoothingTimeConstant = 0.7
-      node.connect(ctx.destination)
+      node.connect(gain)
       analyser.current = node
       scratch.current = new Uint8Array(new ArrayBuffer(node.frequencyBinCount))
     }
@@ -112,17 +146,33 @@ export function useAudio(): UseAudio {
     playHead.current = startAt + buffer.duration
 
     sources.current.push(source)
+    announce(true)
     setSpeaking(true)
     source.onended = () => {
       sources.current = sources.current.filter((s) => s !== source)
-      if (sources.current.length === 0) setSpeaking(false)
+      if (sources.current.length === 0) {
+        announce(false)
+        setSpeaking(false)
+      }
     }
-  }, [])
+  }, [announce])
 
   useEffect(() => {
     return window.aria.onEvent((event: SidecarEvent) => {
       if (event.method === 'audio.stop') {
         stop()
+        return
+      }
+
+      // Someone started talking over her. Drop the volume now; whether it was
+      // really an interruption is not known until the sidecar has transcribed
+      // what they said, which is over a second away.
+      if (event.method === 'audio.duck') {
+        setGain(DUCKED_GAIN)
+        return
+      }
+      if (event.method === 'audio.resume') {
+        setGain(1)
         return
       }
       if (event.method !== 'audio.out') return
@@ -145,7 +195,7 @@ export function useAudio(): UseAudio {
         if (next) play(next)
       }
     })
-  }, [play, stop])
+  }, [play, stop, setGain])
 
   useEffect(() => {
     return () => {

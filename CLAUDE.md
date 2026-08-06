@@ -228,10 +228,13 @@ empty. The cause was structural, not tuning: everyone says the name, waits to
 be acknowledged, then asks — and that is two utterances, of which the first
 strips to `""` and the second does not name her.
 
-- **`ListenerState` gained `ARMED` and `OPEN`.** Called by name → armed for
-  10s, any speech is the question. After she answers → open for 12s, follow-ups
-  need no name. Both are cancellable timers falling back to `WAITING`, because
-  a window that never shuts is a microphone answering the room.
+- **`ListenerState` gained `ARMED`.** Called by name → armed for 10s, any
+  speech is the question. A cancellable timer falling back to `WAITING`,
+  because a window that never shuts is a microphone answering the room.
+- **A follow-up window briefly existed and was removed.** For 12s after an
+  answer any speech became a turn, which is how she ends up answering a
+  sentence meant for someone else. **Every turn needs her name.** The gate
+  cases were flipped rather than deleted, so the record shows it.
 - **The one-breath form still works** and is in the gate so it cannot regress.
 - **Name matching is fuzzy on the first word** (`difflib`, ≤1 edit) because
   `base.en` on a single short word is unreliable. **The first letter must
@@ -246,6 +249,34 @@ strips to `""` and the second does not name her.
   at.
 - Windows are constructor arguments, not constants, so tests use 50ms instead
   of sleeping ten seconds.
+
+### Interrupting her, and the bug I reported as passing
+**Barge-in never worked.** `AssistantState.SPEAKING` was read exactly once —
+the barge-in guard — and **written nowhere in the sidecar**, so the branch was
+unreachable. Zero `listener.barge_in` events across the whole log while Eyaas
+said "Stop." over her four times.
+
+`gate_wakeword.py` reported it passing because the script itself called
+`set_state(SPEAKING)`. **A gate that supplies the precondition the product
+never supplies is testing the mechanism, not the feature.** Check what writes
+the state, not only what reads it.
+
+- **The renderer reports playback** over `voice.playing`, on transitions. It is
+  the only thing that knows, including for the tail still playing after
+  generation ends — which is exactly when someone interrupts. `Listener` keeps
+  its own `_playing` flag rather than overloading `AssistantState`, so the
+  listener and the UI stop competing for one field.
+- **Duck first, decide after.** Confirming "stop" needs a whole utterance plus
+  a transcription — over a second, all of it with her still talking. Sustained
+  speech drops playback to 20% immediately (`audio.duck`); the transcript then
+  either stops her or resumes. A false alarm costs a dip that comes back rather
+  than a lost sentence, and ducking makes the microphone hear the speaker
+  better while it decides.
+- **Only her name or a stop word cuts her off**, chosen over "any speech"
+  because her own voice reaches the microphone through the speakers. Stop words
+  match the *whole* utterance, so "stop by the shop later" is a sentence.
+- A bare stop word sends **no turn** — "stop" is not a question. Her name arms
+  her; her name plus a question answers it.
 
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.

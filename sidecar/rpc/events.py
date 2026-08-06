@@ -61,6 +61,12 @@ class Event(StrEnum):
     # her. Surfaced rather than swallowed: 64 silent drops in one session were
     # indistinguishable from an app that had stopped working.
     MISHEARD = "misheard"
+    # Someone started talking over her. Playback drops but does not stop,
+    # because whether it was an interruption is not known until the utterance
+    # has been transcribed — over a second later, all of it with her talking.
+    AUDIO_DUCK = "audio.duck"
+    # It was not an interruption after all. Back to full volume.
+    AUDIO_RESUME = "audio.resume"
 
 
 class Sender(Protocol):

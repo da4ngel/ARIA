@@ -5,18 +5,20 @@ about them is made here**, in the sidecar, per CLAUDE.md rule 1. The renderer
 never decides that a wake word fired or that a sentence ended — it forwards
 audio and renders what it is told.
 
-    waiting  --"aria"-->  armed  --any speech-->  capturing  --> turn
-       ^                    |  10s quiet                 |
-       |                    v                            v
-       +-----------------  waiting  <--12s quiet--  open  --any speech--> ...
+    waiting  --"aria"-->  armed  --any speech-->  capturing  --> turn --+
+       ^                    |  10s quiet                                 |
+       +--------------------+---------------------------------------------+
 
 **Saying her name arms her; the question is a separate sentence.** The first
 build required both in one continuous breath, and measured over a real session
 it answered 12 of 80 utterances — everything else was dropped for not naming
 her, including every "Aria" said on its own and every question that followed
-one. `ARMED` and `OPEN` are windows in which the name is not required: the
-first because she has just been called, the second because a conversation does
-not restate your name before every sentence.
+one. `ARMED` is the window in which the name is not required, because she has
+just been called.
+
+**Every turn needs the name.** A follow-up window briefly did not: for 12s
+after an answer, any speech became a turn. That is how she ends up answering a
+sentence meant for someone else, so it was removed.
 
 **She answers to her own name, decided from the transcript** (`WakeMode.PHRASE`,
 the default). openWakeWord ships six pretrained phrases and "aria" is not among
@@ -92,16 +94,40 @@ PREROLL_MS = 600.0
 # still covers the run-up.
 SPEECH_ONSET_MS = 96.0
 
-# How long she waits to be asked after her name, and how long a conversation
-# stays open for follow-ups afterwards.
+# How long she waits to be asked after being called by name.
 #
-# Both exist because saying a name and then talking is how every voice
-# assistant has trained people to behave, and requiring one continuous breath
-# instead threw away 64 of 80 utterances in a measured session. The follow-up
-# window is the longer of the two: being called and then saying nothing is a
-# mistake, but pausing to think mid-conversation is not.
+# It exists because saying a name and then talking is how every voice assistant
+# has trained people to behave, and requiring one continuous breath instead
+# threw away 64 of 80 utterances in a measured session.
+#
+# **There is deliberately no follow-up window.** One briefly existed: for 12s
+# after an answer, any speech became a turn. That is how she ends up answering a
+# sentence meant for someone else in the room, so every turn now needs her name.
 ARMED_WINDOW_S = 10.0
-FOLLOW_UP_WINDOW_S = 12.0
+
+# Said on their own while she is talking, these stop her. Matched against the
+# whole utterance rather than as a prefix, so "stop by the shop later" is a
+# sentence and not an interruption.
+STOP_WORDS = frozenset(
+    {
+        "stop",
+        "wait",
+        "hold on",
+        "never mind",
+        "nevermind",
+        "shut up",
+        "enough",
+        "cancel",
+        "quiet",
+        "be quiet",
+        "stop it",
+    }
+)
+
+
+def is_stop_word(text: str) -> bool:
+    """Is this whole utterance just a request to stop talking?"""
+    return text.strip().strip(_SEPARATORS).lower() in STOP_WORDS
 
 # How often to report the arrival rate of frames. ~20s at 12.5/s.
 #
@@ -212,10 +238,13 @@ class ListenerState(StrEnum):
     not start with her name. Measured over a real session, 64 of 80 utterances
     were thrown away for exactly that reason.
 
-    ``ARMED`` and ``OPEN`` are the fix. Both are windows in which the name is
-    not required — the first because she has just been called and is waiting to
-    be asked, the second because a conversation does not restate your name
-    before every sentence.
+    ``ARMED`` is the fix: a window in which the name is not required, because
+    she has just been called and is waiting to be asked.
+
+    A second window once followed an answer, so that a follow-up needed no
+    name. It was removed on purpose — for those 12 seconds she would answer a
+    sentence aimed at someone else in the room, which is worse than having to
+    say her name twice.
     """
 
     OFF = "off"
@@ -225,8 +254,6 @@ class ListenerState(StrEnum):
     ARMED = "armed"
     #: Recording an utterance.
     CAPTURING = "capturing"
-    #: She has just answered; a follow-up needs no name.
-    OPEN = "open"
 
 
 class WakeMode(StrEnum):
@@ -262,7 +289,6 @@ class Listener:
         mode: WakeMode = WakeMode.PHRASE,
         barge_in: bool = True,
         armed_window_s: float = ARMED_WINDOW_S,
-        follow_up_window_s: float = FOLLOW_UP_WINDOW_S,
     ) -> None:
         # PHRASE mode needs no wake model at all — that is the point of it.
         if mode is WakeMode.MODEL and wake is None:
@@ -278,7 +304,6 @@ class Listener:
         self._bus = bus
         self.barge_in_enabled = barge_in
         self.armed_window_s = armed_window_s
-        self.follow_up_window_s = follow_up_window_s
 
         self._state = ListenerState.OFF
         self._utterance: Utterance | None = None
@@ -291,6 +316,17 @@ class Listener:
         self._frames_since = time.monotonic()
         self._window: asyncio.Task[None] | None = None
         self._needs_name = True
+        # Whether sound is actually coming out of the speakers, reported by the
+        # renderer that owns the audio graph.
+        #
+        # This used to read `bus.state is AssistantState.SPEAKING`, which
+        # **nothing in the sidecar ever set** — so the barge-in branch below was
+        # unreachable and interrupting her silently did nothing. The renderer is
+        # the only thing that knows, including for the tail of audio still
+        # playing after generation has finished, which is exactly when someone
+        # interrupts.
+        self._playing = False
+        self._ducked = False
 
     @property
     def state(self) -> ListenerState:
@@ -303,6 +339,19 @@ class Listener:
     @property
     def mode(self) -> WakeMode:
         return self._mode
+
+    def set_playing(self, playing: bool) -> None:
+        """Told by the renderer when audio starts and stops coming out.
+
+        Transitions only, not a heartbeat: there is nothing to do while the
+        answer is merely continuing.
+        """
+        if playing == self._playing:
+            return
+        self._playing = playing
+        if not playing:
+            self._ducked = False
+        log.debug("listener.playing", playing=playing)
 
     @property
     def wake_phrase(self) -> str:
@@ -403,7 +452,7 @@ class Listener:
         self._remember(samples)
 
         # Barge-in is the same test in both modes: is someone talking over her.
-        speaking = self._bus.state is AssistantState.SPEAKING
+        speaking = self._playing
         speech_ms = self._speech_ms(samples)
         if speaking and self.barge_in_enabled and speech_ms >= BARGE_IN_MS:
             await self._begin_capture(reason="barge_in", preroll=True)
@@ -417,7 +466,7 @@ class Listener:
             if not speaking and speech_ms >= SPEECH_ONSET_MS:
                 # Inside a window she has already been addressed, so this is
                 # the question rather than a candidate for one.
-                inside = self._state in (ListenerState.ARMED, ListenerState.OPEN)
+                inside = self._state is ListenerState.ARMED
                 self._close_window()
                 await self._begin_capture(
                     reason="answering" if inside else "speech",
@@ -452,12 +501,15 @@ class Listener:
         self._needs_name = needs_name
 
         if reason == "barge_in":
-            # Silence her before anything else. Audio already queued in the
-            # renderer keeps talking for seconds otherwise — the same reason
-            # cancel() flushes before the task unwinds.
-            await self._bus.broadcast(Event.AUDIO_STOP, {"reason": "barge_in"})
-            cancelled = await self._conversation.cancel_active()
-            log.info("listener.barge_in", cancelled_turns=cancelled)
+            # **Duck, do not stop.** Whether this is really an interruption
+            # depends on what was said, and that is a whole utterance plus a
+            # transcription away — over a second, all of it with her still
+            # talking. Dropping the volume now is immediate, makes the
+            # microphone hear the speaker better, and a false alarm costs a dip
+            # that comes back rather than a sentence lost.
+            self._ducked = True
+            await self._bus.broadcast(Event.AUDIO_DUCK, {"reason": "speech"})
+            log.info("listener.ducked")
 
         self._utterance = Utterance(self._vad)
         self._vad.reset()
@@ -526,6 +578,28 @@ class Listener:
             )
             return
 
+        # ── talking over her ────────────────────────────────────────
+        if self._ducked:
+            self._ducked = False
+            stop_word = is_stop_word(heard)
+            if stop_word or addressed:
+                await self._bus.broadcast(Event.AUDIO_STOP, {"reason": "barge_in"})
+                cancelled = await self._conversation.cancel_active()
+                log.info(
+                    "listener.barge_in", heard=heard, stop_word=stop_word, cancelled=cancelled
+                )
+                if stop_word and not text:
+                    # "stop" is not a question. Answering it would be absurd.
+                    await self._bus.set_state(AssistantState.IDLE)
+                    return
+            else:
+                # Not for her after all — someone talking near her, or her own
+                # voice leaking back through the speakers.
+                await self._bus.broadcast(Event.AUDIO_RESUME, {})
+                log.info("listener.resumed", heard=heard)
+                await self._bus.set_state(AssistantState.IDLE)
+                return
+
         # Her name and nothing else: she has been called, not asked. **This is
         # the case the first build dropped on the floor** — it stripped the
         # name, found an empty string, and silently gave up, which is exactly
@@ -567,14 +641,6 @@ class Listener:
         # while she is still thinking about it.
         await self._bus.broadcast(Event.HEARD, {"text": text})
         await self._conversation.send(text, spoken=True)
-
-        # Keep listening. A conversation does not restate your name before
-        # every sentence, and requiring it is what made this feel like issuing
-        # commands rather than talking.
-        async with self._lock:
-            await self._open_window(
-                ListenerState.OPEN, self.follow_up_window_s, reason="follow-up"
-            )
 
     # ── frame plumbing ──────────────────────────────────────────────────
 
