@@ -278,6 +278,41 @@ the state, not only what reads it.
 - A bare stop word sends **no turn** — "stop" is not a question. Her name arms
   her; her name plus a question answers it.
 
+### Latency, measured and cut (2026-08-07)
+    python scripts/gate_latency.py     # recognition, both models, speed and mistakes
+
+Measured over a real session, then fixed:
+
+| stage | was | now |
+|---|---|---|
+| trailing silence | 700ms | 500ms |
+| recognition median | 534ms | ~307ms |
+| recognition p90 | **5244ms** | serialised |
+| recognition max | **34.3s** | serialised |
+
+- **Nothing serialised Whisper.** `_lock` guarded `start()` only, so every
+  utterance in the room began its own thread and they fought each other,
+  Ollama and Kokoro for cores. That is the entire p90 and max. Concurrency
+  never made any of them finish sooner. Utterances queued behind a newer one
+  are now dropped — an old one is almost always room noise nobody awaits.
+- **`tiny.en` over `base.en`, on evidence**: 307ms vs 528ms median, and *the
+  same* 5/8 clips with a missed word — both fail on "pytest",
+  "onomatopoeia", "Thiruvananthapuram". The corpus is synthesised speech
+  though, which is cleaner than a person across a room, and tiny is the model
+  that degrades first on accented input. `ARIA_STT_MODEL=base.en` reverts it.
+- **The wake check reads only the opening** of utterances over 4s. The name is
+  the first word, so a long stretch of room speech no longer gets transcribed
+  in full purely to be thrown away. Short requests still transcribe once —
+  paying twice would add ~300ms to the path the user is actually waiting on.
+- **Esc stops her, claimed only while she speaks.** Saying "stop" cannot beat
+  500ms of silence plus recognition; a key can. Space was asked for first and
+  rejected: a global Space is swallowed mid-word in whatever you are typing.
+- **A duck must always resume.** `set_playing(False)` used to clear the flag
+  with no event, so finishing a sentence while ducked left the renderer's gain
+  node at 20% — for that answer and every one after. 13 ducks, 0 resumes in one
+  log. `_unduck()` is the single exit and `useAudio` also resets gain on a new
+  answer, because that one cannot be allowed to be wrong.
+
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.
 

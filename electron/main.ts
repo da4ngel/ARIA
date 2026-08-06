@@ -26,6 +26,14 @@ const FADE_STEP = 0.12
 const FADE_INTERVAL_MS = 12
 const RESIZE_MS = 220
 const HOTKEY = 'Control+Space'
+// Claimed only while she is talking, and released the moment she stops.
+//
+// Esc rather than Space, which was the first ask: a global Space would be
+// swallowed mid-word in whatever the user is typing in. Esc costs nothing if
+// it is caught by mistake, and the whole point of a key is that it beats
+// saying "stop" — which cannot land in under ~1.3s, because it has to wait for
+// silence and then a transcription.
+const INTERRUPT_KEY = 'Escape'
 
 // Chromium suspends renderers it believes nobody is looking at, and hiding the
 // window is exactly that. She is *meant* to keep listening while dismissed, so
@@ -49,6 +57,7 @@ let fadeTimer: NodeJS.Timeout | null = null
 let resizeTimer: NodeJS.Timeout | null = null
 let brainStatus: BrainStatus = 'starting'
 let hotkeyRegistered = false
+let interruptRegistered = false
 // Last reported voice state, from the renderer that owns the audio.
 let voiceMode: 'listening' | 'speaking' | null = null
 
@@ -337,6 +346,30 @@ function hideWindow(): void {
  * lighting the screen edge as well would be one thing said twice, and a glow
  * around a window you are looking at is just glare.
  */
+/**
+ * Own Esc for exactly as long as she is speaking.
+ *
+ * Registering it permanently would take Esc away from every other app on the
+ * machine, which is far too high a price for a stop button.
+ */
+function syncInterruptKey(): void {
+  const speaking = voiceMode === 'speaking'
+  if (speaking === interruptRegistered) return
+
+  if (speaking) {
+    interruptRegistered = globalShortcut.register(INTERRUPT_KEY, () => {
+      // The sidecar owns the stop, the cancel and the state change; this only
+      // reports the key press (BUILD_SPEC §3).
+      void rpc.call('voice.interrupt', {}).catch(() => {
+        /* she may have finished on her own between press and dispatch */
+      })
+    })
+  } else {
+    globalShortcut.unregister(INTERRUPT_KEY)
+    interruptRegistered = false
+  }
+}
+
 function syncOverlay(): void {
   const windowShown = Boolean(window && !window.isDestroyed() && window.isVisible())
   overlay?.setVisible(voiceMode !== null && !windowShown)
@@ -367,6 +400,7 @@ function registerIpc(): void {
       if (mode !== voiceMode) {
         voiceMode = mode
         syncOverlay()
+        syncInterruptKey()
       }
       overlay?.send('aria:voice-level', { level, mode })
     },

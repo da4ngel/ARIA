@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # CPU only, per rule 2: the 6GB card holds the language model alone.
     # Off leaves her fully usable by typing — voice is additive, never required.
     voice_enabled: bool = True
+    # Speech recognition. "tiny.en" measured as accurate as "base.en" on this
+    # machine and 221ms faster per turn — see providers/stt.py for the numbers
+    # and the caveat. Set to "base.en" if she starts mishearing you.
+    stt_model: str = "tiny.en"
     voice: str = "af_heart"
     voice_speed: float = 1.0
     voice_lang: str = "en-us"

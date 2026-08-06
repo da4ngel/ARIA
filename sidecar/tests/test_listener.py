@@ -310,7 +310,7 @@ async def test_talking_over_her_ducks_before_it_decides(parts) -> None:
     was said, which is a transcription away."""
     listener, _wake, vad, _stt, conversation, bus = parts
     await listener.enable()
-    listener.set_playing(True)
+    await listener.set_playing(True)
 
     vad.speech = True
     for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
@@ -326,7 +326,7 @@ async def test_a_single_frame_of_noise_does_not_interrupt_her(parts) -> None:
     """One frame is a cough or her own voice leaking past echo cancellation."""
     listener, _wake, vad, _stt, conversation, bus = parts
     await listener.enable()
-    listener.set_playing(True)
+    await listener.set_playing(True)
 
     vad.speech = True
     await listener.feed(frame(FRAME_SAMPLES))
@@ -342,7 +342,7 @@ async def test_barge_in_can_be_turned_off(parts) -> None:
     listener, _wake, vad, _stt, conversation, bus = parts
     listener.barge_in_enabled = False
     await listener.enable()
-    listener.set_playing(True)
+    await listener.set_playing(True)
 
     vad.speech = True
     for _ in range(20):
@@ -664,7 +664,7 @@ def test_a_sentence_containing_one_is_not_an_interruption(said: str) -> None:
 async def interrupt(listener: Listener, vad: ScriptedVAD, heard: str, stt: ScriptedSTT) -> None:
     """Talk over her, long enough to trip the sustained-speech guard."""
     stt.text = heard
-    listener.set_playing(True)
+    await listener.set_playing(True)
     await speak(listener, vad, frames_of_speech=12)
 
 
@@ -730,3 +730,39 @@ async def test_playing_is_reported_not_guessed(phrase) -> None:
     for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
         await listener.feed(frame(FRAME_SAMPLES))
     assert not bus.of(Event.AUDIO_DUCK)
+
+
+async def test_reaching_the_end_of_a_sentence_while_ducked_still_resumes(phrase) -> None:
+    """13 ducks and 0 resumes in one log.
+
+    She ducked, finished the sentence on her own, and `set_playing(False)`
+    cleared the flag without an event — so the renderer's gain node stayed at
+    20% for that answer and every answer after it.
+    """
+    listener, _wake, vad, _stt, _conversation, bus = phrase
+    await listener.enable()
+    await listener.set_playing(True)
+
+    vad.speech = True
+    for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
+        await listener.feed(frame(FRAME_SAMPLES))
+    assert bus.of(Event.AUDIO_DUCK)
+
+    # She simply finishes talking, before anything is decided about the speech.
+    await listener.set_playing(False)
+
+    assert bus.of(Event.AUDIO_RESUME), "volume must not be left down"
+
+
+async def test_switching_her_off_mid_duck_does_not_leave_her_quiet(phrase) -> None:
+    listener, _wake, vad, _stt, _conversation, bus = phrase
+    await listener.enable()
+    await listener.set_playing(True)
+
+    vad.speech = True
+    for _ in range(int(BARGE_IN_MS / FRAME_MS) + 2):
+        await listener.feed(frame(FRAME_SAMPLES))
+    assert bus.of(Event.AUDIO_DUCK)
+
+    await listener.disable()
+    assert bus.of(Event.AUDIO_RESUME)

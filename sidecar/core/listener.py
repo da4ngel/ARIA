@@ -94,6 +94,17 @@ PREROLL_MS = 600.0
 # still covers the run-up.
 SPEECH_ONSET_MS = 96.0
 
+# Deciding whether an utterance was for her only needs its opening, because the
+# name is the first word. Above this length, the opening is transcribed on its
+# own first and the rest only if it turns out to be hers.
+#
+# **Only long ones.** A normal request is a few seconds and transcribes once;
+# paying twice for those would add ~300ms to exactly the path the user is
+# waiting on. What this saves is the monologue across the room, which today is
+# transcribed in full so it can be thrown away.
+PREFIX_CHECK_OVER_S = 4.0
+PREFIX_S = 2.5
+
 # How long she waits to be asked after being called by name.
 #
 # It exists because saying a name and then talking is how every voice assistant
@@ -340,17 +351,24 @@ class Listener:
     def mode(self) -> WakeMode:
         return self._mode
 
-    def set_playing(self, playing: bool) -> None:
+    async def set_playing(self, playing: bool) -> None:
         """Told by the renderer when audio starts and stops coming out.
 
         Transitions only, not a heartbeat: there is nothing to do while the
         answer is merely continuing.
+
+        **Ending playback while ducked must still resume.** Clearing the flag
+        on its own was the bug: she reached the end of a sentence, the flag was
+        dropped with no event, and the renderer's gain node stayed at 20% — for
+        that answer and every answer after it, until something else happened to
+        call `stop()`. That is what "the interruption isn't working" looked
+        like from the outside.
         """
         if playing == self._playing:
             return
         self._playing = playing
         if not playing:
-            self._ducked = False
+            await self._unduck()
         log.debug("listener.playing", playing=playing)
 
     @property
@@ -380,6 +398,7 @@ class Listener:
             self._state = ListenerState.OFF
             self._reset_buffers()
             self._reset_models()
+            await self._unduck()
             await self._bus.set_state(AssistantState.IDLE)
             log.info("listener.disabled")
 
@@ -527,6 +546,22 @@ class Listener:
         await self._bus.set_state(AssistantState.LISTENING)
         log.info("listener.capturing", reason=reason)
 
+    async def _unduck(self) -> None:
+        """Undo a duck, if one is outstanding.
+
+        **Every exit from the interrupt path must pass through here.** It did
+        not before: a ducked utterance too short to transcribe returned early,
+        `_ducked` stayed set and no resume was sent, so she dropped to 20% and
+        stayed there — 13 ducks and 0 resumes in one log. A duck with no
+        matching resume is worse than never ducking, because it is silent,
+        permanent, and looks like the interrupt simply not working.
+        """
+        if not self._ducked:
+            return
+        self._ducked = False
+        await self._bus.broadcast(Event.AUDIO_RESUME, {})
+        log.info("listener.resumed", reason="nothing to act on")
+
     async def _finish(self, endpoint: str) -> None:
         """End of utterance. Transcription and the turn run off this path so a
         frame never waits on a model."""
@@ -537,6 +572,7 @@ class Listener:
         self._reset_models()
 
         if utterance is None:
+            await self._unduck()
             return
 
         if not utterance.worth_transcribing():
@@ -546,6 +582,7 @@ class Listener:
                 speech_ms=round(utterance.speech_ms),
                 endpoint=endpoint,
             )
+            await self._unduck()
             await self._bus.set_state(AssistantState.IDLE)
             return
 
@@ -565,12 +602,37 @@ class Listener:
 
         started = time.perf_counter()
         try:
-            pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
-            heard = await self._stt.transcribe(pcm, SAMPLE_RATE)
+            def pcm_of(samples: np.ndarray) -> bytes:
+                encoded: bytes = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+                return encoded
+
+            duration_s = len(audio) / SAMPLE_RATE
+            if (
+                self._needs_name
+                and not self._ducked
+                and duration_s > PREFIX_CHECK_OVER_S
+            ):
+                # Cheap first pass over the opening. If her name is not there,
+                # the rest of a long stretch of room speech never gets read.
+                opening = audio[: int(PREFIX_S * SAMPLE_RATE)]
+                prefix = await self._stt.transcribe(pcm_of(opening), SAMPLE_RATE)
+                if not starts_with_wake_phrase(prefix):
+                    log.info(
+                        "listener.not_addressed",
+                        heard=prefix,
+                        checked="opening only",
+                        of_s=round(duration_s, 1),
+                    )
+                    await self._bus.broadcast(Event.MISHEARD, {"text": prefix})
+                    await self._bus.set_state(AssistantState.IDLE)
+                    return
+
+            heard = await self._stt.transcribe(pcm_of(audio), SAMPLE_RATE)
             addressed = starts_with_wake_phrase(heard)
             text = strip_wake_word(heard)
         except Exception as exc:  # noqa: BLE001 — a bad utterance must not end listening
             log.warning("listener.transcribe_failed", error=str(exc))
+            await self._unduck()
             await self._bus.set_state(AssistantState.IDLE)
             await self._bus.send_error(
                 "transcribe_failed",
@@ -595,8 +657,9 @@ class Listener:
             else:
                 # Not for her after all — someone talking near her, or her own
                 # voice leaking back through the speakers.
-                await self._bus.broadcast(Event.AUDIO_RESUME, {})
-                log.info("listener.resumed", heard=heard)
+                self._ducked = True  # `_unduck` owns the event and the flag
+                await self._unduck()
+                log.info("listener.not_an_interruption", heard=heard)
                 await self._bus.set_state(AssistantState.IDLE)
                 return
 

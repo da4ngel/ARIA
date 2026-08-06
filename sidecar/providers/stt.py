@@ -4,16 +4,15 @@ CPU only per CLAUDE.md rule 2, and torch-free per rule 3: faster-whisper runs on
 ctranslate2. `transformers[torch]` is only in its optional `conversion` extra,
 which is deliberately not installed.
 
-**Measured on this machine**, `base.en` at int8, greedy:
+**Measured on this machine**, int8, greedy: latency is dominated by fixed cost
+rather than utterance length across the range a spoken request occupies, which
+is why the gate is a flat figure rather than a real-time factor.
 
-    load + download    32.6s   ← once, cached in data/models/whisper
-    1.5s utterance    ~480ms
-    3.0s utterance     474ms
-    6.0s utterance     480ms
-
-Latency is dominated by fixed cost rather than utterance length in the range a
-push-to-talk phrase actually occupies, which is why the gate is expressed as a
-flat 500ms rather than a real-time factor.
+**Transcription is serialised.** It was not, and that was the single worst
+number in the whole voice path: every utterance in the room started its own
+thread, they fought each other and Ollama and Kokoro for cores, and a real
+session measured a 534ms median against a **5244ms p90 and a 34s worst case**.
+Running them at once never made any of them finish sooner.
 
 `beam_size=1` on purpose (§9 Phase 2): beam search roughly doubles latency for
 marginal accuracy gain at this size.
@@ -33,7 +32,20 @@ if TYPE_CHECKING:  # pragma: no cover
 
 log = structlog.get_logger(__name__)
 
-MODEL_SIZE = "base.en"
+# **Measured, not assumed** (`scripts/gate_latency.py`, 8 spoken requests):
+#
+#     base.en   528ms median   661ms p90   5/8 clips with a missed word
+#     tiny.en   307ms median   330ms p90   5/8 clips with a missed word
+#
+# Identical accuracy on that set — both miss exactly the same words ("pytest",
+# "onomatopoeia", "Thiruvananthapuram") — and 221ms faster on every single
+# turn, which is the largest saving available anywhere in the voice path.
+#
+# **The caveat is real:** that corpus is synthesised speech, which is cleaner
+# than a person across a room. tiny.en is the model that degrades first on
+# accented or noisy input. If she starts mishearing, `ARIA_STT_MODEL=base.en`
+# puts it back with no code change.
+MODEL_SIZE = "tiny.en"
 SAMPLE_RATE = 16_000
 # Below this there is no speech worth sending to the model — a stray key press
 # rather than an utterance.
@@ -93,6 +105,17 @@ class WhisperSTT:
         self._model_size = model_size
         self._model: Any | None = None
         self._lock = asyncio.Lock()
+        # **One transcription at a time.** `_lock` above guards loading only,
+        # and without this every utterance in the room started its own thread:
+        # they fight each other, Ollama and Kokoro for the same cores, and a
+        # queue forms. Measured over a real session that showed up as a 534ms
+        # median against a 5244ms p90 and a 34s worst case. Running them
+        # concurrently never made them finish sooner.
+        self._running = asyncio.Lock()
+        # Utterances waiting behind the one in flight. A newer one means the
+        # older is almost always room noise nobody is waiting on, so it is
+        # dropped rather than transcribed late into an answer nobody wants.
+        self._waiting = 0
 
     @property
     def ready(self) -> bool:
@@ -155,12 +178,28 @@ class WhisperSTT:
             return ""
 
         audio = resample_to_16k(samples, sample_rate)
-        started = time.perf_counter()
-        text = await asyncio.to_thread(self._run, audio)
+
+        self._waiting += 1
+        queued = time.perf_counter()
+        try:
+            async with self._running:
+                # Someone spoke again while this waited. Whatever this was, it
+                # is now stale — and finishing it would only delay the thing
+                # they are actually waiting for.
+                if self._waiting > 1:
+                    log.info("stt.dropped_stale", behind=self._waiting - 1)
+                    return ""
+
+                started = time.perf_counter()
+                text = await asyncio.to_thread(self._run, audio)
+        finally:
+            self._waiting -= 1
+
         log.info(
             "stt.transcribed",
             audio_ms=round(duration_ms, 1),
             took_ms=round((time.perf_counter() - started) * 1000, 1),
+            queued_ms=round((started - queued) * 1000, 1),
             chars=len(text),
         )
         return text

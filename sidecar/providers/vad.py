@@ -31,9 +31,12 @@ SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512  # 32ms; the model rejects anything shorter
 
 THRESHOLD = 0.5
-# §9's number. Long enough to survive the pause inside a sentence, short enough
-# that finishing a question does not feel like waiting.
-TRAILING_SILENCE_MS = 700
+# §9 says 700. Measured, that is a flat 700ms added to *every* turn before
+# recognition can even start, on top of a ~530ms transcription and a ~1s first
+# token — and the whole thing read as sluggish. 500ms still comfortably
+# survives the pause inside a sentence; below about 400 it starts cutting
+# people off mid-thought, which is far worse than waiting.
+TRAILING_SILENCE_MS = 500
 MAX_UTTERANCE_S = 30.0
 # Speech this brief is a cough or a door, not a sentence worth transcribing.
 MIN_SPEECH_MS = 200

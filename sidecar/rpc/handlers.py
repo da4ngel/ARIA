@@ -387,6 +387,30 @@ async def voice_frame(params: dict[str, Any]) -> None:
     return None
 
 
+@method("voice.interrupt")
+async def voice_interrupt(_params: dict[str, Any]) -> dict[str, Any]:
+    """Stop her talking, now.
+
+    The key-press path. Everything the spoken interrupt does once it has
+    decided — flush the audio, cancel the turn — but with no utterance to
+    capture and no transcription to wait for, which is the whole point: saying
+    "stop" cannot beat 700ms of silence plus half a second of recognition, and
+    a key can.
+    """
+    from sidecar.rpc.events import AssistantState, Event, bus
+    from sidecar.state import runtime
+
+    await bus.broadcast(Event.AUDIO_STOP, {"reason": "interrupt"})
+    cancelled = 0
+    if runtime.conversation is not None:
+        cancelled = await runtime.conversation.cancel_active()
+    if runtime.listener is not None:
+        await runtime.listener.set_playing(False)
+    await bus.set_state(AssistantState.IDLE)
+    log.info("voice.interrupted", cancelled_turns=cancelled)
+    return {"ok": True, "cancelled": cancelled}
+
+
 @method("voice.playing")
 async def voice_playing(params: dict[str, Any]) -> None:
     """The renderer reporting whether sound is coming out of the speakers.
@@ -399,7 +423,7 @@ async def voice_playing(params: dict[str, Any]) -> None:
 
     listener = runtime.listener
     if listener is not None:
-        listener.set_playing(params.get("playing") is True)
+        await listener.set_playing(params.get("playing") is True)
     return None
 
 

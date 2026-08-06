@@ -146,6 +146,11 @@ export function useAudio(): UseAudio {
     playHead.current = startAt + buffer.duration
 
     sources.current.push(source)
+    // A fresh answer always starts at full volume. The sidecar sends a resume
+    // for every duck, but this is the one place that cannot be wrong: an
+    // answer inheriting the last one's duck is silent, permanent, and reads as
+    // her simply having gone quiet.
+    if (sources.current.length === 1) setGain(1, 0.02)
     announce(true)
     setSpeaking(true)
     source.onended = () => {
@@ -155,7 +160,7 @@ export function useAudio(): UseAudio {
         setSpeaking(false)
       }
     }
-  }, [announce])
+  }, [announce, setGain])
 
   useEffect(() => {
     return window.aria.onEvent((event: SidecarEvent) => {

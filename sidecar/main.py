@@ -228,7 +228,7 @@ def _build_stt(settings: Settings) -> WhisperSTT | None:
     if not settings.voice_enabled:
         return None
 
-    engine = WhisperSTT(settings.models_dir / "whisper")
+    engine = WhisperSTT(settings.models_dir / "whisper", model_size=settings.stt_model)
 
     async def warm() -> None:
         try:

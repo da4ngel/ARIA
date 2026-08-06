@@ -165,9 +165,9 @@ async def run_interrupts(tts: KokoroTTS, stt: WhisperSTT, vad: SileroVAD) -> tup
     for phrase, want_stop, want_turn, note in INTERRUPTS:
         bus.forget()
         before = len(conv.sent)
-        listener.set_playing(True)
+        await listener.set_playing(True)
         await utter(listener, await say(tts, phrase))
-        listener.set_playing(False)
+        await listener.set_playing(False)
 
         ducked = bus.saw(Event.AUDIO_DUCK)
         stopped = bus.saw(Event.AUDIO_STOP)
