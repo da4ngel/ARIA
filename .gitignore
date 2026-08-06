@@ -1,0 +1,27 @@
+# Runtime data — never committed (BUILD_SPEC §5)
+data/
+
+# Node
+node_modules/
+out/
+dist/
+.vite/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets
+.env
+*.handshake
+
+# Logs
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db

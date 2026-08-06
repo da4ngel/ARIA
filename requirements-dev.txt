@@ -1,0 +1,8 @@
+# ARIA sidecar — development dependencies
+# Referenced by CLAUDE.md's command list but absent from BUILD_SPEC §4.
+-r requirements.txt
+
+pytest==8.3.*
+pytest-asyncio==0.24.*
+ruff==0.7.*
+mypy==1.13.*

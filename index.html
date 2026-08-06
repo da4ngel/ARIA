@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Aria</title>
+    <!--
+      No CSP meta tag here on purpose: it would have to be permissive enough for
+      Vite's dev-server HMR and React Refresh, which defeats the point in the
+      packaged build. electron/main.ts sets the header per-environment instead —
+      production locks connect-src to 'none' so the renderer can never reach the
+      sidecar port directly (BUILD_SPEC §3: the renderer is a pure view).
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
