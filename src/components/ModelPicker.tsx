@@ -39,19 +39,29 @@ function speedLabel(entry: ModelAvailability): string | null {
   return entry.observed_ttft_ms !== null ? `${rendered} observed` : `${rendered} measured`
 }
 
-function Tooltip({ entry }: { entry: ModelAvailability }): JSX.Element {
+/**
+ * Details for whichever model is under the pointer.
+ *
+ * A sheet pinned to the bottom of the panel rather than a floating tooltip: the
+ * old one was 256px wide and positioned to the *left* of a 288px menu inside a
+ * 420px window, so it ran off the screen edge every time. Fixed position also
+ * means it no longer flickers as the pointer crosses between rows.
+ */
+function DetailSheet({ entry }: { entry: ModelAvailability }): JSX.Element {
   const speed = speedLabel(entry)
   return (
-    <div className="pointer-events-none absolute right-full top-0 mr-2 w-64 rounded-lg border border-aria-edge bg-aria-bg p-3 text-xs shadow-xl">
-      <p className="font-semibold text-aria-text">{entry.model.label}</p>
-      <p className="mt-1 text-aria-muted">{entry.model.best_for}</p>
-      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-aria-muted">
+    <div className="border-t border-white/5 bg-aria-sunk px-3 py-2.5">
+      <p className="text-tiny font-semibold text-aria-text">{entry.model.label}</p>
+      <p className="mt-0.5 text-micro leading-relaxed text-aria-muted">{entry.model.best_for}</p>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-micro text-aria-faint">
         {speed && <span>{speed}</span>}
         <span>{entry.model.cost === 'free' ? 'free' : `cost ${entry.model.cost}`}</span>
-        <span>{entry.model.local ? 'private' : 'sends your message to the cloud'}</span>
+        <span>{entry.model.local ? 'private' : 'leaves this machine'}</span>
       </div>
-      {entry.model.caveat && <p className="mt-2 text-aria-warn">{entry.model.caveat}</p>}
-      {!entry.available && entry.reason && <p className="mt-2 text-aria-bad">{entry.reason}</p>}
+      {entry.model.caveat && <p className="mt-1.5 text-micro text-aria-warn">{entry.model.caveat}</p>}
+      {!entry.available && entry.reason && (
+        <p className="mt-1.5 text-micro text-aria-bad">{entry.reason}</p>
+      )}
     </div>
   )
 }
@@ -61,32 +71,35 @@ interface RowProps {
   selected: boolean
   onSelect: () => void
   onHover: (id: string | null) => void
-  hovered: boolean
 }
 
-function Row({ entry, selected, onSelect, onHover, hovered }: RowProps): JSX.Element {
+function Row({ entry, selected, onSelect, onHover }: RowProps): JSX.Element {
   const speed = speedLabel(entry)
   return (
-    <div className="relative" onMouseEnter={() => onHover(entry.model.id)} onMouseLeave={() => onHover(null)}>
+    <div onMouseEnter={() => onHover(entry.model.id)} onFocus={() => onHover(entry.model.id)}>
       <button
         type="button"
         disabled={!entry.available}
         onClick={onSelect}
         className={[
-          'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs',
-          entry.available ? 'hover:bg-white/5' : 'cursor-not-allowed opacity-40',
+          'flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-tiny',
+          entry.available ? 'interactive' : 'cursor-not-allowed opacity-40',
           selected ? 'bg-white/10' : '',
         ].join(' ')}
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          {selected && <span className="text-aria-ok">✓</span>}
+          <span
+            className={`h-1 w-1 shrink-0 rounded-full ${
+              selected ? 'bg-aria-ok' : entry.available ? 'bg-white/20' : 'bg-transparent'
+            }`}
+            aria-hidden
+          />
           <span className="truncate text-aria-text">{entry.model.label}</span>
         </span>
-        <span className="shrink-0 text-[10px] text-aria-muted">
+        <span className="shrink-0 font-mono text-micro text-aria-faint">
           {entry.available ? (speed ?? entry.model.cost) : 'unavailable'}
         </span>
       </button>
-      {hovered && <Tooltip entry={entry} />}
     </div>
   )
 }
@@ -116,6 +129,9 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
   const smartSelected = models.selected === SMART_ID
   const current = models.models.find((m) => m.model.id === models.selected)
   const buttonLabel = smartSelected ? 'Smart' : (current?.model.label ?? models.selected)
+  // The sheet shows whatever is under the pointer, falling back to the current
+  // selection so it never collapses to nothing and jumps the panel's height.
+  const detail = models.models.find((m) => m.model.id === (hovered ?? models.selected))
 
   return (
     <div ref={rootRef} className="relative">
@@ -125,14 +141,18 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
           if (!open) void models.refresh()
           setOpen(!open)
         }}
-        className="flex items-center gap-1 rounded-lg border border-aria-edge px-2 py-1 text-xs text-aria-muted hover:text-aria-text"
+        className="flex items-center gap-1 rounded-lg rim px-2 py-1 text-tiny text-aria-muted hover:text-aria-text"
       >
         <span className="max-w-[10rem] truncate">{buttonLabel}</span>
         <span aria-hidden>▾</span>
       </button>
 
       {open && (
-        <div className="absolute right-0 z-20 mt-1 max-h-[22rem] w-72 overflow-y-auto rounded-xl border border-aria-edge bg-aria-panel p-2 shadow-2xl">
+        <div
+          onMouseLeave={() => setHovered(null)}
+          className="glass rim absolute right-0 z-20 mt-1.5 flex max-h-[24rem] w-72 flex-col overflow-hidden rounded-xl shadow-window animate-rise"
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {/* Smart, pinned. */}
           <button
             type="button"
@@ -145,18 +165,18 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
               smartSelected ? 'bg-white/10' : '',
             ].join(' ')}
           >
-            <span className="flex items-center gap-1.5 text-xs text-aria-text">
+            <span className="flex items-center gap-1.5 text-tiny text-aria-text">
               {smartSelected && <span className="text-aria-ok">✓</span>}
               Smart
             </span>
-            <span className="mt-0.5 block text-[10px] text-aria-muted">
+            <span className="mt-0.5 block text-micro text-aria-muted">
               Picks a model per task. Private turns always stay local.
             </span>
           </button>
 
           {/* The bias only affects Smart, so it lives with it. */}
           {smartSelected && (
-            <div className="mt-1 rounded-md bg-black/20 p-2">
+            <div className="mt-1 rounded-md bg-aria-sunk p-2">
               <div className="flex gap-1">
                 {(Object.keys(BIAS_LABEL) as RoutingBias[]).map((bias) => (
                   <button
@@ -164,7 +184,7 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
                     type="button"
                     onClick={() => void models.setBias(bias)}
                     className={[
-                      'flex-1 rounded px-1.5 py-1 text-[10px]',
+                      'flex-1 rounded px-1.5 py-1 text-micro',
                       models.bias === bias
                         ? 'bg-white/15 text-aria-text'
                         : 'text-aria-muted hover:text-aria-text',
@@ -174,7 +194,7 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
                   </button>
                 ))}
               </div>
-              <p className="mt-1.5 text-[10px] text-aria-muted">{BIAS_HINT[models.bias]}</p>
+              <p className="mt-1.5 text-micro text-aria-muted">{BIAS_HINT[models.bias]}</p>
             </div>
           )}
 
@@ -183,7 +203,7 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
             if (group.length === 0) return null
             return (
               <div key={provider} className="mt-2">
-                <p className="px-2 pb-1 text-[10px] uppercase tracking-wide text-aria-muted">
+                <p className="px-2 pb-1 text-micro uppercase tracking-wide text-aria-muted">
                   {PROVIDER_LABEL[provider] ?? provider}
                 </p>
                 {group.map((entry) => (
@@ -191,7 +211,6 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
                     key={entry.model.id}
                     entry={entry}
                     selected={entry.model.id === models.selected}
-                    hovered={hovered === entry.model.id}
                     onHover={setHovered}
                     onSelect={() => {
                       void models.select(entry.model.id)
@@ -204,10 +223,13 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
           })}
 
           {models.models.length === 0 && (
-            <p className="px-2 py-3 text-xs text-aria-muted">
+            <p className="px-2 py-3 text-tiny text-aria-muted">
               {models.loading ? 'Loading models…' : 'No models reported. Is the brain connected?'}
             </p>
           )}
+          </div>
+
+          {detail && <DetailSheet entry={detail} />}
         </div>
       )}
     </div>

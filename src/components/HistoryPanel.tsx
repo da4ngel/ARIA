@@ -72,7 +72,7 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
               setEditing(false)
             }
           }}
-          className="w-full rounded border border-aria-edge bg-black/30 px-2 py-1 text-xs text-aria-text outline-none focus:border-aria-muted"
+          className="w-full rounded rim bg-aria-sunk px-2 py-1 text-tiny text-aria-text outline-none focus:rim-strong"
         />
       </div>
     )
@@ -81,10 +81,10 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
   if (pending) {
     return (
       <div className="rounded-md border border-aria-bad/40 bg-aria-bad/10 px-2 py-2">
-        <p className="text-xs text-aria-text">
+        <p className="text-tiny text-aria-text">
           Delete “{pending.title}” and its {pending.message_count} messages?
         </p>
-        <p className="mt-0.5 text-[10px] text-aria-muted">This cannot be undone.</p>
+        <p className="mt-0.5 text-micro text-aria-muted">This cannot be undone.</p>
         <div className="mt-1.5 flex gap-1">
           <button
             type="button"
@@ -96,14 +96,14 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
                 setPending(null)
               })
             }}
-            className="rounded border border-aria-bad/60 px-2 py-0.5 text-[10px] text-aria-bad hover:bg-aria-bad/20 disabled:opacity-50"
+            className="rounded border border-aria-bad/60 px-2 py-0.5 text-micro text-aria-bad hover:bg-aria-bad/20 disabled:opacity-50"
           >
             Delete
           </button>
           <button
             type="button"
             onClick={() => setPending(null)}
-            className="rounded border border-aria-edge px-2 py-0.5 text-[10px] text-aria-muted hover:text-aria-text"
+            className="rounded rim px-2 py-0.5 text-micro text-aria-muted hover:text-aria-text"
           >
             Keep
           </button>
@@ -119,9 +119,9 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
       }`}
     >
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
-        <span className="block truncate text-xs text-aria-text">{label(session)}</span>
-        <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-aria-muted">
-          <span>{clockTime(session.last_activity)}</span>
+        <span className="block truncate text-tiny text-aria-text">{label(session)}</span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-micro text-aria-faint">
+          <span className="font-mono">{clockTime(session.last_activity)}</span>
           <span aria-hidden>·</span>
           <span>{session.message_count} messages</span>
           {active && <span className="text-aria-ok">· open</span>}
@@ -135,7 +135,7 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
             setDraft(label(session))
             setEditing(true)
           }}
-          className="rounded px-1.5 py-0.5 text-[10px] text-aria-muted hover:text-aria-text"
+          className="rounded px-1.5 py-0.5 text-micro text-aria-muted hover:text-aria-text"
         >
           Rename
         </button>
@@ -143,7 +143,7 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
           type="button"
           aria-label="Delete"
           onClick={() => void onAskDelete().then(setPending)}
-          className="rounded px-1.5 py-0.5 text-[10px] text-aria-muted hover:text-aria-bad"
+          className="rounded px-1.5 py-0.5 text-micro text-aria-muted hover:text-aria-bad"
         >
           Delete
         </button>
@@ -156,22 +156,30 @@ export function HistoryPanel({
   activeSessionId,
   onOpen,
   onClose,
+  variant = 'overlay',
 }: {
   activeSessionId: string | null
   onOpen: (id: string) => void
   onClose: () => void
+  /** `rail` is the permanent column in the expanded window; `overlay` covers
+   *  the compact one. One component either way — two implementations of the
+   *  same list is how they drift apart. */
+  variant?: 'overlay' | 'rail'
 }): JSX.Element {
   const store = useSessions(true)
   const inputRef = useRef<HTMLInputElement>(null)
+  const isRail = variant === 'rail'
 
   useEffect(() => {
-    inputRef.current?.focus()
+    // The rail is always present, so stealing focus would fight the composer.
+    if (!isRail) inputRef.current?.focus()
+    if (isRail) return
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') onClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, isRail])
 
   // Grouped in list order, which the sidecar already sorted by last activity.
   const groups: [string, SessionSummary[]][] = []
@@ -183,16 +191,24 @@ export function HistoryPanel({
   }
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col rounded-2xl bg-aria-bg/97 p-4 backdrop-blur">
+    <div
+      className={
+        isRail
+          ? 'flex h-full flex-col p-3'
+          : 'absolute inset-0 z-30 flex flex-col bg-aria-void/85 p-4 backdrop-blur-md animate-rise'
+      }
+    >
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-aria-text">History</h2>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded px-2 py-0.5 text-xs text-aria-muted hover:text-aria-text"
-        >
-          Close
-        </button>
+        <h2 className="text-small font-semibold text-aria-text">History</h2>
+        {!isRail && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="interactive rounded px-2 py-0.5 text-tiny text-aria-muted hover:text-aria-text"
+          >
+            Close
+          </button>
+        )}
       </div>
 
       <input
@@ -200,14 +216,14 @@ export function HistoryPanel({
         value={store.query}
         placeholder="Search what you said…"
         onChange={(e) => store.setQuery(e.target.value)}
-        className="mt-3 w-full rounded-lg border border-aria-edge bg-black/20 px-2.5 py-1.5 text-xs text-aria-text outline-none placeholder:text-aria-muted/60 focus:border-aria-muted"
+        className="mt-3 w-full rounded-lg rim bg-aria-sunk px-2.5 py-1.5 text-tiny text-aria-text outline-none placeholder:text-aria-faint focus:rim-strong"
       />
 
       <div className="mt-2 flex-1 overflow-y-auto pr-0.5">
-        {store.error && <p className="px-2 py-3 text-xs text-aria-bad">{store.error}</p>}
+        {store.error && <p className="px-2 py-3 text-tiny text-aria-bad">{store.error}</p>}
 
         {!store.error && store.sessions.length === 0 && (
-          <p className="px-2 py-6 text-center text-xs text-aria-muted">
+          <p className="px-2 py-6 text-center text-tiny text-aria-muted">
             {store.loading
               ? 'Loading…'
               : store.query
@@ -218,7 +234,7 @@ export function HistoryPanel({
 
         {groups.map(([day, items]) => (
           <div key={day} className="mb-2">
-            <p className="px-2 pb-1 pt-1.5 text-[10px] uppercase tracking-wide text-aria-muted">
+            <p className="px-2 pb-1 pt-1.5 text-micro uppercase tracking-wide text-aria-muted">
               {day}
             </p>
             {items.map((session) => (

@@ -9,10 +9,12 @@ interface Props {
   onCancel: () => void
 }
 
-const MAX_ROWS = 5
+const MAX_ROWS = 6
+const LINE_HEIGHT = 21
 
 export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.Element {
   const [value, setValue] = useState('')
+  const [focused, setFocused] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
   // Focus on mount and whenever a turn finishes — typing should never require
@@ -26,8 +28,7 @@ export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.El
     const el = textarea.current
     if (!el) return
     el.style.height = 'auto'
-    const lineHeight = 20
-    el.style.height = `${Math.min(el.scrollHeight, lineHeight * MAX_ROWS)}px`
+    el.style.height = `${Math.min(el.scrollHeight, LINE_HEIGHT * MAX_ROWS)}px`
   }, [value])
 
   const submit = (): void => {
@@ -48,10 +49,13 @@ export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.El
     }
   }
 
+  const canSend = !disabled && value.trim().length > 0
+
   return (
     <div
-      className="flex items-end gap-2 rounded-xl border border-aria-edge bg-aria-panel p-2"
-      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      className={`raised flex items-end gap-1.5 rounded-2xl p-1.5 pl-3 transition-shadow ${
+        focused ? 'rim-strong' : 'rim'
+      }`}
     >
       <textarea
         ref={textarea}
@@ -60,28 +64,48 @@ export function ComposerBar({ busy, disabled, onSend, onCancel }: Props): JSX.El
         disabled={disabled}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={onKeyDown}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         placeholder={disabled ? 'Waiting for the brain…' : 'Message Aria…'}
-        className="flex-1 resize-none bg-transparent text-sm text-aria-text placeholder:text-aria-muted focus:outline-none disabled:opacity-50"
+        className="flex-1 resize-none self-center bg-transparent py-1.5 text-small leading-[21px] text-aria-text placeholder:text-aria-faint focus:outline-none disabled:opacity-50"
       />
-      {busy ? (
-        <button
-          type="button"
-          onClick={onCancel}
-          title="Stop generating (Esc)"
-          className="rounded-lg border border-aria-edge px-2.5 py-1 text-xs text-aria-muted hover:text-aria-text"
-        >
-          Stop
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={submit}
-          disabled={disabled || !value.trim()}
-          className="rounded-lg border border-aria-edge px-2.5 py-1 text-xs text-aria-muted hover:text-aria-text disabled:opacity-30"
-        >
-          Send
-        </button>
-      )}
+
+      {/* One control in one place. A separate Stop button appearing beside Send
+          moves the target mid-turn, exactly when you are reaching for it. */}
+      <button
+        type="button"
+        aria-label={busy ? 'Stop generating' : 'Send'}
+        title={busy ? 'Stop generating (Esc)' : 'Send (Enter)'}
+        onClick={busy ? onCancel : submit}
+        disabled={!busy && !canSend}
+        className={`interactive grid h-8 w-8 shrink-0 place-items-center rounded-xl transition-colors ${
+          busy
+            ? 'bg-white/10 text-aria-text'
+            : canSend
+              ? 'bg-aria-accent/90 text-aria-void hover:bg-aria-accent'
+              : 'text-aria-faint'
+        } disabled:cursor-not-allowed`}
+      >
+        {busy ? (
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
+            <rect x="2.5" y="2.5" width="7" height="7" rx="1.4" fill="currentColor" />
+          </svg>
+        ) : (
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M7 11.5v-9M3.2 6.3 7 2.5l3.8 3.8" />
+          </svg>
+        )}
+      </button>
     </div>
   )
 }

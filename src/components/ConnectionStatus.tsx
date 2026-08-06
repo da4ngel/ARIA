@@ -1,4 +1,11 @@
-/** The Phase 0 acceptance gate's visible signal: "Brain: connected". */
+/**
+ * The Phase 0 acceptance gate's visible signal: "Brain: connected".
+ *
+ * Renders for any status, but `App` only mounts it when something is wrong —
+ * a permanent row saying everything is fine is a row spent on nothing. The
+ * component does not decide its own visibility, so the gate can still be
+ * checked directly and the orb carries the healthy case.
+ */
 
 import type { BrainStatus } from '@/types/bridge'
 
@@ -20,10 +27,10 @@ const DOT: Record<BrainStatus, string> = {
 
 export function ConnectionStatus({ status }: { status: BrainStatus }): JSX.Element {
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className={`h-2 w-2 rounded-full ${DOT[status]}`} aria-hidden />
-      <span className="text-aria-muted">Brain:</span>
-      <span className="text-aria-text">{LABEL[status]}</span>
+    <div className="flex items-center gap-2 text-tiny">
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[status]}`} aria-hidden />
+      <span className="text-aria-faint">Brain:</span>
+      <span className="text-aria-muted">{LABEL[status]}</span>
     </div>
   )
 }

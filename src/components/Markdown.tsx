@@ -22,7 +22,7 @@ function CopyButton({ value }: { value: string }): JSX.Element {
     <button
       type="button"
       onClick={() => void copy()}
-      className="absolute right-2 top-2 rounded border border-aria-edge bg-aria-bg/80 px-2 py-0.5 text-[10px] text-aria-muted opacity-0 transition group-hover:opacity-100 hover:text-aria-text"
+      className="absolute right-2 top-2 rounded rim bg-aria-void/80 px-2 py-0.5 text-micro text-aria-muted opacity-0 transition group-hover:opacity-100 hover:text-aria-text"
     >
       {copied ? 'copied' : 'copy'}
     </button>
@@ -42,7 +42,7 @@ function textOf(node: ReactNode): string {
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): JSX.Element {
   return (
-    <div className="space-y-2 text-sm leading-relaxed [&_a]:text-sky-400 [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:m-0 [&_strong]:font-semibold">
+    <div className="space-y-2 text-small leading-relaxed [&_a]:text-sky-400 [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:m-0 [&_strong]:font-semibold">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -50,7 +50,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }): JSX.
             return (
               <div className="group relative">
                 <CopyButton value={textOf(children)} />
-                <pre className="overflow-x-auto rounded-lg border border-aria-edge bg-black/40 p-3 text-xs">
+                <pre className="overflow-x-auto rounded-lg rim bg-aria-sunk p-3 text-tiny">
                   {children}
                 </pre>
               </div>

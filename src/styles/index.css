@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* The window is frameless and transparent; the rounded panel in App.tsx is the
+/* The window is frameless and transparent; the glass panel in App.tsx is the
    only thing that should paint. */
 html,
 body,
@@ -14,9 +14,124 @@ body,
 }
 
 body {
-  font-family:
-    'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   user-select: none;
   cursor: default;
+}
+
+/* Text the user might actually want to take with them. */
+p,
+li,
+pre,
+code,
+input,
+textarea {
+  user-select: text;
+}
+
+@layer components {
+  /* The main panel. Blur is what makes this glass rather than a dark rectangle,
+     so it has to sit over a translucent tint, never a solid one. */
+  .glass {
+    background-color: theme('colors.aria.glass');
+    backdrop-filter: blur(theme('backdropBlur.glass')) saturate(140%);
+    -webkit-backdrop-filter: blur(theme('backdropBlur.glass')) saturate(140%);
+  }
+
+  /* Anything sitting on the panel: bubbles, inputs, overlay cards. */
+  .raised {
+    background-color: theme('colors.aria.raised');
+  }
+
+  /* An edge is a highlight, not a drawn line. `inset` keeps it inside the
+     radius, which is what stops the corners looking chipped. */
+  .rim {
+    box-shadow: inset 0 0 0 1px theme('colors.aria.rim');
+  }
+
+  .rim-strong {
+    box-shadow: inset 0 0 0 1px theme('colors.aria.rim-strong');
+  }
+
+  /* Top-edge sheen. Real glass catches light along its upper edge; without this
+     the panel reads as a flat cut-out. */
+  .sheen::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.16) 30%,
+      rgba(255, 255, 255, 0.16) 70%,
+      transparent
+    );
+    pointer-events: none;
+  }
+
+  /* Rows and buttons that respond to the pointer. */
+  .interactive {
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      opacity 120ms ease;
+  }
+  .interactive:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+  }
+}
+
+/* Focus is always visible and always the accent — the one place it is used. */
+:focus-visible {
+  outline: 2px solid theme('colors.aria.accent');
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* The composer draws its own ring on the wrapper instead. */
+textarea:focus-visible,
+input:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: rgba(111, 211, 224, 0.28);
+}
+
+/* Thin scrollbars. The default Windows bar is heavier than anything else in
+   this interface and breaks the glass illusion at the edge. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: content-box;
+}
+
+/* Reduced motion means still, not merely faster. Framer Motion reads the same
+   preference via useReducedMotion; this covers the CSS half. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

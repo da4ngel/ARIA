@@ -15,9 +15,15 @@ import { createTray, type TrayHandle } from './tray'
 
 const WINDOW_WIDTH = 420
 const WINDOW_HEIGHT = 600
+// Expanded is for reading a long answer and browsing history side by side.
+const EXPANDED_WIDTH = 900
+const EXPANDED_HEIGHT = 700
+const MIN_EXPANDED_WIDTH = 640
+const MIN_EXPANDED_HEIGHT = 480
 const SCREEN_MARGIN = 24
 const FADE_STEP = 0.12
 const FADE_INTERVAL_MS = 12
+const RESIZE_MS = 220
 const HOTKEY = 'Control+Space'
 
 const isDev = !app.isPackaged
@@ -27,6 +33,7 @@ const repoRoot = isDev ? join(app.getAppPath()) : process.resourcesPath
 let window: BrowserWindow | null = null
 let tray: TrayHandle | null = null
 let fadeTimer: NodeJS.Timeout | null = null
+let resizeTimer: NodeJS.Timeout | null = null
 let brainStatus: BrainStatus = 'starting'
 let hotkeyRegistered = false
 
@@ -93,6 +100,82 @@ function bottomRightPosition(): { x: number; y: number } {
   }
 }
 
+// ── compact / expanded ────────────────────────────────────────────────
+// Compact is the companion: small, pinned bottom-right, always on top.
+// Expanded is a real working window: bigger, centred, resizable, and *not*
+// floating — something you are reading in should not sit over your other work.
+
+let expanded = false
+
+function centredExpandedBounds(): { x: number; y: number; width: number; height: number } {
+  const { workArea } = screen.getPrimaryDisplay()
+  const width = Math.min(EXPANDED_WIDTH, workArea.width - SCREEN_MARGIN * 2)
+  const height = Math.min(EXPANDED_HEIGHT, workArea.height - SCREEN_MARGIN * 2)
+  return {
+    width,
+    height,
+    x: workArea.x + Math.round((workArea.width - width) / 2),
+    y: workArea.y + Math.round((workArea.height - height) / 2),
+  }
+}
+
+/** Animate bounds over `RESIZE_MS`. `setBounds(..., true)` animates on macOS
+ *  only, so Windows needs this done by hand or the window teleports. */
+function animateBounds(
+  win: BrowserWindow,
+  to: { x: number; y: number; width: number; height: number },
+): void {
+  if (resizeTimer) clearInterval(resizeTimer)
+  const from = win.getBounds()
+  const started = Date.now()
+
+  resizeTimer = setInterval(() => {
+    if (!window || window.isDestroyed()) {
+      if (resizeTimer) clearInterval(resizeTimer)
+      resizeTimer = null
+      return
+    }
+    const t = Math.min(1, (Date.now() - started) / RESIZE_MS)
+    // Same easing as the fade, so growing and appearing feel like one system.
+    const eased = 1 - Math.pow(1 - t, 3)
+    window.setBounds({
+      x: Math.round(from.x + (to.x - from.x) * eased),
+      y: Math.round(from.y + (to.y - from.y) * eased),
+      width: Math.round(from.width + (to.width - from.width) * eased),
+      height: Math.round(from.height + (to.height - from.height) * eased),
+    })
+    if (t >= 1) {
+      if (resizeTimer) clearInterval(resizeTimer)
+      resizeTimer = null
+    }
+  }, FADE_INTERVAL_MS)
+}
+
+function setExpanded(next: boolean): boolean {
+  const win = window
+  if (!win || win.isDestroyed()) return expanded
+  if (next === expanded) return expanded
+  expanded = next
+
+  // Resizable must be set before the animation, or the manual setBounds calls
+  // are clamped to the old fixed size and the window never grows.
+  win.setResizable(next)
+  win.setMaximizable(next)
+  win.setAlwaysOnTop(!next, 'floating')
+  win.setSkipTaskbar(!next)
+
+  if (next) {
+    win.setMinimumSize(MIN_EXPANDED_WIDTH, MIN_EXPANDED_HEIGHT)
+    animateBounds(win, centredExpandedBounds())
+  } else {
+    win.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+    animateBounds(win, { ...bottomRightPosition(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT })
+  }
+
+  sendToRenderer('aria:window-mode', next)
+  return expanded
+}
+
 function createWindow(): BrowserWindow {
   const { x, y } = bottomRightPosition()
 
@@ -103,8 +186,19 @@ function createWindow(): BrowserWindow {
     y,
     show: false,
     frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
+    // Real Windows 11 acrylic, not a CSS approximation. `backdrop-filter` in the
+    // renderer cannot blur the *desktop* behind a window — with `transparent`
+    // it simply showed whatever was underneath, so text from the editor behind
+    // read straight through the conversation. `backgroundMaterial` is composited
+    // by DWM and actually blurs.
+    //
+    // It requires `transparent: false`; the opaque backgroundColor below is the
+    // fallback for anything that will not apply acrylic (Windows 10, or a
+    // machine with transparency effects switched off), where a readable dark
+    // panel is much better than a see-through one.
+    transparent: false,
+    backgroundColor: '#0a0c11',
+    backgroundMaterial: 'acrylic',
     alwaysOnTop: true,
     resizable: false,
     maximizable: false,
@@ -193,8 +287,12 @@ function fadeTo(target: number, onDone?: () => void): void {
 
 function showWindow(): void {
   if (!window || window.isDestroyed()) window = createWindow()
-  const { x, y } = bottomRightPosition()
-  window.setPosition(x, y)
+  // Only the compact window re-homes itself to the corner. Expanded is a window
+  // the user has placed and sized, and yanking it back would undo that.
+  if (!expanded) {
+    const { x, y } = bottomRightPosition()
+    window.setPosition(x, y)
+  }
   window.showInactive()
   window.focus()
   fadeTo(1)
@@ -222,6 +320,8 @@ function registerIpc(): void {
     sidecar.restart()
   })
   ipcMain.on('aria:hide', () => hideWindow())
+  ipcMain.handle('aria:set-expanded', (_event, next: boolean) => setExpanded(Boolean(next)))
+  ipcMain.handle('aria:is-expanded', () => expanded)
 }
 
 function registerHotkey(): void {

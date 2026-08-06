@@ -99,6 +99,10 @@ export interface AriaApi {
   call: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   restartBrain: () => void
   hide: () => void
+  /** Grow into a working window, or shrink back to the corner companion. */
+  setExpanded: (expanded: boolean) => Promise<boolean>
+  isExpanded: () => Promise<boolean>
+  onWindowMode: (handler: (expanded: boolean) => void) => Unsubscribe
 }
 
 declare global {

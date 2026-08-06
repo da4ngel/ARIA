@@ -43,9 +43,9 @@ function KeyRow({ status, onSave }: RowProps): JSX.Element {
   }
 
   return (
-    <div className="border-b border-aria-edge/60 py-2 last:border-0">
+    <div className="border-b border-white/5 py-2 last:border-0">
       <div className="flex items-center justify-between gap-2">
-        <span className="flex items-center gap-2 text-xs">
+        <span className="flex items-center gap-2 text-tiny">
           <span
             className={`h-1.5 w-1.5 rounded-full ${status.present ? 'bg-aria-ok' : 'bg-aria-muted'}`}
             aria-hidden
@@ -57,7 +57,7 @@ function KeyRow({ status, onSave }: RowProps): JSX.Element {
           <button
             type="button"
             onClick={() => setEditing(!editing)}
-            className="rounded px-1.5 py-0.5 text-[10px] text-aria-muted hover:text-aria-text"
+            className="rounded px-1.5 py-0.5 text-micro text-aria-muted hover:text-aria-text"
           >
             {status.present ? 'Replace' : 'Add'}
           </button>
@@ -66,7 +66,7 @@ function KeyRow({ status, onSave }: RowProps): JSX.Element {
               type="button"
               disabled={busy}
               onClick={() => void commit(null)}
-              className="rounded px-1.5 py-0.5 text-[10px] text-aria-muted hover:text-aria-bad"
+              className="rounded px-1.5 py-0.5 text-micro text-aria-muted hover:text-aria-bad"
             >
               Clear
             </button>
@@ -87,13 +87,13 @@ function KeyRow({ status, onSave }: RowProps): JSX.Element {
               if (event.key === 'Enter' && value.trim()) void commit(value.trim())
               if (event.key === 'Escape') setEditing(false)
             }}
-            className="min-w-0 flex-1 rounded border border-aria-edge bg-black/30 px-2 py-1 text-xs text-aria-text outline-none placeholder:text-aria-muted/60 focus:border-aria-muted"
+            className="min-w-0 flex-1 rounded rim bg-aria-sunk px-2 py-1 text-tiny text-aria-text outline-none placeholder:text-aria-faint focus:rim-strong"
           />
           <button
             type="button"
             disabled={busy || !value.trim()}
             onClick={() => void commit(value.trim())}
-            className="rounded border border-aria-edge px-2 py-1 text-[10px] text-aria-muted hover:text-aria-text disabled:opacity-40"
+            className="rounded rim px-2 py-1 text-micro text-aria-muted hover:text-aria-text disabled:opacity-40"
           >
             Save
           </button>
@@ -141,13 +141,13 @@ export function SettingsPanel({
   )
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col rounded-2xl bg-aria-bg/97 p-4 backdrop-blur">
+    <div className="absolute inset-0 z-30 flex flex-col bg-aria-void/85 p-4 backdrop-blur-md animate-rise">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-aria-text">API keys</h2>
+        <h2 className="text-small font-semibold text-aria-text">API keys</h2>
         <button
           type="button"
           onClick={onClose}
-          className="rounded px-2 py-0.5 text-xs text-aria-muted hover:text-aria-text"
+          className="interactive rounded px-2 py-0.5 text-tiny text-aria-muted hover:text-aria-text"
         >
           Close
         </button>
@@ -159,9 +159,9 @@ export function SettingsPanel({
         ))}
       </div>
 
-      {error && <p className="mt-2 text-xs text-aria-bad">{error}</p>}
+      {error && <p className="mt-2 text-tiny text-aria-bad">{error}</p>}
 
-      <p className="mt-auto text-[10px] leading-relaxed text-aria-muted">
+      <p className="mt-auto text-micro leading-relaxed text-aria-muted">
         Stored in Windows Credential Manager, never in the repo or a .env file. Only the last four
         characters are ever shown. Rotate a key at the address above, then Replace it here.
       </p>

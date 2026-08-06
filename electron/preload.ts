@@ -56,6 +56,18 @@ const api = {
   restartBrain: (): void => ipcRenderer.send('aria:restart-brain'),
 
   hide: (): void => ipcRenderer.send('aria:hide'),
+
+  /** Grow into a working window, or shrink back to the corner companion.
+   *  Resolves with the mode actually applied. */
+  setExpanded: (expanded: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('aria:set-expanded', expanded) as Promise<boolean>,
+
+  /** Current mode, for the initial render. */
+  isExpanded: (): Promise<boolean> => ipcRenderer.invoke('aria:is-expanded') as Promise<boolean>,
+
+  /** Mode changes, including ones main initiates. */
+  onWindowMode: (handler: (expanded: boolean) => void): Unsubscribe =>
+    subscribe('aria:window-mode', handler),
 } as const
 
 export type AriaApi = typeof api
