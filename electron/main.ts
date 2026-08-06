@@ -26,6 +26,17 @@ const FADE_INTERVAL_MS = 12
 const RESIZE_MS = 220
 const HOTKEY = 'Control+Space'
 
+// Chromium suspends renderers it believes nobody is looking at, and hiding the
+// window is exactly that. She is *meant* to keep listening while dismissed, so
+// the backgrounding has to be off at the process level as well as per-window
+// (`backgroundThrottling` in createWindow) — the per-window flag alone does not
+// stop the renderer-process backgrounder on Windows.
+//
+// Must be set before `whenReady`; appended later they are simply ignored.
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
 const isDev = !app.isPackaged
 // In dev the sources live next to out/; packaged, resources sit beside the exe.
 const repoRoot = isDev ? join(app.getAppPath()) : process.resourcesPath
@@ -211,6 +222,10 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // The microphone lives in this renderer, and `hideWindow` hides this
+      // window. Throttled, the capture stalls and "aria" goes unheard while she
+      // is dismissed — which is the state she spends most of her time in.
+      backgroundThrottling: false,
     },
   })
 

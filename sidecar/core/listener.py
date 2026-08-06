@@ -82,6 +82,16 @@ PREROLL_MS = 600.0
 # still covers the run-up.
 SPEECH_ONSET_MS = 96.0
 
+# How often to report the arrival rate of frames. ~20s at 12.5/s.
+#
+# This exists because "is she still hearing me with the window hidden" is not
+# answerable by looking at the app: Chromium throttles renderers it thinks
+# nobody is watching, and a throttled capture goes quiet without erroring.
+# A rate well under FRAMES_EXPECTED_PER_S means the microphone has been
+# suspended, whatever the UI says.
+FRAME_REPORT_EVERY = 250
+FRAMES_EXPECTED_PER_S = 12.5
+
 # Her name, and what Whisper actually writes when it hears it. "Arya" and
 # "Aria" are indistinguishable in speech and base.en picks either; "area" is a
 # real word, but as the *first* word of an utterance spoken at a computer it is
@@ -181,6 +191,8 @@ class Listener:
         self._speech_run_ms = 0.0
         self._lock = asyncio.Lock()
         self._jobs: set[asyncio.Task[None]] = set()
+        self._frames = 0
+        self._frames_since = time.monotonic()
 
     @property
     def state(self) -> ListenerState:
@@ -209,6 +221,8 @@ class Listener:
                 return
             self._reset_buffers()
             self._reset_models()
+            self._frames = 0
+            self._frames_since = time.monotonic()
             self._state = ListenerState.WAITING
             log.info("listener.enabled")
 
@@ -238,6 +252,7 @@ class Listener:
         """
         if self._state is ListenerState.OFF:
             return
+        self._count_frame()
         async with self._lock:
             if self._state is ListenerState.CAPTURING:
                 await self._capture(samples)
@@ -414,6 +429,23 @@ class Listener:
         held = sum(len(f) for f in self._preroll)
         while self._preroll and held - len(self._preroll[0]) >= budget:
             held -= len(self._preroll.pop(0))
+
+    def _count_frame(self) -> None:
+        """Report how fast frames are actually arriving, periodically."""
+        self._frames += 1
+        if self._frames < FRAME_REPORT_EVERY:
+            return
+        now = time.monotonic()
+        elapsed = now - self._frames_since
+        rate = self._frames / elapsed if elapsed > 0 else 0.0
+        log.info(
+            "listener.frame_rate",
+            per_s=round(rate, 1),
+            expected=FRAMES_EXPECTED_PER_S,
+            healthy=rate > FRAMES_EXPECTED_PER_S * 0.8,
+        )
+        self._frames = 0
+        self._frames_since = now
 
     def _reset_models(self) -> None:
         """Forget both rolling histories. Audio from before a pause must not
