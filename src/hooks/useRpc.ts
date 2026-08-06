@@ -1,19 +1,19 @@
 /**
  * Bridge subscription hook.
  *
- * Holds connection status and the last event only — transport concerns, not
- * domain state. Conversation, memory, and task state live in the sidecar
- * (CLAUDE.md rule 1); nothing here may ever accumulate them.
+ * Holds connection status, assistant state, and the last supervisor log —
+ * transport concerns, not domain state. Conversation, memory, and task state
+ * live in the sidecar (CLAUDE.md rule 1); nothing here may ever accumulate them.
  */
 
 import { useCallback, useEffect, useState } from 'react'
 
-import type { BrainStatus, LogLine, SidecarEvent } from '@/types/bridge'
+import type { AssistantState, BrainStatus, LogLine, SidecarEvent } from '@/types/bridge'
 
 export interface UseRpc {
   status: BrainStatus
-  /** Most recent sidecar notification, for debugging the wire in Phase 0. */
-  lastEvent: SidecarEvent | null
+  /** Mirrors `state.change`; drives the Orb. */
+  assistantState: AssistantState
   /** Most recent supervisor problem, if any. */
   lastLog: LogLine | null
   call: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
@@ -22,14 +22,18 @@ export interface UseRpc {
 
 export function useRpc(): UseRpc {
   const [status, setStatus] = useState<BrainStatus>('starting')
-  const [lastEvent, setLastEvent] = useState<SidecarEvent | null>(null)
+  const [assistantState, setAssistantState] = useState<AssistantState>('idle')
   const [lastLog, setLastLog] = useState<LogLine | null>(null)
 
   useEffect(() => {
     void window.aria.getStatus().then(setStatus)
     const offStatus = window.aria.onStatus(setStatus)
-    const offEvent = window.aria.onEvent(setLastEvent)
     const offLog = window.aria.onLog(setLastLog)
+    const offEvent = window.aria.onEvent((event: SidecarEvent) => {
+      if (event.method === 'state.change') {
+        setAssistantState(event.params.state as AssistantState)
+      }
+    })
     return () => {
       offStatus()
       offEvent()
@@ -45,5 +49,5 @@ export function useRpc(): UseRpc {
 
   const restartBrain = useCallback(() => window.aria.restartBrain(), [])
 
-  return { status, lastEvent, lastLog, call, restartBrain }
+  return { status, assistantState, lastLog, call, restartBrain }
 }

@@ -34,8 +34,27 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - Error messages must say what to do next, not just what failed.
 
 ## Current phase
-Phase 0 complete (acceptance gate passed). Next: Phase 1 — Conversation.
+Phase 1 complete (acceptance gate passed). Next: Phase 2 — Voice.
 Update this line when a phase's acceptance gate passes.
+
+## Open issue from Phase 1: TTFT scales with conversation length
+The gate ("first token < 700ms, warm model, **short prompt**") passes at
+405–531ms. But measured across a 35-turn run, median TTFT was **1720ms** and p95
+**3183ms** — because every turn re-prefills the whole conversation.
+
+The KV cache helps but does not flatten it: 593ms at 59 prompt tokens rising to
+927ms at 445. Roughly +0.8ms per conversation token.
+
+Consequence: sub-700ms is only reachable for *short* conversations. Holding it
+across a long one would need `context_token_budget` near 400 tokens, which is
+about four turns — not a real conversation. The current 6000 (per §9 Phase 1)
+gives ~3.4s by the time it fills.
+
+Unresolved, deliberately. It is a real trade-off between §1's "latency over
+intelligence" and coherence, and it is Eyaas's call, not a silent retune.
+Options: lower the budget, roll up far more aggressively, or accept ~1.5s in
+long sessions. Phase 2 must decide before voice, where the budget is ~1000ms
+end-to-end.
 
 ## Provider strategy (decided 2026-08-06, supersedes BUILD_SPEC §4/§9.7)
 Cloud is **OpenAI and Gemini via API keys**, not Anthropic. Ollama is the

@@ -16,6 +16,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
+from sidecar.core.conversation import ConversationService
 from sidecar.handshake import (
     bearer_from_header,
     clear_handshake,
@@ -25,6 +26,9 @@ from sidecar.handshake import (
 )
 from sidecar.logging_setup import configure_logging
 from sidecar.memory.db import Database
+from sidecar.memory.messages import ConversationStore
+from sidecar.providers.base import ProviderError
+from sidecar.providers.ollama import OllamaProvider
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
@@ -69,13 +73,52 @@ def _shutdown(settings: Settings) -> None:
     log.info("sidecar.stopped")
 
 
+async def _start_conversation(settings: Settings) -> None:
+    """Wire the provider and conversation service, then warm the model.
+
+    §12: a model that unloaded costs 8-15s. The user must never hit that, so we
+    pay it here at startup instead. Warm-up failure is not fatal — the sidecar
+    stays up and reports it, because Ollama not running is a recoverable state
+    the UI should show rather than a crash.
+    """
+    provider = OllamaProvider(settings.ollama_url)
+    store = ConversationStore(runtime.require_db())
+
+    runtime.provider = provider
+    runtime.local_model = settings.local_model
+    runtime.conversation = ConversationService(
+        store=store,
+        provider=provider,
+        bus=bus,
+        model=settings.local_model,
+        num_ctx=settings.num_ctx,
+        context_token_budget=settings.context_token_budget,
+    )
+
+    if not settings.warm_on_startup:
+        return
+
+    try:
+        took_ms = await provider.warm(settings.local_model)
+        runtime.ollama_ready = True
+        log.info("model.warm", model=settings.local_model, took_ms=round(took_ms, 1))
+    except ProviderError as exc:
+        runtime.ollama_ready = False
+        log.warning("model.warm_failed", model=settings.local_model, error=str(exc))
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     _startup(settings)
+    await _start_conversation(settings)
     try:
         yield
     finally:
+        if runtime.conversation is not None:
+            await runtime.conversation.shutdown()
+        if runtime.provider is not None:
+            await runtime.provider.aclose()
         _shutdown(settings)
 
 

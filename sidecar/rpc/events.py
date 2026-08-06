@@ -30,11 +30,14 @@ class AssistantState(StrEnum):
 class Event(StrEnum):
     """Server -> client notification methods (§7.1 events table).
 
-    Only the members Phase 0 emits are defined; later phases add their own.
+    Only the members implemented so far are defined; later phases add their own.
     """
 
     STATE_CHANGE = "state.change"
     ERROR = "error"
+    # Phase 1
+    TOKEN = "token"
+    TURN_COMPLETE = "turn.complete"
 
 
 class Sender(Protocol):

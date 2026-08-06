@@ -33,6 +33,21 @@ class Settings(BaseSettings):
 
     data_dir: Path = REPO_ROOT / "data"
 
+    # ── Local model (Phase 1) ────────────────────────────────────────
+    # Interim per CLAUDE.md; switches to qwen2.5:7b-instruct-q4_K_M once pulled.
+    # A models.yaml registry lands in Phase 6 with the router, when more than
+    # one model exists to choose between — a registry of one is not a registry,
+    # and it would pull in pyyaml outside the phase that needs it.
+    ollama_url: str = "http://127.0.0.1:11434"
+    local_model: str = "qwen3.5:4b"
+    warm_on_startup: bool = True
+
+    # §2.1: do not raise. Longer context is memory retrieval's job, not the
+    # context window's.
+    num_ctx: int = 8192
+    # §9 Phase 1: roll up the conversation once it passes this.
+    context_token_budget: int = 6000
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)

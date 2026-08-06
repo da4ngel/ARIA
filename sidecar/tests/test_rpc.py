@@ -28,6 +28,8 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     monkeypatch.setenv("ARIA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ARIA_TOKEN", TOKEN)
     monkeypatch.setenv("ARIA_DEV", "true")
+    # Transport tests must not depend on a running Ollama.
+    monkeypatch.setenv("ARIA_WARM_ON_STARTUP", "false")
     get_settings.cache_clear()
     try:
         # TestClient's context manager is what runs the lifespan.
@@ -76,7 +78,7 @@ def test_rpc_accepts_correct_token(client: TestClient) -> None:
 # ── dispatch ──────────────────────────────────────────────────────────
 
 
-def _call(ws, method: str, params: dict | None = None, call_id: int = 1) -> dict:  # type: ignore[no-untyped-def]
+def _call(ws, method: str, params: dict | None = None, call_id: int = 1) -> dict:
     """Send a request and skip past any notifications until the reply arrives."""
     ws.send_text(
         json.dumps({"jsonrpc": "2.0", "id": call_id, "method": method, "params": params or {}})
@@ -88,8 +90,9 @@ def _call(ws, method: str, params: dict | None = None, call_id: int = 1) -> dict
 
 
 def test_unknown_method_returns_32601(client: TestClient) -> None:
+    # A method from §7.1 that no phase has implemented yet.
     with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
-        response = _call(ws, "chat.send", {"text": "hi"})
+        response = _call(ws, "memory.forget", {"fact_id": 1})
     assert response["error"]["code"] == ErrorCode.METHOD_NOT_FOUND
     # Error messages say what to do next (CLAUDE.md style rule).
     assert "Available in this build" in response["error"]["message"]
@@ -102,9 +105,15 @@ def test_system_health_returns_report(client: TestClient) -> None:
     assert result["status"] == "ok"
     assert result["db"] is True
     assert result["uptime_s"] >= 0
-    # Deferred §9.6 probes are present but unpopulated, not missing.
-    assert result["ollama"] is None
-    assert "ollama" in result["pending_probes"]
+    # Phase 1 fills in the ollama and models probes...
+    assert "ollama" not in result["pending_probes"]
+    assert "models" not in result["pending_probes"]
+    # ...but the §9.6 probes owned by later phases are still present-and-null,
+    # not missing. The wire shape never changes; only the nulls fill in.
+    assert result["gpu_free_mb"] is None
+    assert result["everything"] is None
+    assert "gpu_free_mb" in result["pending_probes"]
+    assert "everything" in result["pending_probes"]
 
 
 def test_malformed_json_returns_invalid_request(client: TestClient) -> None:

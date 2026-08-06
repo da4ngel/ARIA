@@ -87,7 +87,57 @@ async def system_health(_params: dict[str, Any]) -> dict[str, Any]:
     """Return the health snapshot. Never raises — the UI polls this."""
     from sidecar.state import runtime  # local import avoids a startup cycle
 
-    return build_health(db_ready=runtime.db_ready).model_dump()
+    report = build_health(db_ready=runtime.db_ready)
+    report.ollama = runtime.ollama_ready
+    report.models = [runtime.local_model] if runtime.local_model else []
+    report.pending_probes = [p for p in report.pending_probes if p not in ("ollama", "models")]
+    return report.model_dump()
+
+
+# ── chat (Phase 1) ────────────────────────────────────────────────────
+
+
+@method("chat.send")
+async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+    """Start a turn. Returns {turn_id}; the reply streams as `token` events."""
+    from sidecar.state import runtime
+
+    text = str(params.get("text", ""))
+    session_id = params.get("session_id")
+    started = await runtime.require_conversation().send(
+        text, session_id if isinstance(session_id, str) else None
+    )
+    return started.model_dump()
+
+
+@method("chat.cancel")
+async def chat_cancel(params: dict[str, Any]) -> dict[str, Any]:
+    """Abort an in-flight turn mid-stream."""
+    from sidecar.state import runtime
+
+    turn_id = params.get("turn_id")
+    if not isinstance(turn_id, str):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "turn_id is required.")
+    cancelled = await runtime.require_conversation().cancel(turn_id)
+    return {"ok": cancelled}
+
+
+@method("chat.history")
+async def chat_history(params: dict[str, Any]) -> dict[str, Any]:
+    """Reload a session from SQLite.
+
+    Not in §7.1's method table, but §9 Phase 1's gate requires the conversation
+    to survive killing the window — which needs a way to read it back.
+    """
+    from sidecar.state import runtime
+
+    session_id = params.get("session_id")
+    limit = params.get("limit", 200)
+    history = await runtime.require_conversation().history(
+        session_id if isinstance(session_id, str) else None,
+        int(limit) if isinstance(limit, int) else 200,
+    )
+    return history.model_dump(mode="json")
 
 
 # ── dispatch ──────────────────────────────────────────────────────────

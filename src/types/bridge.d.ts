@@ -12,9 +12,23 @@ export type BrainStatus =
   | 'reconnecting'
   | 'disconnected'
 
+/** `state.change` payload (BUILD_SPEC §7.1). */
+export type AssistantState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'acting'
+
 export interface SidecarEvent {
   method: string
   params: Record<string, unknown>
+}
+
+/** A row from the `messages` table, as `chat.history` returns it. */
+export interface StoredMessage {
+  id: number
+  session_id: string
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string
+  route: string | null
+  latency_ms: number | null
+  created_at: string
 }
 
 export interface LogLine {
