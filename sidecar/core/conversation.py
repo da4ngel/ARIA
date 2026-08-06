@@ -11,9 +11,11 @@ requires that to land within 200ms.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import structlog
 from pydantic import BaseModel
@@ -32,6 +34,7 @@ from sidecar.providers.base import (
     Role,
 )
 from sidecar.providers.catalog import ModelInfo
+from sidecar.providers.connectivity import connectivity
 from sidecar.providers.health import HealthTracker
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
@@ -572,9 +575,10 @@ class ConversationService:
         history: list[StoredMessage] = await self._store.history(session_id)
         turns = ctx.to_chat_messages(history)
         summary = self._summaries.get(session_id)
+        machine = self._machine_context(info, history)
 
         # Budget for turns is what's left after identity + any roll-up note.
-        turn_budget = self._budget - ctx.overhead_tokens(summary, level)
+        turn_budget = self._budget - ctx.overhead_tokens(summary, level, machine)
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
             summary = await self._summarize(to_summarize, summary)
@@ -583,9 +587,36 @@ class ConversationService:
 
         # Hard backstop: the summarizer is a model call and can return anything.
         turns = ctx.fit_to_budget(
-            turns, summary=summary, hard_cap_tokens=cap, level=level
+            turns, summary=summary, hard_cap_tokens=cap, level=level, machine=machine
         )
-        return ctx.assemble(turns, summary=summary, level=level)
+        return ctx.assemble(turns, summary=summary, level=level, machine=machine)
+
+    def _machine_context(
+        self, info: ModelInfo | None, history: list[StoredMessage]
+    ) -> ctx.MachineContext:
+        """Facts already in hand — no query, no probe, nothing on the hot path.
+
+        The session start comes from the first stored message rather than the
+        `sessions` row, and the turn count from the history just loaded, so this
+        costs nothing beyond what the turn already did.
+        """
+        started: datetime | None = None
+        if history:
+            with contextlib.suppress(ValueError):
+                started = datetime.strptime(
+                    history[0].created_at, "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=UTC)
+
+        return ctx.MachineContext(
+            # Local time: she is answering someone sitting at this machine, and
+            # "what time is it" means their clock, not UTC.
+            now=datetime.now().astimezone(),
+            model_label=info.label if info else None,
+            model_is_local=info.local if info else None,
+            online=connectivity.online,
+            session_started=started.astimezone() if started else None,
+            message_count=len(history),
+        )
 
     async def _summarize(
         self, to_summarize: list[ChatMessage], previous: str | None

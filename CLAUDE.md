@@ -52,10 +52,10 @@ category is the control group and must stay at 100%.
 
 ### Measured baseline (2026-08-06, 117 probes)
 
-| model | fabricated | quality | TTFT |
+| model | fabricated | overall | TTFT |
 |---|---|---|---|
-| `qwen2.5:7b` (local default) | 32% | 41/41 | 325ms |
-| `qwen3.5:4b` | **5%** | 40/41 | 560ms |
+| `qwen2.5:7b` (local default) | 24% | 111/124 | 340ms |
+| `qwen3.5:4b` | **0%** | 118/124 | 664ms |
 | `gpt-4.1-mini` | 3% | — | 866ms |
 | `gpt-4o` | 5% | — | 822ms |
 | `gpt-5` | 0% | — | 7116ms |
@@ -115,6 +115,27 @@ replacement fact.
 - `send()` with no `session_id` continues the latest session. It used to mint a
   new one per call, so any client that forgot to echo the id back lost all
   context one turn at a time. `chat.new` is the only way to start fresh.
+
+### She has a clock, and "no tool" is not "offline"
+- **Being reached over the internet is not having internet.** The OpenAI and
+  Gemini APIs are text-in / text-out: no browsing, no live prices, no clock,
+  knowledge frozen at training time. A cloud model fails "what is the Bitcoin
+  price" for the same reason the local one does. Live data is Phase 7's
+  `research(query)` over the real browser, and nothing before it.
+- **The date and time are injected** by `context.machine_context()`, along with
+  the answering model, session age and connectivity. All facts the process
+  already holds — no query, no probe on the turn path.
+- **Rendered to the minute, never the second.** This block sits before the
+  conversation, so a string that changed every turn would invalidate the KV
+  cache for every turn after it (~1s). Turns are seconds apart, so consecutive
+  turns share the prefix. Measured after: 292–387ms on turns 2+.
+- `providers/connectivity.py` caches reachability on a 60s timer, so she can
+  tell "I have no web tool" from "you are offline". Reads never touch the
+  network — §9.7 is explicit that probing per turn would put a round-trip in
+  front of every reply.
+- **A refusal names the limit once, then points somewhere.** "I cannot check the
+  current price of Bitcoin." is true and worth nothing. The `helpful-refusal`
+  category enforces this; both local models pass 4/4.
 
 ### Writing probes: the checks lie before the model does
 Most "failures" in the first passes were bugs in the checker, not the model.

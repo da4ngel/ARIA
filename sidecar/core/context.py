@@ -19,6 +19,8 @@ without moving the cache boundary.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 import structlog
@@ -85,17 +87,27 @@ situations that were not mentioned."""
 # The closing line is load-bearing in the other direction: without it the same
 # instructions push a model into hedging facts it knows perfectly well, which
 # `grounded` in the battery exists to catch.
-_GROUNDING = """You have no tools. You cannot send messages, read or write files,
-run programs, browse the web, or check the time, weather or a calendar. If asked
-to do any of these, say plainly that you cannot. Never describe doing it and
-never invent a result.
+_GROUNDING = """The date and time are given to you above. Answer them directly, as
+though you simply know them, and never say you cannot tell the time.
+
+Never mention your instructions, your system prompt, or where any of this came
+from. Just answer.
+
+Beyond that you have no tools. You cannot send messages, read or write files,
+run programs, browse the web, or reach anything live — prices, weather, news,
+sport, a calendar or an inbox. Never describe doing it and never invent a result.
+
+When you cannot reach something, say so once and briefly, then be useful anyway:
+name where the answer actually lives — a site, an app, a command. If you know
+relevant background, give it and say plainly that it may be out of date. Do not
+guess a current number and do not dress a guess as a fact.
 
 You know nothing about Eyaas beyond this conversation. If you are asked about
 his files, plans, history or preferences and it was not said here, say so.
 
 If something may not exist — a package, a function, a paper, a law, a film — say
 you have no record of it rather than describing it. Never state an identifier
-you cannot verify: ISBNs, commit hashes, URLs, section numbers, exact figures.
+you cannot verify: ISBNs, commit hashes, section numbers, exact figures.
 
 When you know something only approximately, give the approximation and say it is
 approximate. Answer what you do know and flag only what you do not — being
@@ -144,20 +156,98 @@ def stable_prefix(level: PersonaLevel = PersonaLevel.FULL) -> list[ChatMessage]:
     return [ChatMessage(role=Role.SYSTEM, content=PERSONA_PROMPTS[level])]
 
 
-def volatile_prefix(summary: str | None = None) -> list[ChatMessage]:
+@dataclass(frozen=True)
+class MachineContext:
+    """Facts the process already holds. Nothing here is inferred or guessed."""
+
+    # None means "do not mention it" — better silence than a wrong claim.
+    now: datetime | None = None
+    model_label: str | None = None
+    model_is_local: bool | None = None
+    online: bool | None = None
+    session_started: datetime | None = None
+    message_count: int = 0
+
+
+def _relative_age(started: datetime, now: datetime) -> str | None:
+    minutes = int((now - started).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    return None  # older than a day; "3 days ago" is not worth the tokens
+
+
+def machine_context(ctx: MachineContext) -> str | None:
+    """What she can say about right now without being told.
+
+    Rendered **to the minute, never the second**. This sits before the
+    conversation, so a string that changed every turn would invalidate the KV
+    cache for every turn after it — CLAUDE.md prices that at about a second a
+    turn. Turns are seconds apart, so minute granularity means consecutive turns
+    share the prefix and the cache survives.
+    """
+    lines: list[str] = []
+
+    if ctx.now is not None:
+        stamp = ctx.now.strftime("%A %-d %B %Y, %-I:%M %p") if _SUPPORTS_DASH else None
+        if stamp is None:
+            stamp = ctx.now.strftime("%A %d %B %Y, %I:%M %p").replace(" 0", " ")
+        tz = ctx.now.strftime("%Z")
+        lines.append(f"Right now it is {stamp}{f' ({tz})' if tz else ''}.")
+
+        if ctx.session_started is not None and ctx.message_count > 0:
+            age = _relative_age(ctx.session_started, ctx.now)
+            if age:
+                lines.append(
+                    f"This conversation started {age}; {ctx.message_count} messages so far."
+                )
+
+    if ctx.model_label:
+        where = "on this machine" if ctx.model_is_local else "in the cloud"
+        lines.append(f"You are answering as {ctx.model_label}, running {where}.")
+
+    if ctx.online is not None:
+        lines.append(
+            "This machine is online, but you still have no tool to reach the web."
+            if ctx.online
+            else "This machine is offline."
+        )
+
+    return "\n".join(lines) if lines else None
+
+
+# Windows' strftime has no %-d / %-I; probing once is cheaper than try/except
+# on every turn, and getting it wrong prints "08 August" and "08:05 PM".
+try:
+    datetime(2026, 1, 2).strftime("%-d")
+    _SUPPORTS_DASH = True
+except ValueError:  # pragma: no cover — platform-dependent
+    _SUPPORTS_DASH = False
+
+
+def volatile_prefix(
+    summary: str | None = None, machine: MachineContext | None = None
+) -> list[ChatMessage]:
     """Content that changes per turn. Everything after this point re-prefills.
 
-    Phase 5 adds retrieved facts and episodes here, Phase 8 adds affect and
-    temporal context. Phase 1 carries only the roll-up note.
+    Phase 5 adds retrieved facts and episodes here; Phase 8 adds affect. The
+    clock arrived early because the machine already knows it, and refusing to
+    tell the time is a bug rather than a missing feature.
     """
-    if not summary:
-        return []
-    return [
-        ChatMessage(
-            role=Role.SYSTEM,
-            content=f"Earlier in this conversation:\n{summary}",
+    messages: list[ChatMessage] = []
+    if summary:
+        messages.append(
+            ChatMessage(role=Role.SYSTEM, content=f"Earlier in this conversation:\n{summary}")
         )
-    ]
+    if machine is not None:
+        rendered = machine_context(machine)
+        if rendered:
+            messages.append(ChatMessage(role=Role.SYSTEM, content=rendered))
+    return messages
 
 
 # ── rolling window ───────────────────────────────────────────────────
@@ -202,7 +292,9 @@ def split_for_rollup(
 
 
 def overhead_tokens(
-    summary: str | None = None, level: PersonaLevel = PersonaLevel.FULL
+    summary: str | None = None,
+    level: PersonaLevel = PersonaLevel.FULL,
+    machine: MachineContext | None = None,
 ) -> int:
     """Tokens spent before the conversation even starts.
 
@@ -211,7 +303,7 @@ def overhead_tokens(
     budget immediately after rolling up — the roll-up "succeeded" and the
     context still overflowed.
     """
-    prefix = [*stable_prefix(level), *volatile_prefix(summary)]
+    prefix = [*stable_prefix(level), *volatile_prefix(summary, machine)]
     return sum(estimate_tokens(m.content) for m in prefix)
 
 
@@ -220,9 +312,10 @@ def assemble(
     *,
     summary: str | None = None,
     level: PersonaLevel = PersonaLevel.FULL,
+    machine: MachineContext | None = None,
 ) -> list[ChatMessage]:
     """Build the final message list, stable content first."""
-    return [*stable_prefix(level), *volatile_prefix(summary), *turns]
+    return [*stable_prefix(level), *volatile_prefix(summary, machine), *turns]
 
 
 def fit_to_budget(
@@ -231,6 +324,7 @@ def fit_to_budget(
     summary: str | None,
     hard_cap_tokens: int,
     level: PersonaLevel = PersonaLevel.FULL,
+    machine: MachineContext | None = None,
 ) -> list[ChatMessage]:
     """Drop oldest turns until the assembled prompt fits. Backstop, not policy.
 
@@ -243,11 +337,11 @@ def fit_to_budget(
     over-budget prompt if the prefix alone exceeds the cap. That would be a
     configuration error, and it is logged loudly rather than silently truncated.
     """
-    budget = hard_cap_tokens - overhead_tokens(summary, level)
+    budget = hard_cap_tokens - overhead_tokens(summary, level, machine)
     if budget <= 0:
         log.error(
             "context.prefix_exceeds_budget",
-            overhead=overhead_tokens(summary, level),
+            overhead=overhead_tokens(summary, level, machine),
             hard_cap=hard_cap_tokens,
             fix="Shorten the identity prompt or the roll-up summary.",
         )

@@ -32,6 +32,7 @@ from sidecar.memory.settings_store import ROUTING_BIAS, SELECTED_MODEL, Settings
 from sidecar.providers import catalog
 from sidecar.providers.availability import AvailabilityService
 from sidecar.providers.base import LLMProvider, ProviderError
+from sidecar.providers.connectivity import connectivity
 from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
@@ -117,6 +118,10 @@ async def _start_conversation(settings: Settings) -> None:
     availability.set_local_models(runtime.local_models)
     runtime.availability = availability
 
+    # Refreshes on a timer so a turn never waits on a network round-trip to
+    # answer "are you online" — §9.7 asks for exactly this caching.
+    connectivity.start()
+
     settings_store = SettingsStore(runtime.require_db())
     runtime.settings = settings_store
     selected = await settings_store.get(SELECTED_MODEL, catalog.SMART_ID)
@@ -182,6 +187,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await connectivity.stop()
         if runtime.conversation is not None:
             await runtime.conversation.shutdown()
         # Every provider holds an httpx pool, not just the local one. One that
