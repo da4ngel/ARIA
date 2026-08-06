@@ -61,32 +61,18 @@ reasoning ends. Measured with reasoning on, it produced *zero* content tokens in
 - Phase 1: read `message.content`, never `thinking`.
 - Phase 2: the TTS sentence buffer must key off `content`. Never speak thinking.
 
-## Hardware-measured constraints (RTX 4050, 6 GB, qwen3.5:4b, think=false)
-Measured, not assumed. Do not re-derive these; do not design against §10's
-estimates where they conflict.
+## Prompt latency (measured on this machine, 2026-08-06)
+Prefill costs **~480ms per 1000 tokens** here — over 3× what BUILD_SPEC §10
+originally assumed. Full tables live in §10 and §8.2; the operational rules:
+1. **Assemble the prompt stable-first.** Identity, voice, boundaries and tool
+   schemas go before anything that changes per turn. Ollama caches the KV for an
+   unchanged prefix — worth ~1s/turn. Affect, temporal context, retrieved facts
+   and episodes go last, nearest the conversation.
+2. Keep the pre-conversation budget near 800 tokens on local, not 2000.
+3. Measure turn 2, not turn 1. Cache-busting is invisible on a first turn.
 
-| prompt tokens | first content token |
-|---|---|
-| 20 | 491 ms |
-| 500 | 807 ms |
-| 1000 | 1102 ms |
-| 2000 | 1453 ms |
-
-Prefill costs **~480ms per 1000 tokens** here — over 3× §10's assumed 150ms.
-
-**So §8.2's 2000-token pre-conversation budget cannot coexist with a <700ms
-first token on this machine.** Two mitigations, both required:
-1. **Order the prompt stable-first**, against §8.2's stated order. Ollama reuses
-   the KV cache for an unchanged prefix: a stable ~1500-token prefix costs
-   1970ms once then ~790ms/turn, while putting volatile content early costs
-   ~1750ms *every* turn. Put identity/voice/boundaries and tool schemas first;
-   affect, temporal context, retrieved facts and episodes last, nearest the
-   conversation. §8.2 currently places affect at position 2, which busts the
-   cache for everything after it.
-2. Keep the real pre-conversation budget nearer 400–800 tokens than 2000.
-
-Phase 1 is unaffected — its prompt is just identity + recent turns. This bites
-in Phase 3 (tool schemas) and Phase 5 (retrieval).
+Phase 1 is unaffected — its prompt is identity + recent turns. This bites in
+Phase 3 (tool schemas) and Phase 5 (retrieval).
 
 ## Phase 0 notes for later phases
 - Python is **3.11** in `.venv`. `sidecar.ts` resolves it via `ARIA_PYTHON` env,

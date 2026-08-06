@@ -147,6 +147,12 @@ electron-builder    ^25.0.0
 ```
 
 ### Python side (`requirements.txt`, Python **3.11** — not 3.12, pywinauto/ctranslate2 wheels are safest on 3.11)
+
+> `requirements.txt` in the repo grows one phase at a time rather than installing
+> the whole list at Phase 0 — installing ~1.5GB of Phase 2 wheels to build a
+> health endpoint risks failing Phase 0 on an unrelated dependency. The list
+> below stays the pinned contract; deferred entries are named in a comment block
+> in the file alongside the phase that introduces each.
 ```
 fastapi==0.115.*
 uvicorn[standard]==0.32.*
@@ -165,7 +171,9 @@ pywin32==306
 psutil==6.0.*
 mss==9.0.*
 playwright==1.47.*
-anthropic==0.39.*
+openai==2.53.*
+google-genai==2.16.*
+keyring==25.7.*
 watchfiles==0.24.*
 python-docx==1.1.*
 pypdf==5.0.*
@@ -188,13 +196,32 @@ Everything (the app) must be installed and running as a service. Detect on start
 | Role | Model | Runtime | Size |
 |---|---|---|---|
 | Main brain | `qwen2.5:7b-instruct-q4_K_M` | Ollama / GPU | 4.7 GB |
+| Main brain (interim) | `qwen3.5:4b` | Ollama / GPU | 3.2 GB |
 | Router fallback | `qwen2.5:1.5b-instruct-q4_K_M` | Ollama / **CPU** | 1.0 GB |
 | Embeddings | `nomic-embed-text` (768-dim) | Ollama / CPU | 274 MB |
 | STT | `base.en` int8 | faster-whisper / CPU | 74 MB |
 | TTS | `kokoro-v1.0.onnx` + `voices-v1.0.bin` | ONNX / CPU | 330 MB |
 | Wake word | `hey_jarvis` pretrained | openWakeWord / CPU | 2 MB |
-| Cloud reasoning | `claude-sonnet-5` | Anthropic API | — |
-| Cloud vision | `claude-sonnet-5` | Anthropic API | — |
+| Cloud reasoning | OpenAI / Gemini (user-selected) | vendor API | — |
+| Cloud vision | Gemini or OpenAI vision model | vendor API | — |
+
+**Cloud is multi-vendor, keyed per provider.** Cloud reasoning routes to OpenAI
+or Gemini depending on configuration and key availability. Ollama is the
+fallback whenever no key is present *or the machine is offline* — not merely the
+cheap path. `core/router.py` therefore selects a **provider**, not a binary
+local-vs-cloud (see §9.7).
+
+API keys live in Windows Credential Manager via `keyring` (§11). Never `.env`,
+never logged, never in the repo.
+
+> **`qwen3.5:9b` will not work here.** At 6.6 GB it cannot stay resident on a
+> 6 GB card and spills to CPU. Use the 7B q4_K_M, or `qwen3.5:4b` as an interim.
+>
+> **qwen3.x models are reasoning models.** They stream into `message.thinking`
+> and leave `message.content` empty until reasoning ends — measured on this
+> machine, reasoning-on produced *zero* content tokens in 200 tokens / ~6s.
+> Always send `"think": false`. Phase 2's TTS sentence buffer must key off
+> `content`, or she reads her own reasoning aloud.
 
 **Ollama environment (set these as system env vars — they materially affect whether the model fits):**
 ```
@@ -254,8 +281,11 @@ aria/
 │   │   ├── conversation.py        # turn orchestration, streaming
 │   │   └── context.py             # prompt assembly
 │   ├── providers/
-│   │   ├── ollama.py
-│   │   ├── claude.py
+│   │   ├── base.py                # LLMProvider protocol — stream, tools, cancel
+│   │   ├── ollama.py              # local, and the offline fallback
+│   │   ├── openai.py              # cloud
+│   │   ├── gemini.py              # cloud
+│   │   ├── credentials.py         # keyring wrapper, §11
 │   │   ├── stt.py
 │   │   ├── tts.py
 │   │   └── wakeword.py
@@ -295,11 +325,22 @@ aria/
 │   ├── bin/                       # es.exe, ffmpeg.exe, Everything64.dll
 │   └── models/                    # kokoro onnx, voices bin, wakeword
 │
+├── scripts/
+│   └── make_tray_icons.py         # regenerates the embedded tray PNGs
+│
 └── data/                          # gitignored, created at runtime
     ├── aria.db
     ├── logs/
+    │   ├── sidecar.log            # structlog JSON, written from inside Python
+    │   └── sidecar.out.log        # child stdout/stderr, captured by Electron
+    ├── .handshake
     └── audio_cache/
 ```
+
+`providers/base.py` defines the interface every LLM backend implements —
+streaming deltas, tool-call emission, and cancellation. Write `ollama.py`
+against it from Phase 1. Retrofitting an abstraction over an Ollama-shaped
+client once three vendors exist is exactly the refactor rule 10 forbids.
 
 ---
 
@@ -622,20 +663,46 @@ boundaries:
 
 ### 8.2 System prompt assembly (`context.py`)
 
-Assembled fresh every turn, in this order, with a **hard budget of 2,000 tokens** for everything before the conversation:
+Assembled **stable-first**, with a budget of **~800 tokens** before the
+conversation on local models (2,000 is fine on cloud, which bills prefill
+differently and is not latency-critical in the same way):
 
 ```
+─── STABLE PREFIX — identical across turns, KV-cached ─────────────
 1. Identity + voice + boundaries       (from aria.yaml)      ~350 tok
-2. Affect state                        (§9.8, ~20 tok)        ~20 tok
-3. Temporal context                    (time, day, idle gap)  ~30 tok
-4. Retrieved facts                     (top 8 by relevance)  ~200 tok
-5. Retrieved episodes                  (top 3 by relevance)  ~300 tok
-6. Active screen/app context           (foreground window)    ~40 tok
-7. Tool schemas                        (top 12 relevant)     ~800 tok
+2. Tool schemas                        (top 12 relevant)     ~800 tok
+─── VOLATILE — changes every turn, re-prefilled every turn ────────
+3. Affect state                        (§9.8)                 ~20 tok
+4. Temporal context                    (time, day, idle gap)  ~30 tok
+5. Retrieved facts                     (top 8 by relevance)  ~200 tok
+6. Retrieved episodes                  (top 3 by relevance)  ~300 tok
+7. Active screen/app context           (foreground window)    ~40 tok
 8. Recent turns                        (rolling, fills rest)
 ```
 
-If the budget is exceeded, drop in this order: episodes → facts → tool schemas. Never drop identity or affect.
+**The stable/volatile split is the whole point of this ordering, and it is worth
+about a second per turn.** Ollama reuses the KV cache for an unchanged prefix, so
+anything placed *before* the first byte that changes is prefilled once instead of
+every turn. Measured on the target machine (RTX 4050, qwen3.5:4b):
+
+| prefix behaviour | turn 1 | turn 2 | turn 3 |
+|---|---|---|---|
+| stable prefix held (~1500 tok) | 1970 ms | **788 ms** | **796 ms** |
+| volatile content placed early | 1788 ms | **1735 ms** | **1785 ms** |
+
+An earlier draft of this spec put affect state at position 2. That single ~20
+token field changes every turn, so it invalidated the cache for the ~1,300
+tokens of facts, episodes and tool schemas behind it — paying full prefill
+forever to save nothing. Volatile content goes **last**, nearest the
+conversation.
+
+Corollary: tool schemas must be *stable* across turns to stay cacheable. If
+relevance-selection reshuffles the top-12 every turn (§7.2), the cache breaks
+anyway. Prefer a fixed core set plus a stable-sorted relevant set, and re-select
+only when the user's intent actually shifts.
+
+If the budget is exceeded, drop in this order: episodes → facts → tool schemas.
+Never drop identity or affect.
 
 ### 8.3 Reflection prompt (`reflect.j2`) — the learning mechanism
 
@@ -847,9 +914,10 @@ pytest sidecar/tests/test_db.py -v
   - Confirmation suspends the loop (§7.1)
   - Every step streams `tool.start` / `tool.end` so the UI shows work happening
 - `core/router.py` — §9.7 below
-- `providers/claude.py`: Anthropic SDK, `claude-sonnet-5`, streaming, same tool schemas as local
-- Route indicator in the UI. The user should always know whether that turn left the machine.
-- Offline/no-key fallback: cloud-routed turns degrade to local with a visible note
+- `providers/openai.py` and `providers/gemini.py`: streaming, same tool schemas as local, both behind `providers/base.py`
+- `providers/credentials.py`: keyring-backed key storage (§11), plus a Settings UI to enter and test each key
+- Route indicator in the UI. The user should always know whether that turn left the machine **and which provider served it**.
+- Offline/no-key fallback: cloud-routed turns degrade to local with a visible note. Detect offline *before* dialling out — see §9.7 stage 9.
 - `capture_screen` + cloud vision for "what am I looking at"
 
 **Acceptance gate:**
@@ -951,9 +1019,12 @@ Poll every 30s and surface in the UI when degraded:
 
 ### 9.7 Router logic (Phase 6)
 
+Two decisions, in order: **local or cloud**, then **which cloud provider**.
+
 ```
+── Stage 1: local vs cloud ────────────────────────────────────────
 1. Explicit override
-   "think hard" / "use claude" / force_cloud=true          → CLOUD
+   "think hard" / "use gpt" / "use gemini" / force_cloud   → CLOUD
    "stay local" / privacy_mode                             → LOCAL (always)
 
 2. Hard local (privacy — never leaves the machine)
@@ -973,10 +1044,30 @@ Poll every 30s and surface in the UI when degraded:
    {chat, single_action, multi_step, deep_reasoning}
    chat|single_action → LOCAL   |   else → CLOUD
 
-5. No API key or offline → LOCAL, with UI notice
+5. Offline, or no key for any cloud provider              → LOCAL, UI notice
+
+── Stage 2: which cloud provider ──────────────────────────────────
+6. Named in the message ("use gemini")                     → that provider
+7. Vision / screen understanding                           → configured vision
+                                                             provider
+8. Otherwise                                               → user's configured
+                                                             default
+9. Provider errors, rate-limits, or times out              → try the other
+                                                             provider once, then
+                                                             fall back to LOCAL
+                                                             with a visible note
 ```
 
-Log every routing decision with the resulting turn's latency and a user thumbs-up/down. After a few weeks you'll have a labelled dataset to tune the rules against — that's the upgrade path, not a bigger model.
+**Offline is a first-class path, not an error path.** Detect it before dialling
+out — a 30s connect timeout at the head of a turn is worse than a local answer.
+Cache reachability with a short TTL; do not probe the network on every turn.
+
+Never silently swap providers. The route indicator names the provider that
+actually served the turn (§9 Phase 6), including after a stage-9 fallback.
+
+Log every routing decision with the provider, the resulting turn's latency and a
+user thumbs-up/down. After a few weeks you'll have a labelled dataset to tune
+the rules against — that's the upgrade path, not a bigger model.
 
 ---
 
@@ -991,15 +1082,38 @@ Log each stage; assert the total in tests.
 | STT (5s audio, base.en int8) | 250ms | CPU |
 | Memory retrieval | 80ms | CPU |
 | Prompt assembly | 20ms | CPU |
-| LLM first token (7B, warm) | 400ms | GPU |
+| LLM first token (warm, short prompt) | 500ms | GPU |
 | First sentence complete | +250ms | GPU |
 | TTS first chunk (Kokoro) | 150ms | CPU |
-| **End of speech → first audible word** | **~900ms** | |
+| **End of speech → first audible word** | **~1000ms** | |
 
-**The three things that actually blow this budget:**
+#### Measured prefill cost — use these, not estimates
+
+RTX 4050 Laptop, 6GB, `qwen3.5:4b` q4, `think=false`, cold cache:
+
+| prompt tokens | first content token |
+|---|---|
+| 20 | 491 ms |
+| 500 | 807 ms |
+| 1,000 | 1,102 ms |
+| 2,000 | 1,453 ms |
+| 3,000 | 2,182 ms |
+
+That is **~480ms per 1,000 tokens**, not the ~150ms this section originally
+assumed. Re-measure on the 7B when it lands; expect it to be worse, not better.
+
+The practical consequence: **a 2,000-token prompt cannot produce a sub-700ms
+first token on this hardware.** Either keep the pre-conversation budget near 800
+tokens, or rely on the stable-prefix cache in §8.2 — which brings a 1,500-token
+prefix down to ~790ms per turn after the first. Both, ideally.
+
+**The four things that actually blow this budget:**
 1. **Cold model** — a model that unloaded costs 8–15s. `keep_alive=30m` plus a warm-up ping on startup and after any long idle.
 2. **Waiting for full LLM output before TTS** — always synthesize sentence-by-sentence.
-3. **Oversized prompts** — every 1,000 tokens of prompt adds ~150ms of prefill on this GPU. Enforce the 2,000-token pre-conversation budget in §8.2.
+3. **Oversized prompts** — see the table above. Enforce the §8.2 budget.
+4. **Cache-busting prompt order** — volatile content placed early costs ~1s per
+   turn, forever, and is invisible unless you measure turn 2 rather than turn 1.
+   See §8.2.
 
 ---
 
