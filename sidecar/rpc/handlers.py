@@ -266,6 +266,77 @@ async def settings_set_key(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "status": status(key).model_dump(mode="json")}
 
 
+@method("chat.sessions")
+async def chat_sessions(params: dict[str, Any]) -> dict[str, Any]:
+    """Past conversations for the history panel, most recently active first.
+
+    `query` searches message content, not just titles — you look for a
+    conversation by something you remember saying in it.
+    """
+    from sidecar.state import runtime
+
+    query = params.get("query")
+    limit = params.get("limit", 100)
+    sessions = await runtime.require_conversation().list_sessions(
+        int(limit) if isinstance(limit, int) else 100,
+        query if isinstance(query, str) else None,
+    )
+    return {"sessions": [s.model_dump(mode="json") for s in sessions]}
+
+
+@method("chat.rename")
+async def chat_rename(params: dict[str, Any]) -> dict[str, Any]:
+    """Set a conversation's title by hand, overriding the generated one."""
+    from sidecar.state import runtime
+
+    session_id = params.get("session_id")
+    title = params.get("title")
+    if not isinstance(session_id, str) or not isinstance(title, str) or not title.strip():
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS, "session_id and a non-empty title are required."
+        )
+
+    await runtime.require_conversation().rename_session(session_id, title)
+    return {"ok": True, "session_id": session_id, "title": title.strip()}
+
+
+@method("chat.delete")
+async def chat_delete(params: dict[str, Any]) -> dict[str, Any]:
+    """Delete a conversation. Requires an explicit confirmation round-trip.
+
+    CLAUDE.md rule 5: every destructive operation confirms first. The tool
+    registry that normally enforces that arrives in Phase 3, so this method
+    enforces it itself — called without `confirm`, it deletes nothing and
+    reports what would go, which is what the UI shows in its confirm step.
+    """
+    from sidecar.state import runtime
+
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "session_id is required.")
+
+    conversation = runtime.require_conversation()
+
+    if params.get("confirm") is not True:
+        matches = [s for s in await conversation.list_sessions() if s.id == session_id]
+        if not matches:
+            raise RpcMethodError(
+                ErrorCode.INVALID_PARAMS,
+                f"No conversation {session_id!r}. Call chat.sessions for the current list.",
+            )
+        found = matches[0]
+        return {
+            "ok": False,
+            "confirm_required": True,
+            "session_id": session_id,
+            "title": found.title or found.preview,
+            "message_count": found.message_count,
+        }
+
+    removed = await conversation.delete_session(session_id)
+    return {"ok": True, "session_id": session_id, "messages_deleted": removed}
+
+
 @method("chat.history")
 async def chat_history(params: dict[str, Any]) -> dict[str, Any]:
     """Reload a session from SQLite.

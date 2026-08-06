@@ -51,6 +51,32 @@ class StoredMessage(BaseModel):
         )
 
 
+class SessionSummary(BaseModel):
+    """One row in the history list. Everything the panel shows comes from here."""
+
+    id: str
+    started_at: str
+    # Model-generated, or None until the background job has run.
+    title: str | None = None
+    # First thing the user said. The fallback label, so the list is never blank.
+    preview: str = ""
+    message_count: int = 0
+    # Last message time, which is what "recent" should mean — a long-running
+    # conversation should not sink below a newer one that was abandoned.
+    last_activity: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> SessionSummary:
+        return cls(
+            id=row["id"],
+            started_at=row["started_at"],
+            title=row["title"],
+            preview=row["preview"] or "",
+            message_count=row["message_count"],
+            last_activity=row["last_activity"] or row["started_at"],
+        )
+
+
 class ConversationStore:
     """CRUD over `sessions` and `messages`."""
 
@@ -137,3 +163,95 @@ class ConversationStore:
             ).fetchone()
         )
         return int(row["n"]) if row else 0
+
+    # ── history browsing ────────────────────────────────────────────────
+
+    def reserve_session_id(self) -> str:
+        """A fresh id with no row behind it yet.
+
+        `ensure_session` creates a row for any id it does not recognise, so the
+        first message written under this id materialises the session. Pressing
+        New Chat and then closing the window therefore leaves nothing behind —
+        which is why `data/aria.db` had an empty session before this existed.
+        """
+        return f"s_{uuid.uuid4().hex[:12]}"
+
+    async def list_sessions(
+        self, limit: int = 100, query: str | None = None
+    ) -> list[SessionSummary]:
+        """Conversations for the history panel, most recently active first.
+
+        Sessions with no messages are excluded rather than deleted: an id
+        reserved by New Chat is legitimately empty until the first turn lands,
+        and a list that showed it would flicker.
+
+        `query` matches message *content*, not just the title — searching for
+        something you remember saying is the point.
+        """
+        sql = """
+            SELECT s.id, s.started_at, s.title,
+                   COUNT(m.id) AS message_count,
+                   MAX(m.created_at) AS last_activity,
+                   (SELECT content FROM messages
+                     WHERE session_id = s.id AND role = 'user'
+                     ORDER BY id LIMIT 1) AS preview
+            FROM sessions s
+            JOIN messages m ON m.session_id = s.id
+        """
+        params: list[object] = []
+        if query and query.strip():
+            # LIKE over content is a table scan, and correct at this size — the
+            # largest session here is 78 rows. FTS5 is Phase 5's problem.
+            sql += """
+            WHERE s.id IN (
+                SELECT DISTINCT session_id FROM messages WHERE content LIKE ?
+            ) OR s.title LIKE ?
+            """
+            like = f"%{query.strip()}%"
+            params += [like, like]
+        # `created_at` has second resolution, so two conversations touched in the
+        # same second tie. Message id breaks it: ids are monotonic, so the one
+        # spoken in most recently wins — falling back to session rowid would
+        # order by when each was *created*, which is the opposite of the intent.
+        sql += " GROUP BY s.id ORDER BY last_activity DESC, MAX(m.id) DESC LIMIT ?"
+        params.append(limit)
+
+        rows = await self._db.run(lambda c: list(c.execute(sql, params).fetchall()))
+        return [SessionSummary.from_row(r) for r in rows]
+
+    async def set_title(self, session_id: str, title: str) -> None:
+        await self._db.run(
+            lambda c: c.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?", (title.strip(), session_id)
+            )
+        )
+        log.info("session.titled", session_id=session_id)
+
+    async def get_title(self, session_id: str) -> str | None:
+        row = await self._db.run(
+            lambda c: c.execute(
+                "SELECT title FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        )
+        return row["title"] if row else None
+
+    async def delete_session(self, session_id: str) -> int:
+        """Remove a conversation and everything in it. Returns messages deleted.
+
+        Both tables in one transaction: `messages.session_id` is a foreign key,
+        so deleting the session first would either fail or orphan the rows,
+        depending on whether `foreign_keys` is on.
+        """
+
+        def _delete(conn: sqlite3.Connection) -> int:
+            with conn:
+                cursor = conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?", (session_id,)
+                )
+                removed = cursor.rowcount
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            return int(removed)
+
+        removed = await self._db.run(_delete)
+        log.info("session.deleted", session_id=session_id, messages=removed)
+        return removed

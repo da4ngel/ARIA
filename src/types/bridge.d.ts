@@ -70,6 +70,18 @@ export interface ModelListing {
   models: ModelAvailability[]
 }
 
+/** One past conversation, as `chat.sessions` returns it. */
+export interface SessionSummary {
+  id: string
+  started_at: string
+  /** Generated in the background; null until then. */
+  title: string | null
+  /** First thing you said — the fallback label. */
+  preview: string
+  message_count: number
+  last_activity: string
+}
+
 /** `settings.keys` — presence and last four characters only, never a value. */
 export interface CredentialStatus {
   key: 'openai_api_key' | 'gemini_api_key'

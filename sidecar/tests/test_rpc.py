@@ -142,6 +142,48 @@ def test_handshake_file_written(client: TestClient, tmp_path: Path) -> None:
 # ── helpers ───────────────────────────────────────────────────────────
 
 
+# ── history (Phase 1.5) ───────────────────────────────────────────────
+
+
+def test_chat_sessions_is_empty_on_a_fresh_database(client: TestClient) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        response = _call(ws, "chat.sessions")
+    assert response["result"]["sessions"] == []
+
+
+def test_chat_new_creates_no_conversation(client: TestClient) -> None:
+    """The id is reserved, not written — so the list stays empty."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        new = _call(ws, "chat.new")
+        listed = _call(ws, "chat.sessions", call_id=2)
+    assert new["result"]["session_id"].startswith("s_")
+    assert listed["result"]["sessions"] == []
+
+
+def test_chat_delete_refuses_without_confirmation(client: TestClient) -> None:
+    """CLAUDE.md rule 5: destructive operations need a confirmation round-trip."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        response = _call(ws, "chat.delete", {"session_id": "s_nope"})
+    # Nothing to delete, so it reports that rather than silently succeeding.
+    assert response["error"]["code"] == ErrorCode.INVALID_PARAMS
+    assert "chat.sessions" in response["error"]["message"]
+
+
+def test_chat_rename_requires_a_non_empty_title(client: TestClient) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        response = _call(ws, "chat.rename", {"session_id": "s_x", "title": "   "})
+    assert response["error"]["code"] == ErrorCode.INVALID_PARAMS
+
+
+def test_history_methods_are_registered(client: TestClient) -> None:
+    """An unregistered method returns -32601, so this proves they exist."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        for index, method in enumerate(("chat.sessions", "chat.rename", "chat.delete"), start=1):
+            response = _call(ws, method, {}, call_id=index)
+            error = response.get("error")
+            assert not error or error["code"] != ErrorCode.METHOD_NOT_FOUND, method
+
+
 @pytest.mark.parametrize(
     ("header", "expected"),
     [

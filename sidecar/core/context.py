@@ -18,6 +18,7 @@ without moving the cache boundary.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
 import structlog
@@ -281,3 +282,42 @@ def summarization_request(to_summarize: list[ChatMessage]) -> list[ChatMessage]:
         ),
         ChatMessage(role=Role.USER, content=transcript),
     ]
+
+
+# A title is a label in a list, not a summary. Six words is about what fits the
+# 420px panel before truncation, and asking for fewer than the model naturally
+# writes is the only thing that reliably stops it returning a sentence.
+TITLE_MAX_WORDS = 6
+TITLE_MAX_CHARS = 60
+
+
+def title_request(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Prompt asking the model to name a conversation for the history list."""
+    transcript = "\n".join(f"{m.role}: {m.content}" for m in messages)
+    return [
+        ChatMessage(
+            role=Role.SYSTEM,
+            content=(
+                f"Write a title for this conversation in at most {TITLE_MAX_WORDS} "
+                "words. Name the subject, not the format — 'Ollama VRAM limits', "
+                "not 'A conversation about settings'. Output only the title: no "
+                "quotes, no trailing period, no preamble."
+            ),
+        ),
+        ChatMessage(role=Role.USER, content=transcript),
+    ]
+
+
+def clean_title(raw: str) -> str:
+    """Strip what models add despite being told not to.
+
+    Even with an explicit instruction they wrap titles in quotes, prefix
+    "Title:", and add a full stop. Cheaper to strip than to re-prompt.
+    """
+    title = raw.strip().splitlines()[0] if raw.strip() else ""
+    title = re.sub(r'^(title|subject)\s*[:\-]\s*', "", title, flags=re.IGNORECASE)
+    title = title.strip().strip('"“”\'').rstrip(".").strip()
+    words = title.split()
+    if len(words) > TITLE_MAX_WORDS:
+        title = " ".join(words[:TITLE_MAX_WORDS])
+    return title[:TITLE_MAX_CHARS].strip()

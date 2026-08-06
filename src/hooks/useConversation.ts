@@ -46,14 +46,28 @@ export interface UseConversation {
   cancel: () => Promise<void>
   /** Clear the view and start a new session in the sidecar. */
   newChat: () => Promise<void>
+  /** Load a past conversation and keep talking in it. */
+  openSession: (sessionId: string) => Promise<void>
+  /** Which conversation is on screen, so the history panel can mark it. */
+  sessionId: string | null
   /** First-token latency of the last turn — the Phase 1 gate, visible in the UI. */
   lastFirstTokenMs: number | null
+}
+
+/** StoredMessage rows -> the shape the transcript renders. */
+function toTurns(messages: StoredMessage[]): Turn[] {
+  return messages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({ id: `m${m.id}`, role: m.role as 'user' | 'assistant', content: m.content }))
 }
 
 export function useConversation(connected: boolean): UseConversation {
   const [turns, setTurns] = useState<Turn[]>([])
   const [busy, setBusy] = useState(false)
   const [lastFirstTokenMs, setLastFirstTokenMs] = useState<number | null>(null)
+  // Mirrored into state as well as a ref: the ref keeps event handlers correct
+  // without re-subscribing, the state lets the history panel mark what's open.
+  const [activeSession, setActiveSession] = useState<string | null>(null)
   const sessionId = useRef<string | null>(null)
   const activeTurnId = useRef<string | null>(null)
 
@@ -67,15 +81,8 @@ export function useConversation(connected: boolean): UseConversation {
       .then((history) => {
         if (cancelled) return
         sessionId.current = history.session_id
-        setTurns(
-          history.messages
-            .filter((m) => m.role === 'user' || m.role === 'assistant')
-            .map((m) => ({
-              id: `m${m.id}`,
-              role: m.role as 'user' | 'assistant',
-              content: m.content,
-            })),
-        )
+        setActiveSession(history.session_id)
+        setTurns(toTurns(history.messages))
       })
       .catch(() => {
         /* the status line already tells the user the brain is down */
@@ -135,6 +142,7 @@ export function useConversation(connected: boolean): UseConversation {
       )
       activeTurnId.current = started.turn_id
       sessionId.current = started.session_id
+      setActiveSession(started.session_id)
     } catch (cause) {
       activeTurnId.current = null
       setBusy(false)
@@ -154,15 +162,41 @@ export function useConversation(connected: boolean): UseConversation {
   }, [])
 
   const newChat = useCallback(async () => {
+    // The id is reserved, not created — no row exists behind it until the first
+    // message, so opening a new chat and walking away leaves nothing behind.
     const started = await window.aria.call<{ session_id: string }>('chat.new', {})
     sessionId.current = started.session_id
+    setActiveSession(null) // nothing to mark as open in the history list yet
     activeTurnId.current = null
     setBusy(false)
     setLastFirstTokenMs(null)
     setTurns([])
   }, [])
 
-  return { turns, busy, send, cancel, newChat, lastFirstTokenMs }
+  const openSession = useCallback(async (id: string) => {
+    const history = await window.aria.call<{
+      session_id: string | null
+      messages: StoredMessage[]
+    }>('chat.history', { session_id: id })
+
+    sessionId.current = history.session_id ?? id
+    setActiveSession(history.session_id ?? id)
+    activeTurnId.current = null
+    setBusy(false)
+    setLastFirstTokenMs(null)
+    setTurns(toTurns(history.messages))
+  }, [])
+
+  return {
+    turns,
+    busy,
+    send,
+    cancel,
+    newChat,
+    openSession,
+    sessionId: activeSession,
+    lastFirstTokenMs,
+  }
 }
 
 // ── reducers ──────────────────────────────────────────────────────────

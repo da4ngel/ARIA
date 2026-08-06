@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from sidecar.core import context as ctx
 from sidecar.core.router import RouteDecision, Router, RoutingBias
-from sidecar.memory.messages import ConversationStore, StoredMessage
+from sidecar.memory.messages import ConversationStore, SessionSummary, StoredMessage
 from sidecar.providers import catalog
 from sidecar.providers.base import (
     ChatMessage,
@@ -39,6 +39,23 @@ log = structlog.get_logger(__name__)
 
 SUMMARY_MAX_TOKENS = 400
 SUMMARY_MAX_CHARS = SUMMARY_MAX_TOKENS * 4  # defensive clamp; see _summarize
+
+# Two turns in, there is a subject worth naming. Earlier than that and every
+# conversation gets titled "Greeting".
+TITLE_MIN_MESSAGES = 4
+# Only the opening turns feed the title. A long conversation drifts, and naming
+# it by where it ended up makes it unfindable by what you remember starting with.
+TITLE_FROM_TURNS = 6
+# Wait for the user to stop typing before spending the model on a title.
+#
+# Measured: firing immediately after a turn put the *next* turn at 924ms against
+# a 700ms gate, because both requests queued on the same Ollama instance. A
+# title is worth zero of the user's milliseconds, so it waits for real idle.
+TITLE_IDLE_DELAY_S = 3.0
+TITLE_IDLE_TIMEOUT_S = 90.0
+# Opening History should not queue a model call for every conversation ever had.
+# A few per open catches up over a couple of visits.
+TITLE_BACKFILL_PER_CALL = 3
 
 
 class TurnStarted(BaseModel):
@@ -112,6 +129,17 @@ class ConversationService:
         # Which local model Ollama currently holds in VRAM, so switching models
         # can evict the old one first (see `_free_vram_for`).
         self._resident_local: str | None = model if catalog.get(model) else None
+        # turn_id -> session_id, so deleting a conversation can cancel a turn
+        # still streaming into it.
+        self._turn_sessions: dict[str, str] = {}
+        # Background jobs that must not outlive the process — currently title
+        # generation. Kept apart from `_tasks`, which `cancel()` reaches into.
+        self._jobs: set[asyncio.Task[None]] = set()
+        # Sessions already titled this run, so a busy conversation does not
+        # re-ask the model on every turn.
+        self._titled: set[str] = set()
+        # An id handed out by `new_session` that no message has landed in yet.
+        self._pending_new: str | None = None
         # Roll-up notes are per-session and rebuilt on demand; not yet durable.
         # Phase 5 moves this into `episodes` where it belongs.
         self._summaries: dict[str, str] = {}
@@ -134,11 +162,67 @@ class ConversationService:
         self._router.set_bias(bias)
 
     async def new_session(self) -> str:
-        """Start a fresh conversation. The old one stays in SQLite."""
-        session_id = await self._store.ensure_session(None)
+        """Start a fresh conversation, without writing anything yet.
+
+        Returns a *reserved* id: no row exists behind it until the first
+        message, because `ConversationStore.ensure_session` creates a row for
+        any id it does not recognise. Opening a new chat and closing the window
+        therefore leaves no trace.
+
+        The id matters. `send()` with no `session_id` continues the most recent
+        conversation by design, so without one to hand back, the first message
+        after New Chat would land in the previous conversation.
+        """
+        session_id = self._store.reserve_session_id()
         self._summaries.pop(session_id, None)
+        # Also held here, so a caller that forgets to echo the id back still
+        # gets a new conversation rather than silently resuming the old one.
+        # Belt and braces on purpose: that failure is invisible until you
+        # notice the assistant answering with context you thought you cleared.
+        self._pending_new = session_id
         log.info("session.new", session_id=session_id)
         return session_id
+
+    async def list_sessions(
+        self, limit: int = 100, query: str | None = None
+    ) -> list[SessionSummary]:
+        """The history list, plus a nudge to name anything still unnamed.
+
+        Conversations that predate titling — or that ended before the idle job
+        could run — would otherwise sit in the list forever labelled by their
+        first message, which for three of them here reads "hi", "hi", and "what
+        did ieat for breakfast". Opening History queues a few titles in the
+        background; the list returned now is unaffected, and the next open shows
+        them.
+        """
+        sessions = await self._store.list_sessions(limit, query)
+        queued = 0
+        for session in sessions:
+            if queued >= TITLE_BACKFILL_PER_CALL:
+                break
+            if session.title or session.message_count < TITLE_MIN_MESSAGES:
+                continue
+            if session.id in self._titled:
+                continue
+            self._maybe_title(session.id)
+            queued += 1
+        return sessions
+
+    async def rename_session(self, session_id: str, title: str) -> None:
+        await self._store.set_title(session_id, title)
+
+    async def delete_session(self, session_id: str) -> int:
+        """Remove a conversation. Cancels it first if it is the one in flight."""
+        for turn_id, task in list(self._tasks.items()):
+            if self._turn_sessions.get(turn_id) == session_id and not task.done():
+                task.cancel()
+
+        removed = await self._store.delete_session(session_id)
+        # Drop the roll-up note too, or a later session reusing the id would
+        # inherit a summary of a conversation that no longer exists.
+        self._summaries.pop(session_id, None)
+        self._titled.discard(session_id)
+        return removed
 
     async def send(
         self, text: str, session_id: str | None = None, model: str | None = None
@@ -148,14 +232,17 @@ class ConversationService:
         Omitting `session_id` continues the most recent conversation rather than
         starting one. `ensure_session(None)` mints a new session every call, so
         a client that forgot to echo the id back silently lost all context one
-        turn at a time. Starting fresh is `new_session`, and only that.
+        turn at a time. Starting fresh is `new_session`, and only that — whose
+        reserved id takes precedence here, so New Chat works even if the caller
+        drops the id it was handed.
         """
         if not text.strip():
             raise ValueError("Cannot send an empty message.")
 
         resolved_session = await self._store.ensure_session(
-            session_id or await self._store.latest_session_id()
+            session_id or self._pending_new or await self._store.latest_session_id()
         )
+        self._pending_new = None
         turn_id = f"t_{uuid.uuid4().hex[:12]}"
 
         await self._store.add_message(resolved_session, Role.USER, text)
@@ -164,7 +251,9 @@ class ConversationService:
             self._run_turn(turn_id, resolved_session, text, model or self._selected)
         )
         self._tasks[turn_id] = task
+        self._turn_sessions[turn_id] = resolved_session
         task.add_done_callback(lambda _: self._tasks.pop(turn_id, None))
+        task.add_done_callback(lambda _: self._turn_sessions.pop(turn_id, None))
 
         return TurnStarted(turn_id=turn_id, session_id=resolved_session)
 
@@ -191,6 +280,11 @@ class ConversationService:
         for task in list(self._tasks.values()):
             task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        # Background titling holds a database handle. Cancel and drain it too,
+        # or the connection closes underneath a job still writing to it.
+        for job in list(self._jobs):
+            job.cancel()
+        await asyncio.gather(*self._jobs, return_exceptions=True)
 
     # ── the turn itself ─────────────────────────────────────────────────
 
@@ -367,6 +461,70 @@ class ConversationService:
             },
         )
         await self._bus.set_state(AssistantState.IDLE)
+        self._maybe_title(session_id)
+
+    # ── titles ──────────────────────────────────────────────────────────
+
+    def _maybe_title(self, session_id: str) -> None:
+        """Name the conversation once it has enough content to name.
+
+        Deliberately fire-and-forget, after `set_state(IDLE)`: the reply is
+        already on screen, and a title is worth zero milliseconds of the user's
+        time. Awaiting it here would put a second model call on the latency path
+        that Phase 1 spent itself measuring.
+        """
+        if session_id in self._titled:
+            return
+        self._titled.add(session_id)  # claim it now; one attempt per session per run
+
+        job = asyncio.create_task(self._generate_title(session_id))
+        self._jobs.add(job)
+        job.add_done_callback(self._jobs.discard)
+
+    async def _wait_for_idle(self) -> bool:
+        """Hold until no turn is in flight. False if the user never stops."""
+        deadline = time.monotonic() + TITLE_IDLE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(TITLE_IDLE_DELAY_S)
+            if not self._tasks:
+                return True
+        return False
+
+    async def _generate_title(self, session_id: str) -> None:
+        """Ask the local model for a short label. Never raises."""
+        try:
+            if not await self._wait_for_idle():
+                self._titled.discard(session_id)  # a later turn will retry
+                return
+            if await self._store.get_title(session_id):
+                return
+            history = await self._store.history(session_id)
+            if len(history) < TITLE_MIN_MESSAGES:
+                self._titled.discard(session_id)  # try again once it has grown
+                return
+
+            # `history` is oldest-first, so this is the *opening* of the
+            # conversation. Titling by the tail would name a long session after
+            # wherever it drifted to, which is not what you would search for.
+            opening = ctx.to_chat_messages(history[:TITLE_FROM_TURNS])
+
+            chunks: list[str] = []
+            async for delta in self._provider.stream_chat(
+                ctx.title_request(opening),
+                model=self._model,
+                options=GenerationOptions(num_ctx=self._num_ctx, max_tokens=32),
+            ):
+                chunks.append(delta.text)
+                if delta.done:
+                    break
+
+            title = ctx.clean_title("".join(chunks))
+            if title:
+                await self._store.set_title(session_id, title)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a title is never worth an error
+            log.warning("session.title_failed", session_id=session_id, error=str(exc))
 
     async def _on_cancelled(
         self, turn_id: str, session_id: str, collected: list[str], started: float

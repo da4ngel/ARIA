@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from sidecar.memory.db import SCHEMA_PATH, Database, connect, table_names
+from sidecar.memory.db import SCHEMA_PATH, SCHEMA_VERSION, Database, connect, table_names
 from sidecar.memory.settings_store import ROUTING_BIAS, SELECTED_MODEL, SettingsStore
 
 
@@ -62,8 +62,10 @@ async def test_all_returns_every_setting(store: SettingsStore) -> None:
 # ── migration ─────────────────────────────────────────────────────────
 
 
-def test_fresh_database_lands_on_version_2(database: Database, conn: sqlite3.Connection) -> None:
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+def test_fresh_database_lands_on_the_current_version(
+    database: Database, conn: sqlite3.Connection
+) -> None:
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert "settings" in table_names(conn)
 
 
@@ -73,8 +75,8 @@ def test_selected_model_is_seeded_to_smart(conn: sqlite3.Connection) -> None:
 
 
 def test_migrate_is_idempotent(database: Database) -> None:
-    assert database.migrate() == 2
-    assert database.migrate() == 2
+    assert database.migrate() == SCHEMA_VERSION
+    assert database.migrate() == SCHEMA_VERSION
 
 
 def test_upgrades_a_v1_database_without_losing_messages(tmp_path: Path) -> None:
@@ -97,10 +99,12 @@ def test_upgrades_a_v1_database_without_losing_messages(tmp_path: Path) -> None:
 
     db = Database(db_path)
     try:
-        assert db.migrate() == 2
+        assert db.migrate() == SCHEMA_VERSION
         conn = db._conn  # noqa: SLF001
         assert "settings" in table_names(conn)
         survived = conn.execute("SELECT content FROM messages WHERE session_id='s_old'").fetchone()
         assert survived["content"] == "remember me"
+        # Migration 3 clears empty sessions; one holding a message must survive.
+        assert conn.execute("SELECT 1 FROM sessions WHERE id='s_old'").fetchone()
     finally:
         db.close()

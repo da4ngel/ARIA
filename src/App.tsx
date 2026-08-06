@@ -11,6 +11,7 @@ import { useState } from 'react'
 import { ComposerBar } from '@/components/ComposerBar'
 import { ConnectionStatus } from '@/components/ConnectionStatus'
 import { ConversationView } from '@/components/ConversationView'
+import { HistoryPanel } from '@/components/HistoryPanel'
 import { ModelPicker } from '@/components/ModelPicker'
 import { Orb } from '@/components/Orb'
 import { SettingsPanel } from '@/components/SettingsPanel'
@@ -21,9 +22,11 @@ import { useRpc } from '@/hooks/useRpc'
 export default function App(): JSX.Element {
   const { status, assistantState, lastLog, restartBrain } = useRpc()
   const connected = status === 'connected'
-  const { turns, busy, send, cancel, newChat, lastFirstTokenMs } = useConversation(connected)
+  const { turns, busy, send, cancel, newChat, openSession, sessionId, lastFirstTokenMs } =
+    useConversation(connected)
   const models = useModels(connected)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   return (
     <div className="relative flex h-screen flex-col gap-3 rounded-2xl border border-aria-edge bg-aria-bg/95 p-4 text-aria-text backdrop-blur">
@@ -39,6 +42,14 @@ export default function App(): JSX.Element {
           className="flex items-center gap-1.5"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
+          <button
+            type="button"
+            disabled={!connected}
+            onClick={() => setHistoryOpen(true)}
+            className="rounded-lg border border-aria-edge px-2 py-1 text-xs text-aria-muted hover:text-aria-text disabled:opacity-40"
+          >
+            History
+          </button>
           <button
             type="button"
             disabled={!connected || turns.length === 0}
@@ -89,6 +100,17 @@ export default function App(): JSX.Element {
           </span>
         )}
       </footer>
+
+      {historyOpen && (
+        <HistoryPanel
+          activeSessionId={sessionId}
+          onOpen={(id) => {
+            void openSession(id)
+            setHistoryOpen(false)
+          }}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
 
       {settingsOpen && (
         <SettingsPanel onClose={() => setSettingsOpen(false)} onKeysChanged={models.refresh} />

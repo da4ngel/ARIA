@@ -82,10 +82,32 @@ class RecordingBus(EventBus):
 
 
 @pytest.fixture
-def service(database: Database) -> tuple[ConversationService, FakeProvider, RecordingBus]:
+async def make_service():
+    """Build services that are all shut down when the test ends.
+
+    The teardown is not optional: finishing a turn spawns a background title
+    job, and without a drain those tasks outlive the test and asyncio complains
+    they were destroyed while pending. Several tests build more than one
+    service, so cleanup lives here rather than at each call site where an
+    assertion failure would skip it.
+    """
+    built: list[ConversationService] = []
+
+    def build(**kwargs: object) -> ConversationService:
+        svc = ConversationService(**kwargs)  # type: ignore[arg-type]
+        built.append(svc)
+        return svc
+
+    yield build
+    for svc in built:
+        await svc.shutdown()
+
+
+@pytest.fixture
+async def service(database: Database, make_service):
     provider = FakeProvider()
     bus = RecordingBus()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=provider,
         bus=bus,
@@ -125,14 +147,16 @@ async def test_send_streams_tokens_and_persists(service) -> None:
     assert history.messages[1].content == "Hello there."
 
 
-async def test_history_survives_a_new_service_instance(database: Database, service) -> None:
+async def test_history_survives_a_new_service_instance(
+    database: Database, service, make_service
+) -> None:
     """The Phase 1 gate: kill the window, conversation reloads from SQLite."""
     svc, provider, bus = service
     result = await svc.send("remember this")
     await _drain(svc)
 
     # A brand new service over the same database == a relaunched app.
-    fresh = ConversationService(
+    fresh = make_service(
         store=ConversationStore(database),
         provider=FakeProvider(),
         bus=RecordingBus(),
@@ -155,10 +179,10 @@ async def test_state_transitions_thinking_then_idle(service) -> None:
 # ── cancellation ──────────────────────────────────────────────────────
 
 
-async def test_cancel_stops_mid_stream_and_keeps_partial(database: Database) -> None:
+async def test_cancel_stops_mid_stream_and_keeps_partial(database: Database, make_service) -> None:
     provider = FakeProvider(chunks=["one "] * 50, delay=0.02)
     bus = RecordingBus()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=provider,
         bus=bus,
@@ -215,6 +239,87 @@ async def test_new_session_is_the_only_way_to_start_fresh(service) -> None:
     assert [m.content for m in old.messages] == ["remember this", "Hello there."]
 
 
+async def test_new_session_writes_no_row_until_a_message_is_sent(service) -> None:
+    """New Chat then closing the window must leave nothing behind."""
+    svc, _p, _b = service
+    await svc.send("first conversation")
+    await _drain(svc)
+
+    reserved = await svc.new_session()
+    assert [s.id for s in await svc.list_sessions()] != [reserved]
+    assert len(await svc.list_sessions()) == 1
+
+    await svc.send("second conversation")
+    await _drain(svc)
+    listed = await svc.list_sessions()
+    assert listed[0].id == reserved
+
+
+async def test_reserved_session_wins_over_continuing_the_latest(service) -> None:
+    """The sharp edge: `send` with no id continues the most recent conversation,
+    so New Chat has to take precedence or the first message lands in the old one."""
+    svc, _p, _b = service
+    first = await svc.send("original conversation")
+    await _drain(svc)
+
+    reserved = await svc.new_session()
+    after = await svc.send("brand new topic")  # deliberately passes no session_id
+    await _drain(svc)
+
+    assert after.session_id == reserved
+    assert after.session_id != first.session_id
+
+
+async def test_deleting_a_conversation_removes_it_from_the_list(service) -> None:
+    svc, _p, _b = service
+    first = await svc.send("delete this one")
+    await _drain(svc)
+    await svc.new_session()
+    second = await svc.send("keep this one")
+    await _drain(svc)
+
+    assert await svc.delete_session(first.session_id) == 2
+    assert [s.id for s in await svc.list_sessions()] == [second.session_id]
+
+
+async def test_next_turn_works_after_deleting_the_active_conversation(service) -> None:
+    """Deleting what you are looking at must not wedge the assistant."""
+    svc, _p, bus = service
+    started = await svc.send("about to be deleted")
+    await _drain(svc)
+    await svc.delete_session(started.session_id)
+
+    await svc.send("a fresh start")
+    await _drain(svc)
+
+    complete = bus.of(Event.TURN_COMPLETE)
+    assert complete, "the turn after a delete must still complete"
+    assert (await svc.history(None)).messages[-1].content == "Hello there."
+
+
+async def test_titling_waits_for_idle_rather_than_racing_the_next_turn(service) -> None:
+    """Measured: firing a title straight after a turn pushed the *next* turn to
+    924ms against a 700ms gate, because both queued on the same Ollama."""
+    svc, _p, _b = service
+    await svc.send("what is the capital of Japan")
+    await _drain(svc)
+    await svc.send("and the population")
+    await _drain(svc)
+
+    # A title job is queued, and deliberately has not run yet.
+    assert svc._jobs, "expected a background title job"  # noqa: SLF001
+    assert await svc._store.get_title((await svc.history(None)).session_id or "") is None  # noqa: SLF001
+
+
+async def test_rename_sticks(service) -> None:
+    svc, _p, _b = service
+    started = await svc.send("hello")
+    await _drain(svc)
+
+    await svc.rename_session(started.session_id, "Named by hand")
+    assert (await svc.list_sessions())[0].title == "Named by hand"
+
+
 async def test_cancel_unknown_turn_returns_false(service) -> None:
     svc, _p, _b = service
     assert await svc.cancel("t_nope") is False
@@ -241,7 +346,7 @@ async def test_provider_failure_surfaces_error_not_crash(service) -> None:
 
 
 async def test_failover_answers_from_the_next_model_and_names_both(
-    database: Database,
+    database: Database, make_service
 ) -> None:
     """A cloud model that dies mid-chain must never swap silently (§9.7 stage 7)."""
     dead = FakeProvider()
@@ -250,7 +355,7 @@ async def test_failover_answers_from_the_next_model_and_names_both(
 
     bus = RecordingBus()
     health = HealthTracker()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=alive,
         bus=bus,
@@ -279,7 +384,7 @@ async def test_failover_answers_from_the_next_model_and_names_both(
 
 
 async def test_failover_after_partial_output_tells_the_ui_to_discard_it(
-    database: Database,
+    database: Database, make_service
 ) -> None:
     """Otherwise the replacement reply appends to half a sentence from a model
     that never finished."""
@@ -297,7 +402,7 @@ async def test_failover_after_partial_output_tells_the_ui_to_discard_it(
 
     bus = RecordingBus()
     health = HealthTracker()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=FakeProvider(chunks=["Recovered."]),
         bus=bus,
@@ -324,11 +429,11 @@ async def test_failover_after_partial_output_tells_the_ui_to_discard_it(
 
 
 async def test_failover_records_the_serving_model_route_in_sqlite(
-    database: Database,
+    database: Database, make_service
 ) -> None:
     alive = FakeProvider(chunks=["Cloud answer."])
     health = HealthTracker()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=alive,
         bus=RecordingBus(),
@@ -346,13 +451,15 @@ async def test_failover_records_the_serving_model_route_in_sqlite(
     assert history.messages[-1].route == "cloud"
 
 
-async def test_trivial_turn_stays_local_even_at_quality_bias(database: Database) -> None:
+async def test_trivial_turn_stays_local_even_at_quality_bias(
+    database: Database, make_service
+) -> None:
     local = FakeProvider(chunks=["Hey."])
     cloud = FakeProvider()
     cloud.fail_with = AssertionError("a greeting must not reach a cloud provider")
 
     bus = RecordingBus()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=local,
         bus=bus,
@@ -412,11 +519,11 @@ def test_rollup_splits_oldest_half_without_orphaning_a_reply() -> None:
     assert kept[0].role == Role.USER
 
 
-async def test_long_conversation_triggers_rollup(database: Database) -> None:
+async def test_long_conversation_triggers_rollup(database: Database, make_service) -> None:
     """30-turn coherence gate: stays under budget, no overflow."""
     provider = FakeProvider(chunks=["z" * 3000])
     bus = RecordingBus()
-    svc = ConversationService(
+    svc = make_service(
         store=ConversationStore(database),
         provider=provider,
         bus=bus,
