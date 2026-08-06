@@ -30,12 +30,30 @@ const STATUS_LABEL: Record<BrainStatus, string> = {
   disconnected: 'Brain: disconnected',
 }
 
-/** A 16×16 dot, tinted by connection state. Avoids shipping icon assets in Phase 0. */
+/**
+ * A 32×32 dot, tinted by connection state.
+ *
+ * These are real PNGs, embedded as base64. Electron's nativeImage cannot decode
+ * SVG — createFromDataURL on an image/svg+xml URL silently returns an *empty*
+ * image, which on Windows produces a tray entry that is present and clickable
+ * but invisible. Embedding rather than loading from resources/ also keeps the
+ * icon working identically in dev and in the packaged app, where that directory
+ * moves.
+ *
+ * Regenerate with scripts/make_tray_icons.py if the palette changes.
+ */
+const ICON_PNG: Record<'ok' | 'warn' | 'bad', string> = {
+  ok: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAsUlEQVR42u2X0Q2AIAwFGYV5nIIRGMFNGIVNXKEjICaYEBKkwTatho/7Ico7QoVqtmM3kpgl8DUBm/GZmIFMKkAZ8+UZcoFr0lAFjghYEUy4a1aLBcq7rwTcRHCLmxWgCB9KPO05EApAryZ6AoEwvC5MlIBlCL+xGAHPKOAxApFRIGIEgFEAMAKJGf0C4lsgXoTin6H4QSR+FKu4jMSvYxUNiYqWTEVTqqItX39G/xU4Af7VYrmYWVqIAAAAAElFTkSuQmCC',
+  warn: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAArklEQVR42u2XwQ2AIAxFGYWDgzFCN2IURuoAHhATTAgJ0mCbVuPhXYjyH6FCdXvanCbuF3ibgC9AIRWwkCtYx6A+wy5wThqbwBmRKkIJD91qqWB995FAWAjuCasCHOFTibs9R0YBHNXESCAyhreFSRLwAuEXniIAggJAEUiCAokigIICSBHIwtgXUN8C9SJU/wzVDyL1o9jEZaR+HZtoSEy0ZCaaUhNt+f9n9F2BA4UyOsg+wFQsAAAAAElFTkSuQmCC',
+  bad: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAArUlEQVR42u2XwQ2AIAxFGYXRGAEmYhRG6tUbYoIJIUEabNNqOLwLUf4jVKjmCMFIYrbA1wRswRdSAQq5AnXM12fIBa5JYxM4I2JFMOGuWy0WqO++EnALwT1uVYAifCrxtOdAKACjmhgJRMLwtjBRApYh/MZiBDyjgMcIJEaBhBEARgHACGRm9AuIb4F4EYp/huIHkfhRrOIyEr+OVTQkKloyFU2pirZ8/xn9V+AENZQqyAFzoywAAAAASUVORK5CYII=',
+}
+
 function statusIcon(status: BrainStatus): Electron.NativeImage {
-  const color =
-    status === 'connected' ? '#4ade80' : status === 'disconnected' ? '#f87171' : '#fbbf24'
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="${color}"/></svg>`
-  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`)
+  const key = status === 'connected' ? 'ok' : status === 'disconnected' ? 'bad' : 'warn'
+  const image = nativeImage.createFromBuffer(Buffer.from(ICON_PNG[key], 'base64'))
+  // Windows draws the tray at 16pt; hand it a downscaled copy rather than
+  // letting the shell nearest-neighbour a 32px bitmap.
+  return image.resize({ width: 16, height: 16, quality: 'best' })
 }
 
 export function createTray(callbacks: TrayCallbacks): TrayHandle {
