@@ -127,11 +127,17 @@ End of speech to turn: 470-520ms.
 - **The UI never hardcodes the phrase.** `voice.listen` returns it, because
   which one is live depends on the mode and a label naming the wrong one is
   worse than no label.
-- **Hands-free is off by default and persisted, unlike the rest of voice.**
-  Everything before it ran on audio handed over by holding a key. This holds the
-  microphone open and Windows shows an indicator for as long as it does, so it
-  is opted into once and remembered (`wake_word_enabled` in settings, not just
-  config).
+- **Hands-free is on by default**, at Eyaas's explicit request (2026-08-07):
+  reaching for a key before speaking is the thing it exists to remove. It was
+  briefly off-by-default on privacy grounds; that was overruled, and the
+  compromise is that it stays *visible* rather than quiet — Windows shows its
+  indicator, the header switch says "Listening" in words, and turning it off
+  persists so the answer is not re-asked.
+- **The renderer must act on the persisted setting, not just read it.** The
+  sidecar remembers the answer but owns no microphone, so `useHandsFree` opens
+  the device itself when `voice.listen` comes back enabled. Without that the
+  setting was stored and then silently ignored, and hands-free needed a click
+  on every launch — which is exactly the complaint that prompted the change.
 - **Frames go over a JSON-RPC *notification*, not a call.** 12.5 a second with a
   reply each would be 12.5 round-trips a second to hear "received". `notify()`
   exists on the bridge for exactly this and drops frames when the socket is

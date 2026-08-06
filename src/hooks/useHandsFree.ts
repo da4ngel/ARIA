@@ -10,9 +10,14 @@
  * **Frames go out as notifications, not calls.** Twelve requests a second each
  * awaiting a reply would be twelve round-trips a second to hear "received".
  *
- * The stream is a deliberate, visible thing: Windows shows a microphone
- * indicator for as long as it is open, and this hook is off until switched on.
- * `useMic` remains the push-to-talk path and is untouched.
+ * **It opens on launch**, so talking to her needs no keypress and no click —
+ * that is the whole point of hands-free. The stream is still a visible thing
+ * rather than a hidden one: Windows shows a microphone indicator for as long
+ * as it is open, the header switch says "Listening" in words, and switching
+ * it off persists so the answer is not re-asked every launch.
+ *
+ * `useMic` remains the push-to-talk path and is untouched — holding
+ * Ctrl+Shift+Space still works, and is the way to talk with this off.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -62,6 +67,9 @@ export function useHandsFree(connected: boolean): UseHandsFree {
   const context = useRef<AudioContext | null>(null)
   const processor = useRef<ScriptProcessorNode | null>(null)
   const carry = useRef<Float32Array>(new Float32Array(0))
+  // Set once the persisted setting has been honoured, so a reconnect does
+  // not re-open a microphone the user switched off in the meantime.
+  const autoStarted = useRef(false)
 
   const teardown = useCallback(() => {
     processor.current?.disconnect()
@@ -74,22 +82,37 @@ export function useHandsFree(connected: boolean): UseHandsFree {
     setLevel(0)
   }, [])
 
-  // Ask the sidecar what it can do, and whether it was left on last time.
+  // Ask the sidecar what it can do, and whether it should already be on —
+  // then actually open the device if so. The sidecar persists the answer but
+  // owns no microphone, so without this the setting was remembered and then
+  // quietly ignored, and hands-free needed a click on every launch.
   useEffect(() => {
     if (!connected) {
       setAvailable(false)
       return
     }
+    let cancelled = false
+
     void window.aria
-      .call<{ available: boolean; enabled: boolean; phrase: string | null }>(
-        'voice.listen',
-        {},
-      )
+      .call<{ available: boolean; enabled: boolean; phrase: string | null }>('voice.listen', {})
       .then((state) => {
+        if (cancelled) return
         setAvailable(state.available)
         if (state.phrase) setPhrase(state.phrase)
+        // `autoStarted` guards a reconnect: dropping and re-attaching the
+        // socket must not re-open a device the user has since switched off.
+        if (state.available && state.enabled && !autoStarted.current) {
+          autoStarted.current = true
+          void start()
+        }
       })
       .catch(() => setAvailable(false))
+
+    return () => {
+      cancelled = true
+    }
+    // `start` is stable; listing it would re-run this on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected])
 
   // Close the device if the brain goes away — frames would go nowhere, and a

@@ -58,12 +58,15 @@ class Settings(BaseSettings):
     voice_lang: str = "en-us"
 
     # ── Wake word (Phase 2 stage 3) ──────────────────────────────────
-    # **Off by default, unlike the rest of voice.** Everything above runs on
-    # audio the user deliberately handed over by holding a key; this one holds
-    # the microphone open indefinitely, and Windows shows an indicator saying
-    # so for as long as it does. That is a choice to opt into, not a default to
-    # discover. The UI toggle flips it and `settings` persists the answer.
-    wake_word_enabled: bool = False
+    # **On by default**, at Eyaas's explicit request: reaching for a key before
+    # speaking is the thing hands-free is meant to remove, and an assistant you
+    # have to switch on first is a worse one.
+    #
+    # It is still a real decision, so it stays visible and reversible rather
+    # than silent: the microphone is open whenever she is running, Windows
+    # shows its indicator, and the header switch says "Listening" in words.
+    # Turning it off persists, so it is asked once and not re-asked.
+    wake_word_enabled: bool = True
     # "phrase" answers to her own name, decided from the transcript. "model"
     # answers to "hey jarvis" — openWakeWord's pretrained phrase — and costs a
     # fraction as much CPU, because it never transcribes what was not for her.
