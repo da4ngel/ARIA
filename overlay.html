@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Aria overlay</title>
+    <!--
+      Same reasoning as index.html: no CSP meta tag, electron/main.ts sets the
+      header per-environment for every window through session.defaultSession.
+    -->
+    <style>
+      /* The window is transparent and click-through; the page must not paint a
+         background of its own or the whole screen turns into a grey sheet. */
+      html, body, #overlay { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <div id="overlay"></div>
+    <script type="module" src="/src/overlay/main.tsx"></script>
+  </body>
+</html>

@@ -184,6 +184,41 @@ turns it off without touching the wake word. The 480ms figure is *by design*:
 300ms of sustained speech plus the VAD's own ramp. The 150ms budget is about how
 fast audio stops once the decision is made, which is the renderer's flush.
 
+## The screen overlay — her presence with the window closed (2026-08-07)
+`Ctrl+Space` means "put the chat away", not "turn her off". Hidden, she still
+listens, and a second window glows around the edge of the display while she
+listens or speaks, with a caption showing what was asked and answered.
+
+- **`backgroundThrottling: false` is not optional and not sufficient.** Chromium
+  suspends renderers nobody is watching, and the microphone lives in one. The
+  per-window flag does not stop the *renderer-process* backgrounder, so
+  `main.ts` also appends `disable-renderer-backgrounding`,
+  `disable-background-timer-throttling` and
+  `disable-backgrounding-occluded-windows` before `whenReady` — appended after,
+  they are ignored.
+- **`listener.frame_rate` is the instrument for this.** A throttled capture goes
+  quiet without erroring, so "is she still hearing me" is not answerable by
+  looking at the app. Measured 12.5/s sustained with the window confirmed
+  hidden via `IsWindowVisible`, identical to the visible baseline.
+- **The overlay shows only when the main window is hidden.** With the window
+  open `VoiceAura` already says the same thing, and a glow around a window you
+  are looking at is glare.
+- **Its window flags are the whole risk.** Verified via `GetWindowLong`:
+  `WS_EX_TRANSPARENT` (clicks pass through), `WS_EX_TOOLWINDOW` (out of
+  Alt+Tab), `WS_EX_NOACTIVATE` (never takes the caret), topmost, hidden until
+  needed. If any of those regress it becomes an obstacle permanently on top of
+  the user's work, which is far worse than no overlay.
+- **`showInactive`, never `show`** — showing activates, and activating a
+  non-focusable window drops the user's caret.
+- It is constructed at startup, not on first use: a window plus a page load
+  does not fit in the 300ms budget between wake word and reaction.
+- **No `backgroundMaterial` on it.** Acrylic requires `transparent: false` and
+  this window needs a real alpha channel.
+- The overlay owns no audio. The window that does publishes level and mode at
+  ~30Hz over `aria:voice-level`, and sends one final zero when idle so the glow
+  fades instead of freezing. Nothing is sent while she is quiet.
+- `sendToRenderer` broadcasts to both windows — one conversation, two views.
+
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.
 

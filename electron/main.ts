@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, globalShortcut, ipcMain, screen, session, shell } from 'electron'
 
 import { type BrainStatus, RpcClient, type RpcNotification } from './rpc'
+import { createOverlay, type OverlayHandle } from './overlay'
 import { Sidecar } from './sidecar'
 import { createTray, type TrayHandle } from './tray'
 
@@ -43,10 +44,13 @@ const repoRoot = isDev ? join(app.getAppPath()) : process.resourcesPath
 
 let window: BrowserWindow | null = null
 let tray: TrayHandle | null = null
+let overlay: OverlayHandle | null = null
 let fadeTimer: NodeJS.Timeout | null = null
 let resizeTimer: NodeJS.Timeout | null = null
 let brainStatus: BrainStatus = 'starting'
 let hotkeyRegistered = false
+// Last reported voice state, from the renderer that owns the audio.
+let voiceMode: 'listening' | 'speaking' | null = null
 
 const sidecar = new Sidecar({
   repoRoot,
@@ -77,6 +81,9 @@ function sendToRenderer(channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) {
     window.webContents.send(channel, payload)
   }
+  // The overlay reads the same event stream. It is a second view of one
+  // conversation, not a second conversation.
+  overlay?.send(channel, payload)
 }
 
 const launchedAt = Date.now()
@@ -311,11 +318,28 @@ function showWindow(): void {
   window.showInactive()
   window.focus()
   fadeTo(1)
+  syncOverlay()
 }
 
 function hideWindow(): void {
   if (!window || window.isDestroyed()) return
-  fadeTo(0, () => window?.hide())
+  fadeTo(0, () => {
+    window?.hide()
+    // After the hide, not before: `syncOverlay` reads `isVisible()`.
+    syncOverlay()
+  })
+}
+
+/**
+ * The overlay is her presence *instead of* the window, never alongside it.
+ *
+ * With the window open, `VoiceAura` inside it already shows the same state;
+ * lighting the screen edge as well would be one thing said twice, and a glow
+ * around a window you are looking at is just glare.
+ */
+function syncOverlay(): void {
+  const windowShown = Boolean(window && !window.isDestroyed() && window.isVisible())
+  overlay?.setVisible(voiceMode !== null && !windowShown)
 }
 
 function toggleWindow(): void {
@@ -335,6 +359,19 @@ function registerIpc(): void {
   ipcMain.handle('aria:call', async (_event, method: string, params: Record<string, unknown>) => {
     return rpc.call(method, params ?? {})
   })
+  // ~30 a second while she is talking or being talked to, and nothing at all
+  // otherwise. `send`, not `handle`, for the same reason audio frames are.
+  ipcMain.on(
+    'aria:voice-level',
+    (_event, level: number, mode: 'listening' | 'speaking' | null) => {
+      if (mode !== voiceMode) {
+        voiceMode = mode
+        syncOverlay()
+      }
+      overlay?.send('aria:voice-level', { level, mode })
+    },
+  )
+
   ipcMain.handle('aria:status', () => brainStatus)
   ipcMain.on('aria:restart-brain', () => {
     publishStatus('reconnecting')
@@ -371,6 +408,9 @@ if (!singleInstance) {
     registerIpc()
 
     window = createWindow()
+    // Built up front rather than on the first wake word: constructing a window
+    // and loading a page does not fit inside the 300ms reaction budget.
+    overlay = createOverlay({ isDev })
     tray = createTray({
       onShow: showWindow,
       onSettings: showWindow, // no Settings panel until Phase 9
@@ -401,6 +441,7 @@ if (!singleInstance) {
   })
 
   app.on('will-quit', () => {
+    overlay?.destroy()
     globalShortcut.unregisterAll()
     rpc.stop()
     sidecar.stop()

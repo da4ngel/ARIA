@@ -49,6 +49,10 @@ class Event(StrEnum):
     # Stop playing and drop anything queued. Cancel uses it today; barge-in
     # reuses it in stage 3, which is why the flush lives here and not in cancel.
     AUDIO_STOP = "audio.stop"
+    # Phase 2 stage 3: the transcript of a spoken turn, emitted before the turn
+    # starts. The window learns what you said from the message it renders, but
+    # the screen overlay has no transcript to render — this is how it knows.
+    HEARD = "heard"
 
 
 class Sender(Protocol):

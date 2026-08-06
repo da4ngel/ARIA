@@ -59,6 +59,16 @@ const api = {
   notify: (method: string, params: Record<string, unknown> = {}): void =>
     ipcRenderer.send('aria:notify', method, params),
 
+  /** Report the live voice level and mode. Sent by the window that owns the
+   *  audio; relayed by main to the overlay, which owns no audio of its own. */
+  publishVoiceLevel: (level: number, mode: 'listening' | 'speaking' | null): void =>
+    ipcRenderer.send('aria:voice-level', level, mode),
+
+  /** Receive that report. Only the overlay subscribes. */
+  onVoiceLevel: (
+    handler: (payload: { level: number; mode: 'listening' | 'speaking' | null }) => void,
+  ): Unsubscribe => subscribe('aria:voice-level', handler),
+
   restartBrain: (): void => ipcRenderer.send('aria:restart-brain'),
 
   hide: (): void => ipcRenderer.send('aria:hide'),

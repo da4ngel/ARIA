@@ -1,0 +1,62 @@
+/**
+ * What was said, while the window is put away.
+ *
+ * Without this the hidden conversation is audio only: fine for "what time is
+ * it", useless the moment you mishear a name or a number. It is deliberately
+ * *not* the transcript — one exchange, the current one, and then it goes away.
+ * Anything more belongs in the window, which is one keypress away.
+ */
+
+import { AnimatePresence, motion } from 'framer-motion'
+
+interface Props {
+  /** What the sidecar heard. Empty until a turn starts. */
+  asked: string
+  /** Her reply, streaming in. */
+  reply: string
+}
+
+export function Caption({ asked, reply }: Props): JSX.Element {
+  const showing = Boolean(asked || reply)
+
+  return (
+    <AnimatePresence>
+      {showing && (
+        <motion.div
+          // Bottom third rather than centre: the middle of the screen is where
+          // the user's actual work is, and this is commentary on it.
+          className="pointer-events-none fixed inset-x-0 bottom-[12vh] flex justify-center px-8"
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 10 }}
+          transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+        >
+          <div className="max-w-[46rem] rounded-2xl bg-black/65 px-5 py-3.5 text-center shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+            {asked && (
+              <p className="text-small leading-relaxed text-white/55">
+                {'“'}
+                {asked}
+                {'”'}
+              </p>
+            )}
+            {reply && (
+              <p
+                className={`text-body leading-relaxed text-white ${asked ? 'mt-1.5' : ''}`}
+                // Long answers are spoken, not read. Clamping keeps this a
+                // caption instead of a wall of text over someone's screen.
+                style={{
+                  display: '-webkit-box',
+                  WebkitLineClamp: 4,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                }}
+              >
+                {reply}
+              </p>
+            )}
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}

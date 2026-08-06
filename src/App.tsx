@@ -28,6 +28,7 @@ import { useAudio } from '@/hooks/useAudio'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
 import { useHandsFree } from '@/hooks/useHandsFree'
+import { usePublishVoiceLevel } from '@/hooks/usePublishVoiceLevel'
 import { usePushToTalk } from '@/hooks/usePushToTalk'
 import { useRpc } from '@/hooks/useRpc'
 import { useWindowMode } from '@/hooks/useWindowMode'
@@ -75,6 +76,9 @@ export default function App(): JSX.Element {
       ? 'listening'
       : null
   const auraLevel = audio.speaking ? audio.getLevel : handsFree.getLevel
+  // The same two numbers drive the screen-edge overlay, which has no audio
+  // of its own. Nothing is sent while she is idle.
+  usePublishVoiceLevel(auraMode, auraLevel)
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.

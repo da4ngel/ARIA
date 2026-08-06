@@ -100,6 +100,12 @@ export interface AriaApi {
   /** Fire-and-forget JSON-RPC notification. No reply; dropped if the socket
    *  is closed, which is correct for audio frames. */
   notify: (method: string, params?: Record<string, unknown>) => void
+  /** Publish the live voice level, for the screen overlay to animate to. */
+  publishVoiceLevel: (level: number, mode: 'listening' | 'speaking' | null) => void
+  /** Subscribe to it. Only the overlay window does. */
+  onVoiceLevel: (
+    handler: (payload: { level: number; mode: 'listening' | 'speaking' | null }) => void,
+  ) => Unsubscribe
   restartBrain: () => void
   hide: () => void
   /** Grow into a working window, or shrink back to the corner companion. */

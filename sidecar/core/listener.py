@@ -394,6 +394,9 @@ class Listener:
             chars=len(text),
             took_ms=round((time.perf_counter() - started) * 1000, 1),
         )
+        # Before the turn, not after: the overlay should show what you said
+        # while she is still thinking about it.
+        await self._bus.broadcast(Event.HEARD, {"text": text})
         await self._conversation.send(text, spoken=True)
 
     # ── frame plumbing ──────────────────────────────────────────────────

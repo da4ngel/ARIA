@@ -29,7 +29,11 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'index.html') },
+        input: {
+          index: resolve(__dirname, 'index.html'),
+          // The screen-edge overlay is its own window and its own page.
+          overlay: resolve(__dirname, 'overlay.html'),
+        },
       },
     },
     plugins: [react()],
