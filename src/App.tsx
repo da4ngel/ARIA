@@ -17,6 +17,7 @@ import { ComposerBar } from '@/components/ComposerBar'
 import { ConnectionStatus } from '@/components/ConnectionStatus'
 import { ConversationView } from '@/components/ConversationView'
 import { EmptyState } from '@/components/EmptyState'
+import { HandsFreeToggle } from '@/components/HandsFreeToggle'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { ModelPicker } from '@/components/ModelPicker'
 import { Orb } from '@/components/Orb'
@@ -25,6 +26,7 @@ import { Shortcuts } from '@/components/Shortcuts'
 import { useAudio } from '@/hooks/useAudio'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
+import { useHandsFree } from '@/hooks/useHandsFree'
 import { usePushToTalk } from '@/hooks/usePushToTalk'
 import { useRpc } from '@/hooks/useRpc'
 import { useWindowMode } from '@/hooks/useWindowMode'
@@ -45,6 +47,9 @@ export default function App(): JSX.Element {
   // whatever the Smart bias says, because the network hop alone costs more
   // than the whole voice budget.
   const voice = usePushToTalk((text) => void send(text, { spoken: true }), connected)
+  // Hands-free is the sidecar's loop, not this one: the renderer streams
+  // frames and the wake word, endpointing and turn all happen there.
+  const handsFree = useHandsFree(connected)
   const { expanded, toggle: toggleExpanded } = useWindowMode()
   const [overlay, setOverlay] = useState<Overlay>(null)
 
@@ -56,6 +61,9 @@ export default function App(): JSX.Element {
     : audio.speaking
       ? 'speaking'
       : assistantState
+  // Only meaningful while the microphone is actually open; push-to-talk
+  // does not sample levels, so it contributes nothing here.
+  const orbLevel = handsFree.active ? handsFree.level : 0
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -124,7 +132,9 @@ export default function App(): JSX.Element {
             style={drag}
           >
             <div className="flex min-w-0 items-center gap-2">
-              {started && <Orb state={orbState} connected={connected} size={20} />}
+              {started && (
+                <Orb state={orbState} connected={connected} size={20} level={orbLevel} />
+              )}
               {started && (
                 <span className="truncate text-small font-medium tracking-tight">Aria</span>
               )}
@@ -148,6 +158,13 @@ export default function App(): JSX.Element {
               >
                 <IconPlus />
               </IconButton>
+              <HandsFreeToggle
+                available={handsFree.available}
+                active={handsFree.active}
+                level={handsFree.level}
+                disabled={!connected}
+                onToggle={handsFree.toggle}
+              />
               <ModelPicker models={models} />
               <IconButton
                 label={expanded ? 'Shrink' : 'Expand'}
@@ -194,7 +211,13 @@ export default function App(): JSX.Element {
           {started ? (
             <ConversationView turns={turns} state={orbState} />
           ) : (
-            <EmptyState state={orbState} connected={connected} onPick={send} />
+            <EmptyState state={orbState} connected={connected} onPick={send} level={orbLevel} />
+          )}
+
+          {handsFree.error && (
+            <p className="mx-3 mb-1 truncate text-micro text-aria-warn" title={handsFree.error}>
+              {handsFree.error}
+            </p>
           )}
 
           {voice.error && (

@@ -48,6 +48,10 @@ export interface OrbProps {
   connected?: boolean
   /** Opt out of the shared-element tween (tests, or a second orb on screen). */
   shared?: boolean
+  /** Live audio level, 0..1. Drives a small swell on top of the breath so the
+   *  orb reacts to a voice rather than to a timer. Ignored when idle: a
+   *  microphone that is open but not being spoken to should look calm. */
+  level?: number
 }
 
 export function Orb({
@@ -55,11 +59,18 @@ export function Orb({
   size = 20,
   connected = true,
   shared = true,
+  level = 0,
 }: OrbProps): JSX.Element {
   const still = useReducedMotion()
   const hue = connected ? HUE[state] : '#5d6478'
   const breath = BREATH[state]
   const spin = SPINS.has(state) && connected && !still
+
+  // Capped well below the breath's own swell: this is a voice showing through
+  // the animation, not a level meter competing with it.
+  const reactive = still || !connected ? 0 : Math.min(1, Math.max(0, level))
+  const voiced = state === 'listening' || state === 'speaking'
+  const swell = voiced ? 1 + reactive * 0.18 : 1
 
   return (
     <motion.div
@@ -99,8 +110,10 @@ export function Orb({
         }}
         // Retargets the instant `state` changes — this is the 300ms path.
         initial={false}
-        animate={{ opacity: connected ? 1 : 0.45 }}
-        transition={{ type: 'spring', stiffness: 420, damping: 24 }}
+        animate={{ opacity: connected ? 1 : 0.45, scale: swell }}
+        // Stiff and lightly damped: a voice's envelope moves in tens of
+        // milliseconds, and a slow spring would smear syllables into a hum.
+        transition={{ type: 'spring', stiffness: 700, damping: 30 }}
       />
 
       {/* Rim — a thin arc that turns only while she is working, which is the

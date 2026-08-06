@@ -97,6 +97,9 @@ export interface AriaApi {
   onEvent: (handler: (event: SidecarEvent) => void) => Unsubscribe
   onLog: (handler: (line: LogLine) => void) => Unsubscribe
   call: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
+  /** Fire-and-forget JSON-RPC notification. No reply; dropped if the socket
+   *  is closed, which is correct for audio frames. */
+  notify: (method: string, params?: Record<string, unknown>) => void
   restartBrain: () => void
   hide: () => void
   /** Grow into a working window, or shrink back to the corner companion. */

@@ -22,16 +22,20 @@ export function EmptyState({
   state,
   connected,
   onPick,
+  level = 0,
 }: {
   state: AssistantState
   connected: boolean
   onPick: (text: string) => void
+  /** Live audio level, 0..1. The hero orb is 92px, where a voice reacting to
+   *  the room is the whole point of an always-listening mode. */
+  level?: number
 }): JSX.Element {
   const still = useReducedMotion()
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 px-6 pb-4">
-      <Orb state={state} size={92} connected={connected} />
+      <Orb state={state} size={92} connected={connected} level={level} />
 
       <motion.div
         className="flex flex-col items-center gap-1.5 text-center"

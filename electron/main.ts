@@ -311,6 +311,12 @@ function toggleWindow(): void {
 // ── IPC surface (mirrors preload) ─────────────────────────────────────
 
 function registerIpc(): void {
+  // Notifications are `send`, not `handle`: nothing comes back, so there is
+  // no promise for the renderer to await twelve times a second.
+  ipcMain.on('aria:notify', (_event, method: string, params: Record<string, unknown>) => {
+    rpc.notify(method, params)
+  })
+
   ipcMain.handle('aria:call', async (_event, method: string, params: Record<string, unknown>) => {
     return rpc.call(method, params ?? {})
   })

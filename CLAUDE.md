@@ -34,8 +34,10 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - Error messages must say what to do next, not just what failed.
 
 ## Current phase
-Phase 1.5 complete (multi-provider routing, model control, quality fix).
-Next: Phase 2 — Voice. Update this line when a phase's acceptance gate passes.
+Phase 2 stages 1-3 built (she speaks, you speak, hands free). The machine-
+checkable parts of every gate pass; the two that need a person at a microphone
+are listed under stage 3 and are still unverified. Update this line when they
+are, then move to Phase 3 — Tools.
 
 ## Phase 2 stage 1 — she speaks (2026-08-06)
 kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
@@ -70,6 +72,72 @@ speech, so once started she does not stutter.
 - Chunks carry an index. Synthesis is dispatched per fragment, so a short one
   can finish before a long one sent earlier; the renderer plays by index and
   schedules on the WebAudio clock so sentences do not seam.
+
+## Phase 2 stage 3 — hands free (2026-08-07)
+Wake word, VAD and endpointing all live in the sidecar. The renderer streams
+80ms frames and renders what it is told; it never decides that a phrase fired.
+
+    python scripts/fetch_wakeword.py     # ~3.5MB of ONNX, not vendored
+    python scripts/gate_wakeword.py      # the machine-checkable part of the gate
+
+**Always-on costs 2.5% of one core**, which is the whole reason it is viable:
+
+| | load | per frame | realtime |
+|---|---|---|---|
+| openWakeWord `hey_jarvis` (ONNX) | 127ms | 1.68ms / 80ms | 2.1% |
+| Silero VAD | 173ms | 0.14ms / 32ms | 0.4% |
+
+- **`webrtcvad` (§4) is not used and cannot be.** It ships source-only and its
+  C extension needs MSVC; `pip install webrtcvad==2.0.10` fails here. faster-
+  whisper already bundles Silero VAD as ONNX — the same model `vad_filter=True`
+  runs — so `providers/vad.py` uses that. No new dependency, no compiler, and a
+  neural detector rather than a GMM. Do not re-add webrtcvad.
+- **openWakeWord must be told `inference_framework="onnx"`.** Its default is
+  tflite and `tflite-runtime` is marked `platform_system == "Linux"`, so the
+  default fails on Windows. Model paths are passed explicitly too, or it
+  downloads weights mid-conversation.
+- **Its `[full]` extra pulls torch** (rule 3). The base install does not — it is
+  onnxruntime, scipy, scikit-learn. Never install the extra; it is for training
+  new wake words.
+- **The wake word is off by default and persisted, unlike the rest of voice.**
+  Everything before it ran on audio handed over by holding a key. This holds the
+  microphone open and Windows shows an indicator for as long as it does, so it
+  is opted into once and remembered (`wake_word_enabled` in settings, not just
+  config).
+- **Frames go over a JSON-RPC *notification*, not a call.** 12.5 a second with a
+  reply each would be 12.5 round-trips a second to hear "received". `notify()`
+  exists on the bridge for exactly this and drops frames when the socket is
+  closed, which is correct — a frame is only useful immediately.
+- A leading "hey jarvis" is stripped from the transcript (`strip_wake_word`).
+  It arrives in the same utterance as the question and would otherwise be sent
+  to the model as part of it.
+
+### Measured (synthesised speech, `gate_wakeword.py`)
+| | result | gate |
+|---|---|---|
+| fires on the phrase | 5/5, peak 0.73–0.95 | — |
+| detection point | 127–207ms **before** the phrase's audio ends | orb <300ms |
+| false positives | 0 over 20s of near-miss speech + 60s of silence | 0 in 1 hour |
+| barge-in decision | 480ms of speech | — |
+| barge-in compute | 18ms | <150ms |
+
+The near-miss set matters more than the count: "Travis said he would call
+back", "Harvest season starts", "Jarvis is a character in those films" and
+"Hey, can you pass me that?" all score below threshold.
+
+**Two of the gate's numbers are not measured and cannot be here.** "20 triggers
+with under 2 false negatives" and "1 hour idle with no false positive" need a
+person speaking across a real room into a real microphone; synthesised speech at
+zero distance says nothing about either. The script says so rather than
+reporting a pass.
+
+**Barge-in is the one piece that depends on hardware.** The microphone hears her
+own voice out of the speakers. The renderer asks for echo cancellation and the
+listener requires a sustained 300ms run rather than one frame, but on a machine
+with the speakers facing the microphone it can still trip — `barge_in_enabled`
+turns it off without touching the wake word. The 480ms figure is *by design*:
+300ms of sustained speech plus the VAD's own ramp. The 150ms budget is about how
+fast audio stops once the decision is made, which is the renderer's flush.
 
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.

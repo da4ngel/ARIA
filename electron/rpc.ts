@@ -148,6 +148,18 @@ export class RpcClient {
     })
   }
 
+  /** Fire-and-forget: a JSON-RPC notification, with no id and no reply.
+   *
+   * For streams rather than requests. Continuous audio is twelve messages a
+   * second, and a `call` for each would mean twelve round-trips a second to be
+   * told "received", plus twelve pending timers. Dropping one frame when the
+   * socket is closed is correct — a frame is only useful immediately. */
+  notify(method: string, params: Record<string, unknown> = {}): void {
+    const socket = this.socket
+    if (!socket || socket.readyState !== WebSocket.OPEN) return
+    socket.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+  }
+
   // ── connection lifecycle ────────────────────────────────────────────
 
   private open(): void {

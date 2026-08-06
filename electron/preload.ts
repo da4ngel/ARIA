@@ -53,6 +53,12 @@ const api = {
   call: <T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
     ipcRenderer.invoke('aria:call', method, params) as Promise<T>,
 
+  /** Fire-and-forget notification — no reply, no waiting. For streams:
+   *  continuous audio is twelve messages a second and `call` would put a
+   *  round-trip and a pending timer behind every one of them. */
+  notify: (method: string, params: Record<string, unknown> = {}): void =>
+    ipcRenderer.send('aria:notify', method, params),
+
   restartBrain: (): void => ipcRenderer.send('aria:restart-brain'),
 
   hide: (): void => ipcRenderer.send('aria:hide'),
