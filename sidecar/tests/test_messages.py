@@ -135,6 +135,28 @@ async def test_get_title_of_unknown_session_is_none(store: ConversationStore) ->
     assert await store.get_title("s_nope") is None
 
 
+async def test_title_is_committed_not_just_visible_to_this_connection(
+    database: Database, db_path
+) -> None:
+    """The bug this catches: `set_title` opened an implicit transaction and never
+    committed, so the title read back fine in-process and was gone on restart.
+    Only a second connection can tell the difference."""
+    import sqlite3
+
+    store = ConversationStore(database)
+    session_id = await make_session(store, "hello")
+    await store.set_title(session_id, "Committed title")
+
+    separate = sqlite3.connect(db_path)
+    try:
+        row = separate.execute(
+            "SELECT title FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    finally:
+        separate.close()
+    assert row[0] == "Committed title"
+
+
 # ── deletion ──────────────────────────────────────────────────────────
 
 

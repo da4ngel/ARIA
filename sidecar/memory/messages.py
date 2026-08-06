@@ -220,11 +220,22 @@ class ConversationStore:
         return [SessionSummary.from_row(r) for r in rows]
 
     async def set_title(self, session_id: str, title: str) -> None:
-        await self._db.run(
-            lambda c: c.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?", (title.strip(), session_id)
-            )
-        )
+        """Name a conversation.
+
+        The `with conn:` is load-bearing. Python's sqlite3 opens an implicit
+        transaction for DML and never commits it on its own, so without this the
+        title was visible to the writing connection and to nothing else — it
+        read back correctly in the same process and was gone after a restart.
+        """
+
+        def _update(conn: sqlite3.Connection) -> None:
+            with conn:
+                conn.execute(
+                    "UPDATE sessions SET title = ? WHERE id = ?",
+                    (title.strip(), session_id),
+                )
+
+        await self._db.run(_update)
         log.info("session.titled", session_id=session_id)
 
     async def get_title(self, session_id: str) -> str | None:
