@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
 from sidecar.core.conversation import ConversationService
-from sidecar.core.listener import Listener
+from sidecar.core.listener import Listener, WakeMode
 from sidecar.core.router import Router, RoutingBias
 from sidecar.handshake import (
     bearer_from_header,
@@ -243,44 +243,57 @@ def _build_stt(settings: Settings) -> WhisperSTT | None:
 
 
 async def _build_listener(settings: Settings, store: SettingsStore) -> None:
-    """Hands-free listening, if the weights are on disk.
+    """Hands-free listening.
 
-    Unlike the voice and the recogniser this is built eagerly rather than
-    warmed in a task: both models together load in ~300ms, which is cheap
-    enough to pay at startup and buys a `voice.listen` that can answer
+    Built eagerly rather than warmed in a task: the VAD loads in ~170ms, which
+    is cheap enough to pay at startup and buys a `voice.listen` that can answer
     truthfully the moment the window asks.
 
-    Absent weights mean no wake word and nothing else — push-to-talk, the
-    voice, and typing are all untouched.
+    **Phrase mode needs no wake word weights**, only the VAD and the recogniser
+    that stage 2 already loads — so the default path has nothing extra to
+    download. Model mode does, and falls back to phrase mode rather than
+    leaving hands-free unavailable, because being able to talk to her matters
+    more than which phrase opens the conversation.
     """
     if not settings.voice_enabled or runtime.stt is None:
         return
 
-    models_dir = settings.models_dir / "openwakeword"
-    absent = missing_models(models_dir)
-    if absent:
-        log.warning(
-            "wakeword.unavailable",
-            missing=absent,
-            fix="Run: python scripts/fetch_wakeword.py",
-        )
-        return
+    mode = WakeMode(settings.wake_mode)
+    wake: OpenWakeWord | None = None
 
-    wake = OpenWakeWord(models_dir, threshold=settings.wake_word_threshold)
+    if mode is WakeMode.MODEL:
+        models_dir = settings.models_dir / "openwakeword"
+        absent = missing_models(models_dir)
+        if absent:
+            log.warning(
+                "wakeword.unavailable",
+                missing=absent,
+                fix="Run: python scripts/fetch_wakeword.py",
+                falling_back_to="phrase",
+            )
+            mode = WakeMode.PHRASE
+        else:
+            wake = OpenWakeWord(models_dir, threshold=settings.wake_word_threshold)
+            try:
+                await wake.start()
+            except Exception as exc:  # noqa: BLE001 — never fatal
+                log.warning("wakeword.unavailable", error=str(exc), falling_back_to="phrase")
+                wake, mode = None, WakeMode.PHRASE
+
     vad = SileroVAD()
     try:
-        await wake.start()
         await asyncio.to_thread(vad.start)
-    except Exception as exc:  # noqa: BLE001 — a missing wake word is never fatal
-        log.warning("wakeword.unavailable", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — no VAD means no hands-free, not no sidecar
+        log.warning("listener.unavailable", error=str(exc))
         return
 
     listener = Listener(
-        wake=wake,
         vad=vad,
         stt=runtime.stt,
         conversation=runtime.require_conversation(),
         bus=bus,
+        wake=wake,
+        mode=mode,
         barge_in=settings.barge_in_enabled,
     )
     runtime.listener = listener
@@ -291,7 +304,7 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
     wanted = settings.wake_word_enabled if stored is None else str(stored) == "true"
     if wanted:
         await listener.enable()
-    log.info("listener.ready", enabled=listener.enabled)
+    log.info("listener.ready", mode=str(mode), enabled=listener.enabled)
 
 
 def _resolve_bias(stored: object) -> RoutingBias:

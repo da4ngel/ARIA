@@ -315,7 +315,11 @@ async def voice_listen(params: dict[str, Any]) -> dict[str, Any]:
 
     Turning this on does not open the microphone — the renderer owns the device
     and opens it when this returns true. The two are kept separate so the
-    sidecar can refuse (weights missing) before Windows raises an indicator.
+    sidecar can refuse before Windows raises an indicator.
+
+    Returns the phrase to say, so the UI never hardcodes one: which phrase is
+    live depends on the wake mode, and a label naming the wrong one is worse
+    than no label.
     """
     from sidecar.memory.settings_store import WAKE_WORD_ENABLED
     from sidecar.state import runtime
@@ -327,9 +331,9 @@ async def voice_listen(params: dict[str, Any]) -> dict[str, Any]:
         if listener is None:
             raise RpcMethodError(
                 ErrorCode.INTERNAL_ERROR,
-                "The wake word is not available in this session — its weights "
-                "are missing or voice is off. Run `python scripts/fetch_wakeword.py`, "
-                "then restart. Hold Ctrl+Shift+Space in the meantime.",
+                "Hands-free listening is not available in this session — voice "
+                "is off, or speech recognition failed to load. Check the log for "
+                "stt.unavailable. Hold Ctrl+Shift+Space in the meantime.",
             )
         if requested is True:
             await listener.enable()
@@ -341,7 +345,9 @@ async def voice_listen(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "available": listener is not None,
         "enabled": listener is not None and listener.enabled,
-        "word": "hey jarvis",
+        # What to actually say, so the UI never has to guess and can never
+        # print a phrase the sidecar is not listening for.
+        "phrase": listener.wake_phrase if listener is not None else None,
     }
 
 

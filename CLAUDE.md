@@ -74,8 +74,29 @@ speech, so once started she does not stutter.
   schedules on the WebAudio clock so sentences do not seam.
 
 ## Phase 2 stage 3 — hands free (2026-08-07)
-Wake word, VAD and endpointing all live in the sidecar. The renderer streams
+Wake phrase, VAD and endpointing all live in the sidecar. The renderer streams
 80ms frames and renders what it is told; it never decides that a phrase fired.
+
+**She answers to "aria", and that decision is made from the transcript, not by
+a wake word model.** openWakeWord ships six pretrained phrases and "aria" is
+not among them, so gating on the model would have meant answering to "hey
+jarvis". Instead the VAD opens capture on any speech, Whisper writes it down,
+and it becomes a turn only if it starts with her name (`WakeMode.PHRASE`, the
+default). "aria", "hey aria", "ok aria" and "arya"/"area" all count; the name
+mid-sentence does not.
+
+The cost is real and belongs in the open: **everything spoken near the
+microphone is transcribed in order to be thrown away.** It never leaves the
+machine and nothing failing the check is kept, but Whisper runs on the room
+rather than only on her — roughly 450ms per utterance, and nothing at all while
+nobody is speaking, because the VAD gates it. `wake_mode = "model"` is the
+cheap alternative for anyone who would rather say "hey jarvis"; it costs a
+fraction as much CPU and never transcribes what was not for it.
+
+Measured end to end on synthesised speech, phrase mode: 6/6 correct — three
+"Aria, ..." answered with the name stripped, three ignored including "I was
+reading about the aria in that opera", where the name is present but not first.
+End of speech to turn: 470-520ms.
 
     python scripts/fetch_wakeword.py     # ~3.5MB of ONNX, not vendored
     python scripts/gate_wakeword.py      # the machine-checkable part of the gate
@@ -99,7 +120,14 @@ Wake word, VAD and endpointing all live in the sidecar. The renderer streams
 - **Its `[full]` extra pulls torch** (rule 3). The base install does not — it is
   onnxruntime, scipy, scikit-learn. Never install the extra; it is for training
   new wake words.
-- **The wake word is off by default and persisted, unlike the rest of voice.**
+- **Phrase mode needs no downloaded weights**, only the VAD and the recogniser
+  stage 2 already loads. Model mode falls back to phrase mode when its weights
+  are absent, rather than leaving hands-free unavailable — being able to talk
+  to her matters more than which phrase opens the conversation.
+- **The UI never hardcodes the phrase.** `voice.listen` returns it, because
+  which one is live depends on the mode and a label naming the wrong one is
+  worse than no label.
+- **Hands-free is off by default and persisted, unlike the rest of voice.**
   Everything before it ran on audio handed over by holding a key. This holds the
   microphone open and Windows shows an indicator for as long as it does, so it
   is opted into once and remembered (`wake_word_enabled` in settings, not just

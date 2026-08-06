@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -63,8 +64,14 @@ class Settings(BaseSettings):
     # so for as long as it does. That is a choice to opt into, not a default to
     # discover. The UI toggle flips it and `settings` persists the answer.
     wake_word_enabled: bool = False
-    # §9 Phase 2 stage 3. Lower catches more and false-fires more; the gate is
-    # 20 triggers with under 2 misses and an hour of idle with no false positive.
+    # "phrase" answers to her own name, decided from the transcript. "model"
+    # answers to "hey jarvis" — openWakeWord's pretrained phrase — and costs a
+    # fraction as much CPU, because it never transcribes what was not for her.
+    # `core/listener.WakeMode` spells the trade out.
+    wake_mode: Literal["phrase", "model"] = "phrase"
+    # §9 Phase 2 stage 3, and only read by "model". Lower catches more and
+    # false-fires more; the gate is 20 triggers with under 2 misses and an
+    # hour of idle with no false positive.
     wake_word_threshold: float = 0.5
     # Speech while she is talking cuts her off. The microphone hears her own
     # voice through the speakers, so this needs the renderer's echo cancellation

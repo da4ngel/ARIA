@@ -13,7 +13,14 @@ from typing import Any
 import numpy as np
 import pytest
 
-from sidecar.core.listener import BARGE_IN_MS, Listener, ListenerState, strip_wake_word
+from sidecar.core.listener import (
+    BARGE_IN_MS,
+    Listener,
+    ListenerState,
+    WakeMode,
+    starts_with_wake_phrase,
+    strip_wake_word,
+)
 from sidecar.providers.vad import FRAME_SAMPLES, SAMPLE_RATE, Endpoint, Utterance
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
@@ -109,21 +116,33 @@ def frame(samples: int = RENDER_FRAME) -> np.ndarray:
     return np.zeros(samples, dtype="float32")
 
 
-@pytest.fixture
-def parts():
+def build(mode: WakeMode, text: str = "aria what time is it"):
     wake = ScriptedWakeWord()
     vad = ScriptedVAD()
-    stt = ScriptedSTT()
+    stt = ScriptedSTT(text)
     conversation = FakeConversation()
     bus = RecordingBus()
     listener = Listener(
-        wake=wake,
         vad=vad,  # type: ignore[arg-type]
         stt=stt,
         conversation=conversation,  # type: ignore[arg-type]
         bus=bus,
+        wake=wake,
+        mode=mode,
     )
     return listener, wake, vad, stt, conversation, bus
+
+
+@pytest.fixture
+def parts():
+    """openWakeWord gating — `hey jarvis` opens capture."""
+    return build(WakeMode.MODEL, "what time is it")
+
+
+@pytest.fixture
+def phrase():
+    """The default: any speech is captured, and the transcript decides."""
+    return build(WakeMode.PHRASE)
 
 
 async def drain(listener: Listener) -> None:
@@ -388,3 +407,101 @@ def test_a_monologue_is_cut_off_at_the_cap() -> None:
             break
     assert end == Endpoint.TOO_LONG
     assert u.duration_s >= 1.0
+
+
+# ── phrase mode: she answers to her own name ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("heard", "expected"),
+    [
+        ("Aria, what time is it?", "what time is it?"),
+        ("aria what time is it", "what time is it"),
+        ("Hey Aria, open the project folder.", "open the project folder."),
+        ("Arya — remind me at five.", "remind me at five."),
+        # base.en writes the name several ways and none of them are wrong.
+        ("Area, set a timer.", "set a timer."),
+        ("Okay Aria, cancel that.", "cancel that."),
+    ],
+)
+def test_the_name_opens_a_request(heard: str, expected: str) -> None:
+    assert starts_with_wake_phrase(heard)
+    assert strip_wake_word(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard",
+    [
+        "what time is it",
+        "tell me about the aria project",
+        "I was listening to an aria from Tosca",
+        "the area under the curve",
+        "so I said to him, aria is the name she picked",
+    ],
+)
+def test_the_room_is_not_a_request(heard: str) -> None:
+    """The name has to be first. Anywhere else it is just a word."""
+    assert not starts_with_wake_phrase(heard)
+
+
+async def test_speech_is_captured_then_judged_by_the_transcript(phrase) -> None:
+    listener, _wake, vad, _stt, conversation, _bus = phrase
+    await listener.enable()
+
+    vad.speech = True
+    for _ in range(12):
+        await listener.feed(frame())
+    vad.speech = False
+    for _ in range(12):
+        await listener.feed(frame())
+
+    await drain(listener)
+    # The stub heard "aria what time is it", so the name is stripped and the
+    # question goes through.
+    assert conversation.sent == [("what time is it", True)]
+
+
+async def test_speech_not_addressed_to_her_is_thrown_away(phrase) -> None:
+    """Everything in the room is transcribed; only her name survives it."""
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    stt.text = "so then he said he would be late again"
+    await listener.enable()
+
+    vad.speech = True
+    for _ in range(12):
+        await listener.feed(frame())
+    vad.speech = False
+    for _ in range(12):
+        await listener.feed(frame())
+
+    await drain(listener)
+    assert stt.calls, "it must transcribe in order to decide"
+    assert conversation.sent == []
+
+
+async def test_phrase_mode_needs_no_wake_word_model() -> None:
+    """The default path must work with nothing downloaded — that is the whole
+    reason it is the default."""
+    listener = Listener(
+        vad=ScriptedVAD(),  # type: ignore[arg-type]
+        stt=ScriptedSTT(),
+        conversation=FakeConversation(),  # type: ignore[arg-type]
+        bus=RecordingBus(),
+        wake=None,
+        mode=WakeMode.PHRASE,
+    )
+    await listener.enable()
+    await listener.feed(frame())
+    assert listener.enabled
+
+
+def test_model_mode_without_a_model_is_refused_loudly() -> None:
+    with pytest.raises(ValueError, match="WakeMode.PHRASE"):
+        Listener(
+            vad=ScriptedVAD(),  # type: ignore[arg-type]
+            stt=ScriptedSTT(),
+            conversation=FakeConversation(),  # type: ignore[arg-type]
+            bus=RecordingBus(),
+            wake=None,
+            mode=WakeMode.MODEL,
+        )

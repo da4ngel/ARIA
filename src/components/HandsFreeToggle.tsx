@@ -11,6 +11,8 @@ import { motion } from 'framer-motion'
 
 interface Props {
   available: boolean
+  /** What to say. Comes from the sidecar so the two can never disagree. */
+  phrase: string
   active: boolean
   /** 0..1, for the pulse. Decorative — the decision is the sidecar's. */
   level: number
@@ -20,6 +22,7 @@ interface Props {
 
 export function HandsFreeToggle({
   available,
+  phrase,
   active,
   level,
   disabled,
@@ -34,11 +37,11 @@ export function HandsFreeToggle({
       type="button"
       role="switch"
       aria-checked={active}
-      aria-label="Listen for hey Jarvis"
+      aria-label={`Listen for "${phrase}"`}
       title={
         active
-          ? 'Listening for "hey Jarvis" — the microphone is open. Click to stop.'
-          : 'Listen for "hey Jarvis" (keeps the microphone open)'
+          ? `Listening for "${phrase}" — the microphone is open. Click to stop.`
+          : `Listen for "${phrase}" (keeps the microphone open)`
       }
       disabled={disabled}
       onClick={onToggle}

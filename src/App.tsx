@@ -160,6 +160,7 @@ export default function App(): JSX.Element {
               </IconButton>
               <HandsFreeToggle
                 available={handsFree.available}
+                phrase={handsFree.phrase}
                 active={handsFree.active}
                 level={handsFree.level}
                 disabled={!connected}

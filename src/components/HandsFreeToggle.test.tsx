@@ -9,6 +9,7 @@ function toggle(props: Partial<Parameters<typeof HandsFreeToggle>[0]> = {}) {
   return render(
     <HandsFreeToggle
       available
+      phrase="aria"
       active={false}
       level={0}
       disabled={false}
@@ -35,6 +36,13 @@ describe('HandsFreeToggle', () => {
     toggle({ active: true })
     expect(screen.getByText('Listening')).toBeDefined()
     expect(screen.getByRole('switch').title).toMatch(/microphone is open/i)
+  })
+
+  it('names the phrase the sidecar is actually listening for', () => {
+    // Never hardcoded here: the sidecar picks the mode, and a label naming a
+    // phrase it is not listening for would be worse than no label.
+    toggle({ phrase: 'hey jarvis' })
+    expect(screen.getByRole('switch').title).toContain('hey jarvis')
   })
 
   it('says nothing about listening while it is off', () => {

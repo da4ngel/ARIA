@@ -2,9 +2,10 @@
  * Always-on listening (BUILD_SPEC §9 Phase 2 stage 3).
  *
  * The microphone stays open and every 80ms frame is forwarded to the sidecar,
- * which owns the wake word, the endpointing and the state machine (CLAUDE.md
- * rule 1). Nothing here decides that "hey jarvis" was said — this hook moves
- * audio and renders what it is told.
+ * which owns the wake phrase, the endpointing and the state machine (CLAUDE.md
+ * rule 1). Nothing here decides that her name was said, or even knows what the
+ * name is — `phrase` comes back from `voice.listen`, so the label can never
+ * name something the sidecar is not listening for.
  *
  * **Frames go out as notifications, not calls.** Twelve requests a second each
  * awaiting a reply would be twelve round-trips a second to hear "received".
@@ -17,7 +18,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 const SAMPLE_RATE = 16_000
-/** openWakeWord's frame. The sidecar re-chunks to 512 for the VAD. */
+/** openWakeWord's frame size, kept in both modes. The sidecar re-chunks to
+ *  the 512 samples Silero wants. */
 const FRAME_SAMPLES = 1280
 /** ScriptProcessor's quantum; frames are cut out of it. */
 const BUFFER_SIZE = 4096
@@ -36,8 +38,11 @@ function encodeFrame(frame: Float32Array): string {
 }
 
 export interface UseHandsFree {
-  /** The sidecar has the wake word loaded. False means the weights are absent. */
+  /** The sidecar can listen. False means voice is off or speech failed to load. */
   available: boolean
+  /** What to actually say, from the sidecar — never guessed here, or the UI
+   *  could print a phrase it is not listening for. */
+  phrase: string
   /** The microphone is open and frames are going out. */
   active: boolean
   /** Loudest recent sample, 0..1 — drives the orb, never a decision. */
@@ -48,6 +53,7 @@ export interface UseHandsFree {
 
 export function useHandsFree(connected: boolean): UseHandsFree {
   const [available, setAvailable] = useState(false)
+  const [phrase, setPhrase] = useState('aria')
   const [active, setActive] = useState(false)
   const [level, setLevel] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -75,8 +81,14 @@ export function useHandsFree(connected: boolean): UseHandsFree {
       return
     }
     void window.aria
-      .call<{ available: boolean; enabled: boolean }>('voice.listen', {})
-      .then((state) => setAvailable(state.available))
+      .call<{ available: boolean; enabled: boolean; phrase: string | null }>(
+        'voice.listen',
+        {},
+      )
+      .then((state) => {
+        setAvailable(state.available)
+        if (state.phrase) setPhrase(state.phrase)
+      })
       .catch(() => setAvailable(false))
   }, [connected])
 
@@ -177,5 +189,5 @@ export function useHandsFree(connected: boolean): UseHandsFree {
     else void start()
   }, [active, start, stop])
 
-  return { available, active, level, error, toggle }
+  return { available, phrase, active, level, error, toggle }
 }
