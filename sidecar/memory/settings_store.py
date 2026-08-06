@@ -20,6 +20,10 @@ log = structlog.get_logger(__name__)
 SELECTED_MODEL = "selected_model"
 # `core.router.RoutingBias` — how much latency to trade for a better answer.
 ROUTING_BIAS = "routing_bias"
+# Whether the microphone stays open for "hey jarvis". Persisted rather than
+# defaulted on, because an always-open microphone is the user's decision to
+# make once and have remembered — not one to rediscover on every launch.
+WAKE_WORD_ENABLED = "wake_word_enabled"
 
 
 class SettingsStore:

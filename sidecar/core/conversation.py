@@ -376,6 +376,21 @@ class ConversationService:
         log.info("turn.cancel_requested", turn_id=turn_id)
         return True
 
+    async def cancel_active(self) -> int:
+        """Cancel every in-flight turn. Returns how many there were.
+
+        Barge-in has no turn id to aim at — someone talked over whatever was
+        speaking — so it stops all of them. In practice that is zero or one.
+        """
+        cancelled = 0
+        for turn_id, task in list(self._tasks.items()):
+            if task.done():
+                continue
+            task.cancel()
+            await self._bus.broadcast(Event.AUDIO_STOP, {"turn_id": turn_id})
+            cancelled += 1
+        return cancelled
+
     async def history(self, session_id: str | None, limit: int = 200) -> ConversationHistory:
         """Reload the conversation — the Phase 1 gate's relaunch requirement."""
         resolved = session_id or await self._store.latest_session_id()

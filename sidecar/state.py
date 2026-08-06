@@ -18,6 +18,7 @@ from sidecar.memory.db import Database
 
 if TYPE_CHECKING:
     from sidecar.core.conversation import ConversationService
+    from sidecar.core.listener import Listener
     from sidecar.memory.settings_store import SettingsStore
     from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
@@ -48,6 +49,9 @@ class Runtime:
     # Speech recognition. None when voice is off or the model is missing.
     stt: WhisperSTT | None = None
     stt_warm: asyncio.Task[None] | None = None
+    # Hands-free listening. None when the wake word weights are absent — the
+    # rest of voice still works, so this is never a startup failure.
+    listener: Listener | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -91,6 +95,7 @@ class Runtime:
         self.tts_warm = None
         self.stt = None
         self.stt_warm = None
+        self.listener = None
 
 
 runtime = Runtime()

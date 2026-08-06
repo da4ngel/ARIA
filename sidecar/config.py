@@ -56,6 +56,21 @@ class Settings(BaseSettings):
     voice_speed: float = 1.0
     voice_lang: str = "en-us"
 
+    # ── Wake word (Phase 2 stage 3) ──────────────────────────────────
+    # **Off by default, unlike the rest of voice.** Everything above runs on
+    # audio the user deliberately handed over by holding a key; this one holds
+    # the microphone open indefinitely, and Windows shows an indicator saying
+    # so for as long as it does. That is a choice to opt into, not a default to
+    # discover. The UI toggle flips it and `settings` persists the answer.
+    wake_word_enabled: bool = False
+    # §9 Phase 2 stage 3. Lower catches more and false-fires more; the gate is
+    # 20 triggers with under 2 misses and an hour of idle with no false positive.
+    wake_word_threshold: float = 0.5
+    # Speech while she is talking cuts her off. The microphone hears her own
+    # voice through the speakers, so this needs the renderer's echo cancellation
+    # to be working; set it false if she interrupts herself.
+    barge_in_enabled: bool = True
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)

@@ -48,9 +48,23 @@ kokoro-onnx==0.4.*
 faster-whisper==1.0.3
 requests>=2.32                # undeclared dependency of faster-whisper 1.0.3
 
+# ── Phase 2 stage 3: hands free ───────────────────────────────────
+# openWakeWord's base install is torch-free — torch appears only in its
+# [full] extra, which trains new wake words. It runs on ONNX here because
+# its tflite-runtime dependency is marked Linux-only.
+#
+# **webrtcvad, which §4 names, is deliberately absent.** It ships source-only
+# and its C extension needs MSVC; it does not build on this machine, and a
+# release build would need the toolchain too. faster-whisper already bundles
+# Silero VAD as ONNX — the same model stage 2's vad_filter runs — so
+# providers/vad.py uses that instead: no new dependency, no compiler, and a
+# neural detector rather than webrtcvad's GMM.
+#
+# Weights (~3.5MB) are not vendored: `python scripts/fetch_wakeword.py`.
+openwakeword==0.6.0
+
 # ── Deferred, with the phase that introduces each (BUILD_SPEC §4) ──
 # Phase 1  — (none; Ollama is reached over httpx)
-# Phase 2  — stage 3: openwakeword==0.6.0, webrtcvad==2.0.10
 # Phase 3  — pywinauto==0.6.8, pywin32==306, psutil==6.0.*
 # Phase 4  — numpy==1.26.*, watchfiles==0.24.*, python-docx==1.1.*,
 #            pypdf==5.0.*, openpyxl==3.1.*

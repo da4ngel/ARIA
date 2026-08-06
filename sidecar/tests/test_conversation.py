@@ -613,4 +613,5 @@ async def test_a_spoken_turn_is_answered_locally(database: Database, make_servic
 
     complete = bus.of(Event.TURN_COMPLETE)
     assert complete[0]["full_text"] == "Local."
-    assert catalog.get(complete[0]["model"]).local, complete[0]["model"]
+    answered = catalog.get(complete[0]["model"])
+    assert answered is not None and answered.local, complete[0]["model"]

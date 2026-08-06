@@ -306,6 +306,81 @@ async def voice_transcribe(params: dict[str, Any]) -> dict[str, Any]:
     return {"text": text, "took_ms": round((time.perf_counter() - started) * 1000, 1)}
 
 
+# ── hands-free (Phase 2 stage 3) ──────────────────────────────────────
+
+
+@method("voice.listen")
+async def voice_listen(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set whether the sidecar accepts a continuous audio stream.
+
+    Turning this on does not open the microphone — the renderer owns the device
+    and opens it when this returns true. The two are kept separate so the
+    sidecar can refuse (weights missing) before Windows raises an indicator.
+    """
+    from sidecar.memory.settings_store import WAKE_WORD_ENABLED
+    from sidecar.state import runtime
+
+    listener = runtime.listener
+    requested = params.get("enabled")
+
+    if requested is not None:
+        if listener is None:
+            raise RpcMethodError(
+                ErrorCode.INTERNAL_ERROR,
+                "The wake word is not available in this session — its weights "
+                "are missing or voice is off. Run `python scripts/fetch_wakeword.py`, "
+                "then restart. Hold Ctrl+Shift+Space in the meantime.",
+            )
+        if requested is True:
+            await listener.enable()
+        else:
+            await listener.disable()
+        if runtime.settings is not None:
+            await runtime.settings.set(WAKE_WORD_ENABLED, "true" if requested else "false")
+
+    return {
+        "available": listener is not None,
+        "enabled": listener is not None and listener.enabled,
+        "word": "hey jarvis",
+    }
+
+
+@method("voice.frame")
+async def voice_frame(params: dict[str, Any]) -> None:
+    """One 80ms frame of base64 int16 PCM from the open microphone.
+
+    Sent as a *notification* — twelve a second with a reply each would be
+    twelve round-trips a second to say "yes, received". Returns None so
+    `dispatch` sends nothing back.
+
+    Errors are logged, never raised: a bad frame must not tear down the socket
+    carrying the conversation.
+    """
+    import base64
+
+    from sidecar.state import runtime
+
+    listener = runtime.listener
+    if listener is None or not listener.enabled:
+        return None
+
+    encoded = params.get("pcm")
+    if not isinstance(encoded, str) or not encoded:
+        return None
+
+    try:
+        from sidecar.providers.stt import pcm16_to_float32, resample_to_16k
+
+        samples = pcm16_to_float32(base64.b64decode(encoded))
+        rate = params.get("sample_rate", 16_000)
+        await listener.feed(
+            resample_to_16k(samples, int(rate) if isinstance(rate, int) else 16_000)
+        )
+    except Exception as exc:  # noqa: BLE001 — one bad frame must not stop listening
+        log.warning("voice.frame_failed", error=str(exc))
+    return None
+
+
 @method("chat.sessions")
 async def chat_sessions(params: dict[str, Any]) -> dict[str, Any]:
     """Past conversations for the history panel, most recently active first.

@@ -18,6 +18,7 @@ from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
 from sidecar.core.conversation import ConversationService
+from sidecar.core.listener import Listener
 from sidecar.core.router import Router, RoutingBias
 from sidecar.handshake import (
     bearer_from_header,
@@ -29,7 +30,12 @@ from sidecar.handshake import (
 from sidecar.logging_setup import configure_logging
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
-from sidecar.memory.settings_store import ROUTING_BIAS, SELECTED_MODEL, SettingsStore
+from sidecar.memory.settings_store import (
+    ROUTING_BIAS,
+    SELECTED_MODEL,
+    WAKE_WORD_ENABLED,
+    SettingsStore,
+)
 from sidecar.providers import catalog
 from sidecar.providers.availability import AvailabilityService
 from sidecar.providers.base import LLMProvider, ProviderError
@@ -40,6 +46,8 @@ from sidecar.providers.ollama import OllamaProvider
 from sidecar.providers.openai import OpenAIProvider
 from sidecar.providers.stt import TranscriptionUnavailable, WhisperSTT
 from sidecar.providers.tts import KokoroTTS, SpeechUnavailable
+from sidecar.providers.vad import SileroVAD
+from sidecar.providers.wakeword import OpenWakeWord, missing_models
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
@@ -157,6 +165,8 @@ async def _start_conversation(settings: Settings) -> None:
         bias=str(bias),
     )
 
+    await _build_listener(settings, settings_store)
+
     if not settings.warm_on_startup:
         return
     if local_default.id not in runtime.local_models:
@@ -230,6 +240,58 @@ def _build_stt(settings: Settings) -> WhisperSTT | None:
 
     runtime.stt_warm = asyncio.create_task(warm())
     return engine
+
+
+async def _build_listener(settings: Settings, store: SettingsStore) -> None:
+    """Hands-free listening, if the weights are on disk.
+
+    Unlike the voice and the recogniser this is built eagerly rather than
+    warmed in a task: both models together load in ~300ms, which is cheap
+    enough to pay at startup and buys a `voice.listen` that can answer
+    truthfully the moment the window asks.
+
+    Absent weights mean no wake word and nothing else — push-to-talk, the
+    voice, and typing are all untouched.
+    """
+    if not settings.voice_enabled or runtime.stt is None:
+        return
+
+    models_dir = settings.models_dir / "openwakeword"
+    absent = missing_models(models_dir)
+    if absent:
+        log.warning(
+            "wakeword.unavailable",
+            missing=absent,
+            fix="Run: python scripts/fetch_wakeword.py",
+        )
+        return
+
+    wake = OpenWakeWord(models_dir, threshold=settings.wake_word_threshold)
+    vad = SileroVAD()
+    try:
+        await wake.start()
+        await asyncio.to_thread(vad.start)
+    except Exception as exc:  # noqa: BLE001 — a missing wake word is never fatal
+        log.warning("wakeword.unavailable", error=str(exc))
+        return
+
+    listener = Listener(
+        wake=wake,
+        vad=vad,
+        stt=runtime.stt,
+        conversation=runtime.require_conversation(),
+        bus=bus,
+        barge_in=settings.barge_in_enabled,
+    )
+    runtime.listener = listener
+
+    # The user's answer from last time, not the config default: turning the
+    # microphone on is a decision worth remembering.
+    stored = await store.get(WAKE_WORD_ENABLED)
+    wanted = settings.wake_word_enabled if stored is None else str(stored) == "true"
+    if wanted:
+        await listener.enable()
+    log.info("listener.ready", enabled=listener.enabled)
 
 
 def _resolve_bias(stored: object) -> RoutingBias:
