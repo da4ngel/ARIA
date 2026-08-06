@@ -18,6 +18,7 @@ import { ConnectionStatus } from '@/components/ConnectionStatus'
 import { ConversationView } from '@/components/ConversationView'
 import { EmptyState } from '@/components/EmptyState'
 import { HandsFreeToggle } from '@/components/HandsFreeToggle'
+import { VoiceAura, type AuraMode } from '@/components/VoiceAura'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { ModelPicker } from '@/components/ModelPicker'
 import { Orb } from '@/components/Orb'
@@ -64,6 +65,16 @@ export default function App(): JSX.Element {
   // Only meaningful while the microphone is actually open; push-to-talk
   // does not sample levels, so it contributes nothing here.
   const orbLevel = handsFree.active ? handsFree.level : 0
+
+  // Her voice wins over the room's: while she is speaking the microphone is
+  // still open and still hearing her, and drawing that as "listening" would
+  // show the wrong half of the conversation.
+  const auraMode: AuraMode = audio.speaking
+    ? 'speaking'
+    : orbState === 'listening'
+      ? 'listening'
+      : null
+  const auraLevel = audio.speaking ? audio.getLevel : handsFree.getLevel
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -112,11 +123,15 @@ export default function App(): JSX.Element {
     // windows at the compositor, which is also what clips the acrylic.
     <div className="h-screen text-aria-text">
       <div className="glass sheen relative flex h-full overflow-hidden">
+        {/* Behind everything and inert: it must never take a click or push the
+            layout, only tint the window while there is a voice in it. */}
+        <VoiceAura mode={auraMode} getLevel={auraLevel} />
+
         {/* Expanded turns history from an overlay into a permanent rail.
             18rem wide, not 16: at the narrower width every title truncated and
             the time and message count wrapped onto two lines. */}
         {expanded && (
-          <aside className="w-72 shrink-0 border-r border-white/5" style={noDrag}>
+          <aside className="relative z-10 w-72 shrink-0 border-r border-white/5" style={noDrag}>
             <HistoryPanel
               variant="rail"
               activeSessionId={sessionId}
@@ -126,7 +141,7 @@ export default function App(): JSX.Element {
           </aside>
         )}
 
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="relative z-10 flex min-w-0 flex-1 flex-col">
           <header
             className="flex shrink-0 items-center justify-between gap-2 px-3 py-2.5"
             style={drag}

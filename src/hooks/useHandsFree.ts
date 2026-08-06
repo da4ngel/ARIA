@@ -52,6 +52,8 @@ export interface UseHandsFree {
   active: boolean
   /** Loudest recent sample, 0..1 — drives the orb, never a decision. */
   level: number
+  /** The same figure, without a render behind it. See `useAudio.getLevel`. */
+  getLevel: () => number
   error: string | null
   toggle: () => void
 }
@@ -70,6 +72,7 @@ export function useHandsFree(connected: boolean): UseHandsFree {
   // Set once the persisted setting has been honoured, so a reconnect does
   // not re-open a microphone the user switched off in the meantime.
   const autoStarted = useRef(false)
+  const levelRef = useRef(0)
 
   const teardown = useCallback(() => {
     processor.current?.disconnect()
@@ -79,6 +82,7 @@ export function useHandsFree(connected: boolean): UseHandsFree {
     void context.current?.close()
     context.current = null
     carry.current = new Float32Array(0)
+    levelRef.current = 0
     setLevel(0)
   }, [])
 
@@ -164,6 +168,7 @@ export function useHandsFree(connected: boolean): UseHandsFree {
           const magnitude = Math.abs(input[i])
           if (magnitude > peak) peak = magnitude
         }
+        levelRef.current = peak
         setLevel(peak)
 
         // Cut exact 80ms frames, carrying the remainder: the sidecar's models
@@ -212,5 +217,7 @@ export function useHandsFree(connected: boolean): UseHandsFree {
     else void start()
   }, [active, start, stop])
 
-  return { available, phrase, active, level, error, toggle }
+  const getLevel = useCallback(() => levelRef.current, [])
+
+  return { available, phrase, active, level, getLevel, error, toggle }
 }

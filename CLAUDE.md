@@ -142,6 +142,17 @@ End of speech to turn: 470-520ms.
   reply each would be 12.5 round-trips a second to hear "received". `notify()`
   exists on the bridge for exactly this and drops frames when the socket is
   closed, which is correct — a frame is only useful immediately.
+- **`VoiceAura` is driven by real amplitude, over a getter, not React state.**
+  Both `useAudio` and `useHandsFree` expose `getLevel()`; the canvas reads it
+  once a frame. Sixty renders a second to move a waveform costs more than the
+  waveform. The rAF loop is *cancelled* when idle, not left spinning on a
+  cleared canvas — this runs next to Whisper, Kokoro and a 7B model.
+- **Listening and speaking differ by direction of travel, not only hue**:
+  inward for listening, outward for speaking. Colour alone does not survive a
+  glance, and the orb is already carrying the hue.
+- The ribbon is drawn 78px off the bottom. Lower and it hides behind the
+  composer, which is what the first version did — it typechecked, looked like
+  nothing, and only a screenshot showed it.
 - A leading "hey jarvis" is stripped from the transcript (`strip_wake_word`).
   It arrives in the same utterance as the question and would otherwise be sent
   to the model as part of it.

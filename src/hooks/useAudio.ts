@@ -46,6 +46,12 @@ function decodePcm16(base64: string): Float32Array<ArrayBuffer> {
 export interface UseAudio {
   /** True while something is actually coming out of the speakers. */
   speaking: boolean
+  /** Her live output amplitude, 0..1, read straight from the graph.
+   *
+   *  A getter rather than state on purpose: the visualiser wants this sixty
+   *  times a second, and sixty React renders a second to move a waveform would
+   *  cost more than the waveform. */
+  getLevel: () => number
   /** Stop now and drop anything queued. */
   stop: () => void
 }
@@ -53,6 +59,8 @@ export interface UseAudio {
 export function useAudio(): UseAudio {
   const [speaking, setSpeaking] = useState(false)
   const context = useRef<AudioContext | null>(null)
+  const analyser = useRef<AnalyserNode | null>(null)
+  const scratch = useRef<Uint8Array<ArrayBuffer> | null>(null)
   const sources = useRef<AudioBufferSourceNode[]>([])
   const playHead = useRef(0)
   const nextIndex = useRef(0)
@@ -80,13 +88,24 @@ export function useAudio(): UseAudio {
     const ctx = context.current
     void ctx.resume()
 
+    // One analyser for the whole graph, between every source and the speakers.
+    // 512 bins is plenty for an envelope — this is not a spectrum display.
+    if (!analyser.current) {
+      const node = ctx.createAnalyser()
+      node.fftSize = 512
+      node.smoothingTimeConstant = 0.7
+      node.connect(ctx.destination)
+      analyser.current = node
+      scratch.current = new Uint8Array(new ArrayBuffer(node.frequencyBinCount))
+    }
+
     const samples = decodePcm16(chunk.pcm)
     const buffer = ctx.createBuffer(1, samples.length, chunk.sample_rate)
     buffer.copyToChannel(samples, 0)
 
     const source = ctx.createBufferSource()
     source.buffer = buffer
-    source.connect(ctx.destination)
+    source.connect(analyser.current)
 
     const startAt = Math.max(ctx.currentTime + SCHEDULE_LEAD_S, playHead.current)
     source.start(startAt)
@@ -135,5 +154,20 @@ export function useAudio(): UseAudio {
     }
   }, [stop])
 
-  return { speaking, stop }
+  const getLevel = useCallback((): number => {
+    const node = analyser.current
+    const bins = scratch.current
+    if (!node || !bins || sources.current.length === 0) return 0
+
+    node.getByteTimeDomainData(bins)
+    // Peak deviation from the 128 midpoint, which is silence in this encoding.
+    let peak = 0
+    for (let i = 0; i < bins.length; i += 1) {
+      const magnitude = Math.abs(bins[i] - 128)
+      if (magnitude > peak) peak = magnitude
+    }
+    return Math.min(1, peak / 128)
+  }, [])
+
+  return { speaking, getLevel, stop }
 }
