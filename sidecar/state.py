@@ -10,13 +10,15 @@ state live in SQLite per CLAUDE.md rule 1.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from sidecar.memory.db import Database
 
 if TYPE_CHECKING:
     from sidecar.core.conversation import ConversationService
+    from sidecar.memory.settings_store import SettingsStore
+    from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
 
 
@@ -27,8 +29,16 @@ class Runtime:
     db: Database | None = None
     provider: LLMProvider | None = None
     conversation: ConversationService | None = None
+    settings: SettingsStore | None = None
     local_model: str | None = None
     ollama_ready: bool | None = None
+    # Model ids Ollama actually has pulled — drives picker availability.
+    local_models: list[str] = field(default_factory=list)
+    # Every provider, keyed by `catalog.ProviderName`. `provider` above stays as
+    # the local one, which startup and `system.health` still special-case.
+    providers: dict[str, LLMProvider] = field(default_factory=dict)
+    # Shared by `models.list` and the router so they can never disagree.
+    availability: AvailabilityService | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -50,12 +60,24 @@ class Runtime:
             )
         return self.conversation
 
+    def require_availability(self) -> AvailabilityService:
+        if self.availability is None:
+            raise RuntimeError(
+                "Model availability is not resolved yet. The sidecar is still "
+                "starting; retry once GET /health reports db=true."
+            )
+        return self.availability
+
     def reset(self) -> None:
         self.db = None
         self.provider = None
         self.conversation = None
+        self.settings = None
         self.local_model = None
         self.ollama_ready = None
+        self.local_models = []
+        self.providers = {}
+        self.availability = None
 
 
 runtime = Runtime()

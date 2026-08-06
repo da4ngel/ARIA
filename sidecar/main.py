@@ -17,6 +17,7 @@ from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
 from sidecar.core.conversation import ConversationService
+from sidecar.core.router import Router, RoutingBias
 from sidecar.handshake import (
     bearer_from_header,
     clear_handshake,
@@ -27,8 +28,14 @@ from sidecar.handshake import (
 from sidecar.logging_setup import configure_logging
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
-from sidecar.providers.base import ProviderError
+from sidecar.memory.settings_store import ROUTING_BIAS, SELECTED_MODEL, SettingsStore
+from sidecar.providers import catalog
+from sidecar.providers.availability import AvailabilityService
+from sidecar.providers.base import LLMProvider, ProviderError
+from sidecar.providers.gemini import GeminiProvider
+from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
+from sidecar.providers.openai import OpenAIProvider
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
@@ -73,38 +80,98 @@ def _shutdown(settings: Settings) -> None:
     log.info("sidecar.stopped")
 
 
+async def _discover_local_models(provider: OllamaProvider) -> list[str]:
+    """Ask Ollama what is actually pulled. Never fatal — Ollama may be down."""
+    try:
+        models = await provider.list_models()
+    except ProviderError as exc:
+        runtime.ollama_ready = False
+        log.warning("ollama.list_failed", error=str(exc))
+        return []
+
+    runtime.ollama_ready = True
+    log.info("ollama.models", count=len(models), models=models)
+    return models
+
+
 async def _start_conversation(settings: Settings) -> None:
-    """Wire the provider and conversation service, then warm the model.
+    """Wire every provider, the router, and the conversation service.
 
     §12: a model that unloaded costs 8-15s. The user must never hit that, so we
     pay it here at startup instead. Warm-up failure is not fatal — the sidecar
     stays up and reports it, because Ollama not running is a recoverable state
     the UI should show rather than a crash.
     """
-    provider = OllamaProvider(settings.ollama_url)
-    store = ConversationStore(runtime.require_db())
+    ollama = OllamaProvider(settings.ollama_url)
+    providers: dict[str, LLMProvider] = {
+        str(catalog.ProviderName.OLLAMA): ollama,
+        str(catalog.ProviderName.OPENAI): OpenAIProvider(),
+        str(catalog.ProviderName.GEMINI): GeminiProvider(),
+    }
 
-    runtime.provider = provider
-    runtime.local_model = settings.local_model
+    runtime.provider = ollama
+    runtime.providers = providers
+    runtime.local_models = await _discover_local_models(ollama)
+
+    availability = AvailabilityService(tracker)
+    availability.set_local_models(runtime.local_models)
+    runtime.availability = availability
+
+    settings_store = SettingsStore(runtime.require_db())
+    runtime.settings = settings_store
+    selected = await settings_store.get(SELECTED_MODEL, catalog.SMART_ID)
+    bias = _resolve_bias(await settings_store.get(ROUTING_BIAS, str(RoutingBias.QUALITY)))
+
+    # One tracker shared by the router and `models.list`, so the picker greys out
+    # exactly what the router refuses to use.
+    local_default = catalog.default_local(runtime.local_models)
+    runtime.local_model = local_default.id
     runtime.conversation = ConversationService(
-        store=store,
-        provider=provider,
+        store=ConversationStore(runtime.require_db()),
+        provider=ollama,
         bus=bus,
-        model=settings.local_model,
+        model=local_default.id,
         num_ctx=settings.num_ctx,
         context_token_budget=settings.context_token_budget,
+        providers=providers,
+        router=Router(tracker, bias),
+        health=tracker,
+        selected_model=selected if isinstance(selected, str) else catalog.SMART_ID,
+        usable_models=availability.usable,
+    )
+    log.info(
+        "conversation.ready",
+        local_default=local_default.id,
+        selected=selected,
+        bias=str(bias),
     )
 
     if not settings.warm_on_startup:
         return
+    if local_default.id not in runtime.local_models:
+        log.warning(
+            "model.warm_skipped",
+            model=local_default.id,
+            fix=f"Run: ollama pull {local_default.id}",
+        )
+        return
 
     try:
-        took_ms = await provider.warm(settings.local_model)
+        took_ms = await ollama.warm(local_default.id)
         runtime.ollama_ready = True
-        log.info("model.warm", model=settings.local_model, took_ms=round(took_ms, 1))
+        log.info("model.warm", model=local_default.id, took_ms=round(took_ms, 1))
     except ProviderError as exc:
         runtime.ollama_ready = False
-        log.warning("model.warm_failed", model=settings.local_model, error=str(exc))
+        log.warning("model.warm_failed", model=local_default.id, error=str(exc))
+
+
+def _resolve_bias(stored: object) -> RoutingBias:
+    """A hand-edited settings row must not stop the sidecar booting."""
+    try:
+        return RoutingBias(str(stored))
+    except ValueError:
+        log.warning("router.bad_bias", stored=stored, fix="Using 'quality'.")
+        return RoutingBias.QUALITY
 
 
 @contextlib.asynccontextmanager
@@ -117,8 +184,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     finally:
         if runtime.conversation is not None:
             await runtime.conversation.shutdown()
-        if runtime.provider is not None:
-            await runtime.provider.aclose()
+        # Every provider holds an httpx pool, not just the local one. One that
+        # refuses to close must not strand the others still open.
+        for name, provider in runtime.providers.items():
+            try:
+                await provider.aclose()
+            except Exception:  # noqa: BLE001 — shutdown path, nothing left to handle it
+                log.warning("provider.close_failed", provider=name)
         _shutdown(settings)
 
 

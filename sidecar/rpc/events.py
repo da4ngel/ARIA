@@ -38,6 +38,10 @@ class Event(StrEnum):
     # Phase 1
     TOKEN = "token"
     TURN_COMPLETE = "turn.complete"
+    # Phase 1.5: a provider died after streaming part of a reply, so the text
+    # already on screen belongs to a model that is not going to finish. The
+    # renderer discards it before the replacement starts streaming.
+    TURN_RESET = "turn.reset"
 
 
 class Sender(Protocol):

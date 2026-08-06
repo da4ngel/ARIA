@@ -18,6 +18,8 @@ without moving the cache boundary.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 import structlog
 
 from sidecar.memory.messages import StoredMessage
@@ -40,24 +42,71 @@ def estimate_tokens(text: str) -> int:
 # token here is paid on the first turn and cached thereafter, but only while it
 # stays byte-identical.
 
-IDENTITY = """You are Aria, a local assistant running on Eyaas's Windows machine.
+
+class PersonaLevel(StrEnum):
+    """How much character a model can carry without falling apart.
+
+    Measured on qwen3.5:4b: the FULL prompt below turned "What is the capital of
+    France?" into "Paris. It's in a river valley, mostly empty space with lots of
+    noise…", and made the model invent a leaking roof it then referenced for 25
+    turns. The same words on a stronger model read as character. So persona is a
+    per-model property, carried by the catalog — not one global prompt.
+    """
+
+    MINIMAL = "minimal"
+    FULL = "full"
+
+
+# Leads both levels. The specific failure this fixes: "Reply with only the
+# number 7." producing a 662-character refusal, while "Write a detailed 400-word
+# essay" produced the single word "Rain". Explicit instructions were losing to
+# voice, so voice is now explicitly subordinate.
+_INSTRUCTION_PRIORITY = """When the user specifies a format, a length, or an exact
+output, follow it precisely. That instruction outranks your voice and style. If
+asked for one word, answer in one word. If asked for an essay, write the essay.
+
+Only discuss what the user actually raised. Never invent context, events, or
+situations that were not mentioned."""
+
+_MINIMAL = f"""You are Aria, an assistant running locally on Eyaas's Windows machine.
+
+{_INSTRUCTION_PRIORITY}
+
+Be concise and plain-spoken. No emoji. Skip filler openers like "Great question!"
+If you do not know something, say so."""
+
+_FULL = f"""You are Aria, an assistant running locally on Eyaas's Windows machine.
+
+{_INSTRUCTION_PRIORITY}
 
 Voice: warm, direct, a little dry. Short sentences — you are often spoken aloud.
 No emoji. No filler openers like "Great question!" or "I'd be happy to".
 Minimal hedging.
 
-You have your own read on things and you say it. If something is a bad idea,
-say so once, clearly, then do it if he insists. Never claim to have done
-something you did not do. If you do not know, say so."""
+You have your own read on things and you say it. If a plan is genuinely a bad
+idea, say so once, briefly, then do as he asks. This is a light touch, not a
+running argument — never be hostile, sarcastic, or dismissive, and never refuse
+a reasonable request. Never claim to have done something you did not do."""
+
+PERSONA_PROMPTS: dict[PersonaLevel, str] = {
+    PersonaLevel.MINIMAL: _MINIMAL,
+    PersonaLevel.FULL: _FULL,
+}
+
+# Kept as the default so callers that predate model-aware persona still work.
+IDENTITY = _FULL
 
 
-def stable_prefix() -> list[ChatMessage]:
+def stable_prefix(level: PersonaLevel = PersonaLevel.FULL) -> list[ChatMessage]:
     """Content identical across turns. Everything here is KV-cached.
+
+    Changing `level` invalidates the prefix cache once — on the turn the model
+    changes — not per turn, because the text is constant for a given level.
 
     Phase 3 appends tool schemas to this list — they are stable across turns
     only if the relevance-selection sorts deterministically (§8.2 corollary).
     """
-    return [ChatMessage(role=Role.SYSTEM, content=IDENTITY)]
+    return [ChatMessage(role=Role.SYSTEM, content=PERSONA_PROMPTS[level])]
 
 
 def volatile_prefix(summary: str | None = None) -> list[ChatMessage]:
@@ -117,7 +166,9 @@ def split_for_rollup(
     return turns[:half], turns[half:]
 
 
-def overhead_tokens(summary: str | None = None) -> int:
+def overhead_tokens(
+    summary: str | None = None, level: PersonaLevel = PersonaLevel.FULL
+) -> int:
     """Tokens spent before the conversation even starts.
 
     Roll-up decisions must account for this. An earlier version measured only
@@ -125,7 +176,7 @@ def overhead_tokens(summary: str | None = None) -> int:
     budget immediately after rolling up — the roll-up "succeeded" and the
     context still overflowed.
     """
-    prefix = [*stable_prefix(), *volatile_prefix(summary)]
+    prefix = [*stable_prefix(level), *volatile_prefix(summary)]
     return sum(estimate_tokens(m.content) for m in prefix)
 
 
@@ -133,13 +184,18 @@ def assemble(
     turns: list[ChatMessage],
     *,
     summary: str | None = None,
+    level: PersonaLevel = PersonaLevel.FULL,
 ) -> list[ChatMessage]:
     """Build the final message list, stable content first."""
-    return [*stable_prefix(), *volatile_prefix(summary), *turns]
+    return [*stable_prefix(level), *volatile_prefix(summary), *turns]
 
 
 def fit_to_budget(
-    turns: list[ChatMessage], *, summary: str | None, hard_cap_tokens: int
+    turns: list[ChatMessage],
+    *,
+    summary: str | None,
+    hard_cap_tokens: int,
+    level: PersonaLevel = PersonaLevel.FULL,
 ) -> list[ChatMessage]:
     """Drop oldest turns until the assembled prompt fits. Backstop, not policy.
 
@@ -152,11 +208,11 @@ def fit_to_budget(
     over-budget prompt if the prefix alone exceeds the cap. That would be a
     configuration error, and it is logged loudly rather than silently truncated.
     """
-    budget = hard_cap_tokens - overhead_tokens(summary)
+    budget = hard_cap_tokens - overhead_tokens(summary, level)
     if budget <= 0:
         log.error(
             "context.prefix_exceeds_budget",
-            overhead=overhead_tokens(summary),
+            overhead=overhead_tokens(summary, level),
             hard_cap=hard_cap_tokens,
             fix="Shorten the identity prompt or the roll-up summary.",
         )

@@ -23,7 +23,8 @@ import structlog
 log = structlog.get_logger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-SCHEMA_VERSION = 1
+MIGRATIONS_DIR = Path(__file__).parent
+SCHEMA_VERSION = 2
 
 T = TypeVar("T")
 
@@ -59,27 +60,32 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version >= SCHEMA_VERSION:
         return version
 
+    started_at = version
     if version == 0:
-        _apply_initial_schema(conn)
+        _apply_sql(conn, SCHEMA_PATH, target_version=1)
+        version = 1
+    if version == 1:
+        _apply_sql(conn, MIGRATIONS_DIR / "schema_002.sql", target_version=2)
+        version = 2
 
-    log.info("db.migrated", from_version=version, to_version=SCHEMA_VERSION)
-    return SCHEMA_VERSION
+    log.info("db.migrated", from_version=started_at, to_version=version)
+    return version
 
 
-def _apply_initial_schema(conn: sqlite3.Connection) -> None:
-    """Apply schema.sql as migration 0 -> 1, atomically.
+def _apply_sql(conn: sqlite3.Connection, path: Path, *, target_version: int) -> None:
+    """Apply one migration file atomically and stamp `user_version`.
 
     The vec0 virtual tables in schema.sql require the sqlite-vec extension, which
     :func:`connect` has already loaded.
     """
-    sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    sql = path.read_text(encoding="utf-8")
     try:
         with conn:
             conn.executescript(sql)
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            conn.execute(f"PRAGMA user_version={target_version}")
     except sqlite3.Error as exc:
         raise RuntimeError(
-            f"Failed to apply {SCHEMA_PATH.name} to the database. "
+            f"Failed to apply {path.name} to the database. "
             f"SQLite said: {exc}. Delete data/aria.db and restart to rebuild it "
             f"from scratch; if that fails, the sqlite-vec extension is not loading."
         ) from exc

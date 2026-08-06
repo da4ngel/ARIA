@@ -9,15 +9,19 @@ import pytest
 
 from sidecar.core import context as ctx
 from sidecar.core.conversation import ConversationService
+from sidecar.core.router import Router, RoutingBias
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
+from sidecar.providers import catalog
 from sidecar.providers.base import (
     ChatMessage,
     GenerationOptions,
+    ProviderRateLimited,
     ProviderUnavailable,
     Role,
     StreamDelta,
 )
+from sidecar.providers.health import HealthTracker
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
 
@@ -190,11 +194,145 @@ async def test_provider_failure_surfaces_error_not_crash(service) -> None:
     await svc.send("hi")
     await _drain(svc)
 
+    # The router now walks a fallback chain, so the first error is the failover
+    # notice and the underlying cause arrives once every candidate is exhausted.
     errors = bus.of(Event.ERROR)
-    assert errors and "ollama serve" in errors[0]["message"]
+    assert errors, "expected at least one error event"
+    assert any("ollama serve" in e["message"] for e in errors), errors
+    assert any(e["code"] == "provider_failover" for e in errors), errors
     # Still returns to idle — a failed turn must not wedge the orb.
     states = [p["state"] for m, p in bus.events if m == Event.STATE_CHANGE]
     assert states[-1] == AssistantState.IDLE
+
+
+async def test_failover_answers_from_the_next_model_and_names_both(
+    database: Database,
+) -> None:
+    """A cloud model that dies mid-chain must never swap silently (§9.7 stage 7)."""
+    dead = FakeProvider()
+    dead.fail_with = ProviderRateLimited("HTTP 429 from OpenAI.")
+    alive = FakeProvider(chunks=["Recovered."])
+
+    bus = RecordingBus()
+    health = HealthTracker()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=alive,
+        bus=bus,
+        model="qwen2.5:7b",
+        providers={"openai": dead, "gemini": alive, "ollama": alive},
+        router=Router(health, RoutingBias.QUALITY),
+        health=health,
+        usable_models=lambda: {"gpt-5", "gemini-3.1-pro-preview", "qwen2.5:7b"},
+    )
+
+    await svc.send("debug this traceback for me")
+    await _drain(svc)
+
+    complete = bus.of(Event.TURN_COMPLETE)
+    assert complete, "the turn must still complete"
+    assert complete[0]["full_text"] == "Recovered."
+    # The turn is attributed to whatever actually answered, not what was chosen.
+    assert complete[0]["model"] == "gemini-3.1-pro-preview"
+    assert "GPT-5" in (complete[0]["note"] or ""), complete[0]["note"]
+
+    # The 429 trips the breaker so the next turn skips that model entirely.
+    assert not health.is_usable("gpt-5")
+
+    errors = bus.of(Event.ERROR)
+    assert any(e["code"] == "provider_failover" for e in errors), errors
+
+
+async def test_failover_after_partial_output_tells_the_ui_to_discard_it(
+    database: Database,
+) -> None:
+    """Otherwise the replacement reply appends to half a sentence from a model
+    that never finished."""
+
+    class DiesMidStream(FakeProvider):
+        async def stream_chat(
+            self,
+            messages: list[ChatMessage],
+            *,
+            model: str,
+            options: GenerationOptions | None = None,
+        ) -> AsyncIterator[StreamDelta]:
+            yield StreamDelta(text="I think the answer is")
+            raise ProviderRateLimited("HTTP 429 mid-stream.")
+
+    bus = RecordingBus()
+    health = HealthTracker()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=FakeProvider(chunks=["Recovered."]),
+        bus=bus,
+        model="qwen2.5:7b",
+        providers={
+            "openai": DiesMidStream(),
+            "gemini": FakeProvider(chunks=["Recovered."]),
+            "ollama": FakeProvider(chunks=["Recovered."]),
+        },
+        router=Router(health, RoutingBias.QUALITY),
+        health=health,
+        usable_models=lambda: {"gpt-5", "gemini-3.1-pro-preview", "qwen2.5:7b"},
+    )
+
+    await svc.send("debug this traceback for me")
+    await _drain(svc)
+
+    assert bus.of(Event.TURN_RESET), "the UI was never told to drop the partial"
+    complete = bus.of(Event.TURN_COMPLETE)
+    assert complete[0]["full_text"] == "Recovered."
+    # And the abandoned fragment must not reach SQLite either.
+    history = await svc.history(None)
+    assert history.messages[-1].content == "Recovered."
+
+
+async def test_failover_records_the_serving_model_route_in_sqlite(
+    database: Database,
+) -> None:
+    alive = FakeProvider(chunks=["Cloud answer."])
+    health = HealthTracker()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=alive,
+        bus=RecordingBus(),
+        model="qwen2.5:7b",
+        providers={"openai": alive, "ollama": alive},
+        router=Router(health, RoutingBias.QUALITY),
+        health=health,
+        usable_models=lambda: {"gpt-5", "qwen2.5:7b"},
+    )
+
+    result = await svc.send("debug this traceback for me")
+    await _drain(svc)
+
+    history = await svc.history(result.session_id)
+    assert history.messages[-1].route == "cloud"
+
+
+async def test_trivial_turn_stays_local_even_at_quality_bias(database: Database) -> None:
+    local = FakeProvider(chunks=["Hey."])
+    cloud = FakeProvider()
+    cloud.fail_with = AssertionError("a greeting must not reach a cloud provider")
+
+    bus = RecordingBus()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=local,
+        bus=bus,
+        model="qwen2.5:7b",
+        providers={"ollama": local, "openai": cloud, "gemini": cloud},
+        router=Router(HealthTracker(), RoutingBias.QUALITY),
+        usable_models=lambda: {m.id for m in catalog.CATALOG},
+    )
+
+    await svc.send("hey")
+    await _drain(svc)
+
+    complete = bus.of(Event.TURN_COMPLETE)
+    assert complete[0]["route"] == "local"
+    assert complete[0]["model"] == catalog.PREFERRED_LOCAL
 
 
 async def test_empty_message_rejected(service) -> None:

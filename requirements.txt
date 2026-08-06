@@ -14,6 +14,13 @@ httpx==0.27.*
 sqlite-vec==0.1.6
 structlog==24.4.*
 
+# ── Phase 1.5: multi-provider cloud ───────────────────────────────
+# API keys live in Windows Credential Manager (§11), never .env.
+# §4 lists none of these. OpenAI and Gemini are reached over httpx rather than
+# their vendor SDKs, so `openai` and `google-genai` are deliberately absent —
+# two fewer dependency trees to survive PyInstaller (§2.3).
+keyring==25.7.*
+
 # ── Deferred, with the phase that introduces each (BUILD_SPEC §4) ──
 # Phase 1  — (none; Ollama is reached over httpx)
 # Phase 2  — faster-whisper==1.0.3, kokoro-onnx==0.4.*, onnxruntime==1.19.*,

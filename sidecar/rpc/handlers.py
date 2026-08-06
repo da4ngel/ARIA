@@ -7,6 +7,7 @@ than a stub that pretends to work.
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -89,7 +90,9 @@ async def system_health(_params: dict[str, Any]) -> dict[str, Any]:
 
     report = build_health(db_ready=runtime.db_ready)
     report.ollama = runtime.ollama_ready
-    report.models = [runtime.local_model] if runtime.local_model else []
+    # Everything Ollama has pulled, not just the default — the picker greys out
+    # local models by exactly this list.
+    report.models = list(runtime.local_models)
     report.pending_probes = [p for p in report.pending_probes if p not in ("ollama", "models")]
     return report.model_dump()
 
@@ -104,8 +107,11 @@ async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
 
     text = str(params.get("text", ""))
     session_id = params.get("session_id")
+    model = params.get("model")
     started = await runtime.require_conversation().send(
-        text, session_id if isinstance(session_id, str) else None
+        text,
+        session_id if isinstance(session_id, str) else None,
+        model if isinstance(model, str) else None,
     )
     return started.model_dump()
 
@@ -120,6 +126,144 @@ async def chat_cancel(params: dict[str, Any]) -> dict[str, Any]:
         raise RpcMethodError(ErrorCode.INVALID_PARAMS, "turn_id is required.")
     cancelled = await runtime.require_conversation().cancel(turn_id)
     return {"ok": cancelled}
+
+
+@method("chat.new")
+async def chat_new(_params: dict[str, Any]) -> dict[str, Any]:
+    """Start a fresh conversation. The previous one stays in SQLite."""
+    from sidecar.state import runtime
+
+    session_id = await runtime.require_conversation().new_session()
+    return {"session_id": session_id}
+
+
+# ── models (Phase 1.5) ────────────────────────────────────────────────
+
+
+@method("models.list")
+async def models_list(_params: dict[str, Any]) -> dict[str, Any]:
+    """Catalog plus live availability. Drives the picker and its tooltips.
+
+    Re-probes Ollama first: the user may have finished an `ollama pull` since
+    startup, and opening the picker is exactly when they would look for it.
+    """
+    from sidecar.providers import catalog
+    from sidecar.providers.base import ProviderError
+    from sidecar.providers.ollama import OllamaProvider
+    from sidecar.state import runtime
+
+    availability = runtime.require_availability()
+    conversation = runtime.require_conversation()
+
+    if isinstance(runtime.provider, OllamaProvider):
+        with contextlib.suppress(ProviderError):
+            models = await runtime.provider.list_models()
+            runtime.local_models = models
+            availability.set_local_models(models)
+
+    listing = catalog.ModelListing(
+        selected=conversation.selected_model,
+        bias=str(conversation.routing_bias),
+        models=availability.entries(),
+    )
+    return listing.model_dump(mode="json")
+
+
+@method("models.select")
+async def models_select(params: dict[str, Any]) -> dict[str, Any]:
+    """Persist the model choice: a catalog id, or "smart"."""
+    from sidecar.memory.settings_store import SELECTED_MODEL
+    from sidecar.providers import catalog
+    from sidecar.state import runtime
+
+    model_id = params.get("model")
+    if not isinstance(model_id, str):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "model is required.")
+    if model_id != catalog.SMART_ID and catalog.get(model_id) is None:
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            f"Unknown model {model_id!r}. Call models.list for the available ids.",
+        )
+
+    runtime.require_conversation().set_selected_model(model_id)
+    if runtime.settings is not None:
+        await runtime.settings.set(SELECTED_MODEL, model_id)
+    return {"ok": True, "selected": model_id}
+
+
+@method("models.bias")
+async def models_bias(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set what Smart mode optimises for.
+
+    Phase 2 flips this to "fastest" for voice: §10 budgets ~1000ms end-to-end
+    and the cheapest cloud model costs 1236ms on the network hop alone.
+    """
+    from sidecar.core.router import RoutingBias
+    from sidecar.memory.settings_store import ROUTING_BIAS
+    from sidecar.state import runtime
+
+    conversation = runtime.require_conversation()
+    requested = params.get("bias")
+
+    if requested is not None:
+        try:
+            bias = RoutingBias(str(requested))
+        except ValueError:
+            allowed = ", ".join(str(b) for b in RoutingBias)
+            raise RpcMethodError(
+                ErrorCode.INVALID_PARAMS, f"Unknown bias {requested!r}. Use one of: {allowed}."
+            ) from None
+        conversation.set_routing_bias(bias)
+        if runtime.settings is not None:
+            await runtime.settings.set(ROUTING_BIAS, str(bias))
+
+    return {"bias": str(conversation.routing_bias)}
+
+
+# ── settings: API keys (Phase 1.5) ────────────────────────────────────
+# Presence and the last four characters only. A key value never leaves the
+# sidecar once stored — not in a response, not in a log (§11).
+
+
+@method("settings.keys")
+async def settings_keys(_params: dict[str, Any]) -> dict[str, Any]:
+    """Which providers are configured. Contains no secrets."""
+    from sidecar.providers.credentials import all_status
+
+    return {"keys": [s.model_dump(mode="json") for s in all_status()]}
+
+
+@method("settings.set_key")
+async def settings_set_key(params: dict[str, Any]) -> dict[str, Any]:
+    """Store, replace, or clear one API key. Pass value=null to clear."""
+    from sidecar.providers.credentials import CredentialKey, delete_key, set_key, status
+    from sidecar.state import runtime
+
+    raw_key = params.get("key")
+    try:
+        key = CredentialKey(str(raw_key))
+    except ValueError:
+        allowed = ", ".join(str(k) for k in CredentialKey)
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS, f"Unknown key {raw_key!r}. Use one of: {allowed}."
+        ) from None
+
+    value = params.get("value")
+    if value is None:
+        delete_key(key)
+    elif isinstance(value, str) and value.strip():
+        set_key(key, value.strip())
+    else:
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            "value must be a non-empty string to store a key, or null to clear it.",
+        )
+
+    # The router caches key presence; a new key must take effect on the next
+    # turn, not the next restart.
+    if runtime.availability is not None:
+        runtime.availability.refresh_keys()
+    return {"ok": True, "status": status(key).model_dump(mode="json")}
 
 
 @method("chat.history")

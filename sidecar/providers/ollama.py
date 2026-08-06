@@ -11,6 +11,7 @@ tokens in 200 tokens / ~6s — see CLAUDE.md.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -32,6 +33,21 @@ KEEP_ALIVE = "30m"
 CONNECT_TIMEOUT_S = 3.0
 READ_TIMEOUT_S = 300.0
 WARM_TIMEOUT_S = 120.0
+
+# Reasoning models occasionally emit a literal reasoning tag inside `content`
+# even with think=False. Observed once in roughly 16 generations on qwen3.5:4b
+# and not reproducible in 36 further attempts — rare, not systematic, and the
+# model's doing rather than a parsing error. Stripped anyway: a stray tag in the
+# transcript is ugly, and in Phase 2 it would be read aloud.
+_REASONING_BLOCK = re.compile(r"<(think|thinking)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_REASONING_TAG = re.compile(r"</?(think|thinking)>", re.IGNORECASE)
+
+
+def strip_reasoning_artifacts(text: str) -> str:
+    """Remove reasoning tags, and any complete block between them, from content."""
+    if "<" not in text:  # fast path — the overwhelming majority of deltas
+        return text
+    return _REASONING_TAG.sub("", _REASONING_BLOCK.sub("", text))
 
 
 class OllamaProvider:
@@ -151,7 +167,7 @@ class OllamaProvider:
 
         message = chunk.get("message") or {}
         return StreamDelta(
-            text=message.get("content") or "",
+            text=strip_reasoning_artifacts(message.get("content") or ""),
             thinking=message.get("thinking") or "",
             done=bool(chunk.get("done")),
             prompt_tokens=chunk.get("prompt_eval_count"),
