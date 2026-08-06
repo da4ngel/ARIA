@@ -10,6 +10,7 @@ state live in SQLite per CLAUDE.md rule 1.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from sidecar.memory.settings_store import SettingsStore
     from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
+    from sidecar.providers.tts import KokoroTTS
 
 
 @dataclass
@@ -39,6 +41,9 @@ class Runtime:
     providers: dict[str, LLMProvider] = field(default_factory=dict)
     # Shared by `models.list` and the router so they can never disagree.
     availability: AvailabilityService | None = None
+    # Speech. None when voice is off or the weights are missing — she types.
+    tts: KokoroTTS | None = None
+    tts_warm: asyncio.Task[None] | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -78,6 +83,8 @@ class Runtime:
         self.local_models = []
         self.providers = {}
         self.availability = None
+        self.tts = None
+        self.tts_warm = None
 
 
 runtime = Runtime()

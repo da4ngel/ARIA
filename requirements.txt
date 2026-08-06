@@ -21,10 +21,24 @@ structlog==24.4.*
 # two fewer dependency trees to survive PyInstaller (§2.3).
 keyring==25.7.*
 
+# ── Phase 2 stage 1: speech out ───────────────────────────────────
+# CPU only (rule 2 — the 6GB card holds the language model alone) and torch-free
+# (rule 3): kokoro-onnx runs on onnxruntime.
+#
+# Two of §4's pins do not work and are deliberately not used. kokoro-onnx
+# requires onnxruntime>=1.20.1 where §4 says 1.19.*, and numpy>=2.0.2 where §4's
+# Phase 4 block says 1.26.*. Both are transitive, so they are left unpinned here
+# rather than forced to a version that cannot resolve.
+#
+# Model weights (~340MB) are not vendored: `data/models/kokoro-v1.0.onnx` and
+# `voices-v1.0.bin` from the kokoro-onnx releases page. Missing weights log a
+# warning and disable voice; they never stop the sidecar.
+kokoro-onnx==0.4.*
+
 # ── Deferred, with the phase that introduces each (BUILD_SPEC §4) ──
 # Phase 1  — (none; Ollama is reached over httpx)
-# Phase 2  — faster-whisper==1.0.3, kokoro-onnx==0.4.*, onnxruntime==1.19.*,
-#            openwakeword==0.6.0, sounddevice==0.5.*, webrtcvad==2.0.10
+# Phase 2  — stage 2: faster-whisper==1.0.3
+#            stage 3: openwakeword==0.6.0, webrtcvad==2.0.10
 # Phase 3  — pywinauto==0.6.8, pywin32==306, psutil==6.0.*
 # Phase 4  — numpy==1.26.*, watchfiles==0.24.*, python-docx==1.1.*,
 #            pypdf==5.0.*, openpyxl==3.1.*

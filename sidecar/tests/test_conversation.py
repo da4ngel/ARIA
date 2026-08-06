@@ -541,3 +541,51 @@ async def test_long_conversation_triggers_rollup(database: Database, make_servic
     for messages in provider.calls:
         total = sum(ctx.estimate_tokens(m.content) for m in messages)
         assert total < 8192, f"context overflowed: {total} tokens"
+
+
+async def test_rollup_does_not_block_the_turn_that_triggers_it(
+    database: Database, make_service
+) -> None:
+    """Roll-up is a second model call. Awaiting it put a whole generation in
+    front of the first token, which a ~1000ms voice budget cannot absorb."""
+    provider = FakeProvider(chunks=["z" * 3000])
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=RecordingBus(),
+        model="test-model",
+        context_token_budget=2000,
+    )
+
+    session_id: str | None = None
+    for i in range(6):
+        result = await svc.send(f"message {i} " + "q" * 2000, session_id)
+        session_id = result.session_id
+        await _drain(svc)
+
+    # `_drain` waits only for turns, so a summary present here would mean the
+    # turn had waited for it.
+    assert svc._jobs or svc._summaries, "expected a roll-up to have been scheduled"  # noqa: SLF001
+
+    await svc.shutdown()  # drains the background jobs
+    assert session_id in svc._summaries, "the summary should land after the turn"  # noqa: SLF001
+
+
+async def test_only_one_rollup_per_session_at_a_time(
+    database: Database, make_service
+) -> None:
+    """A fast typist would otherwise queue several summarisations of nearly the
+    same history, burning the model on a race."""
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(chunks=["z" * 3000]),
+        bus=RecordingBus(),
+        model="test-model",
+        context_token_budget=2000,
+    )
+
+    turns = [ChatMessage(role=Role.USER, content="x" * 4000)]
+    svc._schedule_roll_up("s_1", turns, None)  # noqa: SLF001
+    first = len(svc._jobs)  # noqa: SLF001
+    svc._schedule_roll_up("s_1", turns, None)  # noqa: SLF001
+    assert len(svc._jobs) == first, "a second roll-up for the same session was queued"  # noqa: SLF001

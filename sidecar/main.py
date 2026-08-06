@@ -6,6 +6,7 @@ Binds 127.0.0.1 only (BUILD_SPEC §11).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
@@ -37,6 +38,7 @@ from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
 from sidecar.providers.openai import OpenAIProvider
+from sidecar.providers.tts import KokoroTTS, SpeechUnavailable
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
@@ -131,6 +133,7 @@ async def _start_conversation(settings: Settings) -> None:
     # exactly what the router refuses to use.
     local_default = catalog.default_local(runtime.local_models)
     runtime.local_model = local_default.id
+    runtime.tts = _build_tts(settings)
     runtime.conversation = ConversationService(
         store=ConversationStore(runtime.require_db()),
         provider=ollama,
@@ -143,6 +146,7 @@ async def _start_conversation(settings: Settings) -> None:
         health=tracker,
         selected_model=selected if isinstance(selected, str) else catalog.SMART_ID,
         usable_models=availability.usable,
+        tts=runtime.tts,
     )
     log.info(
         "conversation.ready",
@@ -170,6 +174,38 @@ async def _start_conversation(settings: Settings) -> None:
         log.warning("model.warm_failed", model=local_default.id, error=str(exc))
 
 
+def _build_tts(settings: Settings) -> KokoroTTS | None:
+    """Speech, warmed in the background.
+
+    Warming is a task rather than awaited: it costs ~2.4s on the first
+    synthesis, and holding startup for it would delay the window appearing for
+    something the user may not use in this session. Until it finishes,
+    `SpeechStream` sees `ready == False` and simply stays quiet.
+    """
+    if not settings.voice_enabled:
+        log.info("tts.disabled")
+        return None
+
+    engine = KokoroTTS(
+        settings.models_dir,
+        voice=settings.voice,
+        speed=settings.voice_speed,
+        lang=settings.voice_lang,
+    )
+
+    async def warm() -> None:
+        try:
+            await engine.start()
+        except SpeechUnavailable as exc:
+            # Missing weights is a setup step, not a crash. She types instead.
+            log.warning("tts.unavailable", error=str(exc))
+        except Exception:
+            log.exception("tts.warm_failed")
+
+    runtime.tts_warm = asyncio.create_task(warm())
+    return engine
+
+
 def _resolve_bias(stored: object) -> RoutingBias:
     """A hand-edited settings row must not stop the sidecar booting."""
     try:
@@ -188,6 +224,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await connectivity.stop()
+        if runtime.tts is not None:
+            await runtime.tts.aclose()
         if runtime.conversation is not None:
             await runtime.conversation.shutdown()
         # Every provider holds an httpx pool, not just the local one. One that

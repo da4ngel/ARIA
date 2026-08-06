@@ -22,6 +22,7 @@ import { ModelPicker } from '@/components/ModelPicker'
 import { Orb } from '@/components/Orb'
 import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
+import { useAudio } from '@/hooks/useAudio'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
 import { useRpc } from '@/hooks/useRpc'
@@ -38,10 +39,14 @@ export default function App(): JSX.Element {
   const { turns, busy, send, cancel, newChat, openSession, sessionId, lastFirstTokenMs } =
     useConversation(connected)
   const models = useModels(connected)
+  const audio = useAudio()
   const { expanded, toggle: toggleExpanded } = useWindowMode()
   const [overlay, setOverlay] = useState<Overlay>(null)
 
   const started = turns.length > 0
+  // Real playback beats the sidecar's own state here: `speaking` should mean
+  // sound is coming out, not that a turn finished and audio may be queued.
+  const orbState = audio.speaking ? 'speaking' : assistantState
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -110,7 +115,7 @@ export default function App(): JSX.Element {
             style={drag}
           >
             <div className="flex min-w-0 items-center gap-2">
-              {started && <Orb state={assistantState} connected={connected} size={20} />}
+              {started && <Orb state={orbState} connected={connected} size={20} />}
               {started && (
                 <span className="truncate text-small font-medium tracking-tight">Aria</span>
               )}
@@ -178,9 +183,9 @@ export default function App(): JSX.Element {
           </AnimatePresence>
 
           {started ? (
-            <ConversationView turns={turns} state={assistantState} />
+            <ConversationView turns={turns} state={orbState} />
           ) : (
-            <EmptyState state={assistantState} connected={connected} onPick={send} />
+            <EmptyState state={orbState} connected={connected} onPick={send} />
           )}
 
           {lastLog && (
@@ -190,7 +195,10 @@ export default function App(): JSX.Element {
           )}
 
           <div className="px-3 pb-3" style={noDrag}>
-            <ComposerBar busy={busy} disabled={!connected} onSend={send} onCancel={cancel} />
+            <ComposerBar busy={busy} disabled={!connected} onSend={send} onCancel={() => {
+              audio.stop()
+              void cancel()
+            }} />
             <footer className="mt-1.5 flex items-center justify-between px-0.5 text-micro text-aria-faint">
               <button
                 type="button"

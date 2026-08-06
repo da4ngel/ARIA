@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # §9 Phase 1: roll up the conversation once it passes this.
     context_token_budget: int = 6000
 
+    # ── Voice (Phase 2) ──────────────────────────────────────────────
+    # CPU only, per rule 2: the 6GB card holds the language model alone.
+    # Off leaves her fully usable by typing — voice is additive, never required.
+    voice_enabled: bool = True
+    voice: str = "af_heart"
+    voice_speed: float = 1.0
+    voice_lang: str = "en-us"
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)
@@ -55,6 +63,12 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "aria.db"
+
+    @property
+    def models_dir(self) -> Path:
+        """Speech model weights. Gitignored with the rest of `data/`, and large
+        enough (~340MB) that they are downloaded rather than vendored."""
+        return self.data_dir / "models"
 
     @property
     def log_dir(self) -> Path:

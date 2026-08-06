@@ -42,6 +42,13 @@ class Event(StrEnum):
     # already on screen belongs to a model that is not going to finish. The
     # renderer discards it before the replacement starts streaming.
     TURN_RESET = "turn.reset"
+    # Phase 2: one synthesised chunk, base64 int16 PCM. Emitted while the model
+    # is still generating the next sentence — waiting for the whole reply is
+    # what puts first audio past the budget (§9 Phase 2).
+    AUDIO_OUT = "audio.out"
+    # Stop playing and drop anything queued. Cancel uses it today; barge-in
+    # reuses it in stage 3, which is why the flush lives here and not in cancel.
+    AUDIO_STOP = "audio.stop"
 
 
 class Sender(Protocol):

@@ -37,6 +37,40 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 Phase 1.5 complete (multi-provider routing, model control, quality fix).
 Next: Phase 2 — Voice. Update this line when a phase's acceptance gate passes.
 
+## Phase 2 stage 1 — she speaks (2026-08-06)
+kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
+`data/models/` (~340MB, not vendored, downloaded from the kokoro-onnx releases).
+Missing weights log a warning and disable voice — they never stop the sidecar.
+
+**Synthesis cost here is `230ms fixed + ~26ms per character`**, measured end to
+end with Ollama generating concurrently. Contention matters: RTF is ~0.35 when
+synthesising alone and ~0.5 while the model is streaming.
+
+That arithmetic is the whole design. `FIRST_CHUNK_MAX_CHARS` was 90 and the
+opening fragment alone cost 2470ms, putting first audio at 3.5s. At 32 chars:
+
+| reply | first audio |
+|---|---|
+| "Canberra." | **872ms** |
+| three primary colours | 1289ms |
+| two sentences on why the sky is blue | 1400ms |
+
+**The 900ms gate is met only for short replies.** 230ms of fixed cost plus
+~310ms TTFT leaves room for roughly a dozen characters, which is not a sentence.
+Do not "fix" this by enlarging the first chunk — that is the thing that made it
+3.5s. Faster first audio needs a cheaper voice model, not a tuning change.
+
+Sustained playback is fine either way: RTF 0.5 means synthesis stays ahead of
+speech, so once started she does not stutter.
+
+- **Reasoning is never spoken.** `SpeechStream` reads `delta.text` and never
+  `delta.thinking`; `test_tts.py` asserts it rather than assuming it.
+- **Cancel emits `audio.stop`** before the task unwinds, or queued audio keeps
+  talking for seconds after the stop button. Stage 3's barge-in reuses it.
+- Chunks carry an index. Synthesis is dispatched per fragment, so a short one
+  can finish before a long one sent earlier; the renderer plays by index and
+  schedules on the WebAudio clock so sentences do not seam.
+
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.
 
@@ -152,24 +186,33 @@ a score. Ones that actually bit:
 - OpenAI's quota error does not contain the string "429"; detect rate limiting
   on `ProviderRateLimited`, not on message text.
 
-## Open issue from Phase 1: TTFT scales with conversation length
-The gate ("first token < 700ms, warm model, **short prompt**") passes at
-405–531ms. But measured across a 35-turn run, median TTFT was **1720ms** and p95
-**3183ms** — because every turn re-prefills the whole conversation.
+## Closed: TTFT does *not* scale with conversation length (re-measured 2026-08-06)
+This was recorded as a blocker — median 1720ms, p95 3183ms, "+0.8ms per
+conversation token", "Phase 2 must decide before voice". **Re-measured on the
+current build, it is not reproducible.**
 
-The KV cache helps but does not flatten it: 593ms at 59 prompt tokens rising to
-927ms at 445. Roughly +0.8ms per conversation token.
+| turns | prompt tokens | TTFT |
+|---|---|---|
+| 1 | 495 | 611ms |
+| 9 | 1,102 | 429ms |
+| 17 | 1,804 | 478ms |
+| 29 | 2,895 | 498ms |
+| — | 5,407 | 431ms |
 
-Consequence: sub-700ms is only reachable for *short* conversations. Holding it
-across a long one would need `context_token_budget` near 400 tokens, which is
-about four turns — not a real conversation. The current 6000 (per §9 Phase 1)
-gives ~3.4s by the time it fills.
+Median **483ms**, p95 **611ms** over a real 30-turn conversation where each turn
+appends to the prefix. Growth is **+0.03ms per token**, flat inside the noise.
 
-Unresolved, deliberately. It is a real trade-off between §1's "latency over
-intelligence" and coherence, and it is Eyaas's call, not a silent retune.
-Options: lower the budget, roll up far more aggressively, or accept ~1.5s in
-long sessions. Phase 2 must decide before voice, where the budget is ~1000ms
-end-to-end.
+Two reasons the old number was wrong. The default was `qwen3.5:4b` then — a
+reasoning model that pays for reasoning on every turn even with `think=false`.
+And Ollama's KV cache means a growing conversation prefills only the *new*
+message, not the whole history, so length is nearly free as long as the prefix
+is byte-identical. That is exactly what the stable-first ordering buys.
+
+**The remaining latency cliff is roll-up, not length.** `_summarize` is a second
+model call, and it used to run inline on the turn that crossed the budget. It is
+now a background job (see `_maybe_roll_up`), so the turn that triggers it is not
+the turn that pays for it. Do not move it back onto the critical path: voice has
+a ~1000ms end-to-end budget and a second model call does not fit in it.
 
 ## Provider strategy (decided 2026-08-06, supersedes BUILD_SPEC §4/§9.7)
 Cloud is **OpenAI and Gemini via API keys**, not Anthropic. Ollama is the

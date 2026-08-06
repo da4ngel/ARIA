@@ -11,6 +11,7 @@ requires that to land within 200ms.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import time
 import uuid
@@ -36,6 +37,7 @@ from sidecar.providers.base import (
 from sidecar.providers.catalog import ModelInfo
 from sidecar.providers.connectivity import connectivity
 from sidecar.providers.health import HealthTracker
+from sidecar.providers.tts import TextToSpeech, split_for_speech
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
 log = structlog.get_logger(__name__)
@@ -92,6 +94,92 @@ class ConversationHistory(BaseModel):
     messages: list[StoredMessage]
 
 
+class SpeechStream:
+    """Turns a token stream into audio while it is still arriving.
+
+    BUILD_SPEC §9 Phase 2 calls this the single trick that gets first audio
+    under the budget: do not wait for the whole reply. The first speakable
+    fragment is synthesised while the model is still writing the next sentence.
+
+    Synthesis is dispatched as a task rather than awaited, because awaiting it
+    would stall the token loop — the text on screen would stutter in time with
+    the speech. Chunks are numbered so the renderer plays them in order even
+    though they finish out of order.
+    """
+
+    def __init__(self, tts: TextToSpeech | None, bus: EventBus, started: float) -> None:
+        self._tts = tts
+        self._bus = bus
+        self._started = started
+        self._buffer = ""
+        self._index = 0
+        self._tasks: list[asyncio.Task[None]] = []
+
+    @property
+    def active(self) -> bool:
+        return self._tts is not None and self._tts.ready
+
+    def feed(self, text: str) -> None:
+        if self.active:
+            self._buffer += text
+
+    async def drain(self, turn_id: str) -> None:
+        """Emit every chunk the buffer can currently yield."""
+        if not self.active:
+            return
+        while True:
+            chunk, self._buffer = split_for_speech(self._buffer, is_first=self._index == 0)
+            if not chunk:
+                return
+            self._dispatch(turn_id, chunk)
+
+    async def finish(self, turn_id: str) -> None:
+        """Speak whatever is left, then wait for the synthesisers to land."""
+        if not self.active:
+            return
+        tail = self._buffer.strip()
+        self._buffer = ""
+        if tail:
+            self._dispatch(turn_id, tail)
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    def _dispatch(self, turn_id: str, text: str) -> None:
+        index = self._index
+        self._index += 1
+        task = asyncio.create_task(self._speak(turn_id, index, text))
+        self._tasks.append(task)
+
+    async def _speak(self, turn_id: str, index: int, text: str) -> None:
+        assert self._tts is not None
+        try:
+            pcm, sample_rate = await self._tts.synthesize(text)
+        except Exception as exc:  # noqa: BLE001 — silence is not worth a failed turn
+            log.warning("tts.chunk_failed", turn_id=turn_id, error=str(exc))
+            return
+
+        if index == 0:
+            # The Phase 2 gate is a number, so it gets logged as one.
+            elapsed = (time.perf_counter() - self._started) * 1000
+            log.info(
+                "turn.first_audio",
+                turn_id=turn_id,
+                first_audio_ms=round(elapsed, 1),
+                budget_ms=900,
+                within_budget=elapsed < 900,
+            )
+
+        await self._bus.broadcast(
+            Event.AUDIO_OUT,
+            {
+                "turn_id": turn_id,
+                "index": index,
+                "sample_rate": sample_rate,
+                "pcm": base64.b64encode(pcm).decode("ascii"),
+            },
+        )
+
+
 class ConversationService:
     """Owns in-flight turns. All durable state goes to SQLite."""
 
@@ -109,6 +197,7 @@ class ConversationService:
         health: HealthTracker | None = None,
         selected_model: str = catalog.SMART_ID,
         usable_models: Callable[[], set[str]] | None = None,
+        tts: TextToSpeech | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -124,6 +213,9 @@ class ConversationService:
         # tests. Startup injects the real resolver so the router never picks a
         # provider with no key behind it.
         self._usable_models = usable_models
+        # None means she types and does not speak. Voice is additive: a
+        # missing or broken engine must never stop a turn completing.
+        self._tts = tts
         # Defaults to the single provider it was constructed with, so existing
         # callers and tests keep working without a registry.
         self._registry = ProviderRegistry(
@@ -141,6 +233,9 @@ class ConversationService:
         # Sessions already titled this run, so a busy conversation does not
         # re-ask the model on every turn.
         self._titled: set[str] = set()
+        # Sessions with a roll-up in flight, so overlapping turns do not queue
+        # several summarisations of nearly the same history.
+        self._rolling_up: set[str] = set()
         # An id handed out by `new_session` that no message has landed in yet.
         self._pending_new: str | None = None
         # Roll-up notes are per-session and rebuilt on demand; not yet durable.
@@ -266,6 +361,12 @@ class ConversationService:
         if task is None or task.done():
             return False
         task.cancel()
+        # Silence first, and without waiting for the task to unwind: audio
+        # already queued in the renderer would otherwise keep talking for
+        # seconds after the stop button. Stage 3's barge-in reuses this exact
+        # event, which is why the flush lives here rather than inside cancel's
+        # own cleanup.
+        await self._bus.broadcast(Event.AUDIO_STOP, {"turn_id": turn_id})
         log.info("turn.cancel_requested", turn_id=turn_id)
         return True
 
@@ -375,6 +476,7 @@ class ConversationService:
         provider = self._registry.for_model(info)
         await self._free_vram_for(info)
         first_token_ms: float | None = None
+        speech = SpeechStream(self._tts, self._bus, started)
 
         async for delta in provider.stream_chat(
             messages,
@@ -398,8 +500,15 @@ class ConversationService:
                     )
                 collected.append(delta.text)
                 await self._bus.broadcast(Event.TOKEN, {"turn_id": turn_id, "text": delta.text})
+                # Speech reads `delta.text` — the content channel — and never
+                # `delta.thinking`. qwen3.5 streams reasoning separately, and
+                # reading that aloud would be the worst bug this project has.
+                speech.feed(delta.text)
+                await speech.drain(turn_id)
             if delta.done:
                 break
+
+        await speech.finish(turn_id)
         return first_token_ms
 
     async def _free_vram_for(self, info: ModelInfo) -> None:
@@ -578,11 +687,17 @@ class ConversationService:
         machine = self._machine_context(info, history)
 
         # Budget for turns is what's left after identity + any roll-up note.
+        #
+        # Roll-up used to happen *here*, awaited, which put a second model call
+        # in front of the first token on whichever turn crossed the budget. It
+        # now runs in the background: this turn drops the oldest turns to fit and
+        # answers immediately, and the summary it produces lands in time for the
+        # next one. Voice has a ~1000ms end-to-end budget and cannot absorb a
+        # second generation.
         turn_budget = self._budget - ctx.overhead_tokens(summary, level, machine)
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
-            summary = await self._summarize(to_summarize, summary)
-            self._summaries[session_id] = summary
+            self._schedule_roll_up(session_id, to_summarize, summary)
             turns = kept
 
         # Hard backstop: the summarizer is a model call and can return anything.
@@ -617,6 +732,31 @@ class ConversationService:
             session_started=started.astimezone() if started else None,
             message_count=len(history),
         )
+
+    def _schedule_roll_up(
+        self, session_id: str, to_summarize: list[ChatMessage], previous: str | None
+    ) -> None:
+        """Compress the oldest turns without the current turn waiting for it.
+
+        One at a time per session: a fast typist could otherwise queue several
+        summarisations of overlapping history, which would burn the model and
+        produce a note built from a race.
+        """
+        if session_id in self._rolling_up:
+            return
+        self._rolling_up.add(session_id)
+
+        async def run() -> None:
+            try:
+                summary = await self._summarize(to_summarize, previous)
+                if summary:
+                    self._summaries[session_id] = summary
+            finally:
+                self._rolling_up.discard(session_id)
+
+        job = asyncio.create_task(run())
+        self._jobs.add(job)
+        job.add_done_callback(self._jobs.discard)
 
     async def _summarize(
         self, to_summarize: list[ChatMessage], previous: str | None
