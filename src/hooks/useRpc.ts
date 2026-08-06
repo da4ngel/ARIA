@@ -26,8 +26,23 @@ export function useRpc(): UseRpc {
   const [lastLog, setLastLog] = useState<LogLine | null>(null)
 
   useEffect(() => {
-    void window.aria.getStatus().then(setStatus)
-    const offStatus = window.aria.onStatus(setStatus)
+    // The initial read is a round-trip over IPC, so a pushed status can land
+    // first. Applying the reply unconditionally would then put a stale value
+    // back — "starting" over a brain that already said "connected".
+    let pushed = false
+    void window.aria.getStatus().then((initial) => {
+      if (!pushed) setStatus(initial)
+    })
+
+    // A supervisor warning describes a problem happening now. Once the brain is
+    // connected again there is no problem, and leaving "Sidecar exited" on
+    // screen over a working app reports a fault that has already healed.
+    // The log file keeps the history; this line is a status, not a record.
+    const offStatus = window.aria.onStatus((next) => {
+      pushed = true
+      setStatus(next)
+      if (next === 'connected') setLastLog(null)
+    })
     const offLog = window.aria.onLog(setLastLog)
     const offEvent = window.aria.onEvent((event: SidecarEvent) => {
       if (event.method === 'state.change') {
