@@ -53,6 +53,14 @@ class Event(StrEnum):
     # starts. The window learns what you said from the message it renders, but
     # the screen overlay has no transcript to render — this is how it knows.
     HEARD = "heard"
+    # She has been called by name with no question attached, and is waiting to
+    # be asked. The renderer chimes on this; the rim is already lit by the
+    # `state.change` that accompanies it.
+    WAKE = "wake"
+    # Speech that was captured and then thrown away because it did not name
+    # her. Surfaced rather than swallowed: 64 silent drops in one session were
+    # indistinguishable from an app that had stopped working.
+    MISHEARD = "misheard"
 
 
 class Sender(Protocol):

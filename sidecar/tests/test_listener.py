@@ -8,6 +8,7 @@ what needs testing is the state machine over their answers — whether a real
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import numpy as np
@@ -116,7 +117,24 @@ def frame(samples: int = RENDER_FRAME) -> np.ndarray:
     return np.zeros(samples, dtype="float32")
 
 
-def build(mode: WakeMode, text: str = "aria what time is it"):
+_BUILT: list[Listener] = []
+
+
+@pytest.fixture(autouse=True)
+async def _drain_windows() -> AsyncIterator[None]:
+    """Cancel every listening window a test left open.
+
+    Not optional: ARMED and OPEN are `asyncio.sleep` tasks, and without this
+    asyncio complains they were destroyed while pending — noise that would
+    eventually hide a real leak.
+    """
+    yield
+    for listener in _BUILT:
+        await listener.aclose()
+    _BUILT.clear()
+
+
+def build(mode: WakeMode, text: str = "aria what time is it", windows: float = 30.0):
     wake = ScriptedWakeWord()
     vad = ScriptedVAD()
     stt = ScriptedSTT(text)
@@ -129,7 +147,12 @@ def build(mode: WakeMode, text: str = "aria what time is it"):
         bus=bus,
         wake=wake,
         mode=mode,
+        # Long by default so a test never races the window shut; the one test
+        # that cares about expiry passes a short one.
+        armed_window_s=windows,
+        follow_up_window_s=windows,
     )
+    _BUILT.append(listener)
     return listener, wake, vad, stt, conversation, bus
 
 
@@ -229,7 +252,8 @@ async def test_a_full_utterance_becomes_a_spoken_turn(parts) -> None:
 
     await drain(listener)
     assert conversation.sent == [("what time is it", True)]
-    assert listener.state is ListenerState.WAITING
+    # Not WAITING: a conversation stays open for a follow-up.
+    assert listener.state is ListenerState.OPEN
 
 
 async def test_a_cough_is_not_a_turn(parts) -> None:
@@ -505,3 +529,109 @@ def test_model_mode_without_a_model_is_refused_loudly() -> None:
             wake=None,
             mode=WakeMode.MODEL,
         )
+
+
+# ── the conversation ──────────────────────────────────────────────────
+# The machine this replaces answered 12 of 80 utterances in a real session,
+# because it required the name and the question in one breath. Everything
+# below is a case it could not handle.
+
+
+async def speak(listener: Listener, vad: ScriptedVAD, frames_of_speech: int = 10) -> None:
+    """One utterance: speech, then enough silence to end it."""
+    vad.speech = True
+    for _ in range(frames_of_speech):
+        await listener.feed(frame())
+    vad.speech = False
+    for _ in range(12):
+        await listener.feed(frame())
+    await drain(listener)
+
+
+async def test_her_name_alone_arms_her_instead_of_being_dropped(phrase) -> None:
+    """The whole bug: "Aria" strips to an empty string, and the first build
+    threw it away without a sound."""
+    listener, _wake, vad, stt, conversation, bus = phrase
+    stt.text = "Aria."
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    assert listener.state is ListenerState.ARMED
+    assert conversation.sent == [], "being called is not being asked"
+    assert bus.of(Event.WAKE), "she must say she is listening"
+    assert bus.state is AssistantState.LISTENING
+
+
+async def test_the_question_after_her_name_needs_no_name(phrase) -> None:
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    stt.text = "Aria."
+    await listener.enable()
+    await speak(listener, vad)
+    assert listener.state is ListenerState.ARMED
+
+    # A separate utterance, with no name in it at all.
+    stt.text = "what is the capital of Australia"
+    await speak(listener, vad)
+
+    assert conversation.sent == [("what is the capital of Australia", True)]
+
+
+async def test_a_follow_up_needs_no_name_either(phrase) -> None:
+    """"I want it to be a proper conversation" — this is that."""
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    await listener.enable()
+
+    stt.text = "aria what is the capital of Australia"
+    await speak(listener, vad)
+    assert listener.state is ListenerState.OPEN
+
+    stt.text = "and how many people live there"
+    await speak(listener, vad)
+
+    assert conversation.sent == [
+        ("what is the capital of Australia", True),
+        ("and how many people live there", True),
+    ]
+
+
+async def test_one_breath_still_works(phrase) -> None:
+    """The old form must not regress just because a new one exists."""
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    stt.text = "Aria, what time is it?"
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    assert conversation.sent == [("what time is it?", True)]
+
+
+async def test_the_window_closes_and_the_name_is_required_again() -> None:
+    """Otherwise one "aria" leaves the microphone answering the room forever."""
+    listener, _wake, vad, stt, conversation, _bus = build(WakeMode.PHRASE, windows=0.05)
+    stt.text = "Aria."
+    await listener.enable()
+    await speak(listener, vad)
+    armed = listener.state
+
+    # The window is 50ms in this test rather than ten seconds.
+    await asyncio.sleep(0.12)
+    assert armed is ListenerState.ARMED
+    assert listener.state is ListenerState.WAITING
+
+    stt.text = "so anyway I told him it was fine"
+    await speak(listener, vad)
+    assert conversation.sent == []
+
+
+async def test_a_miss_is_shown_rather_than_swallowed(phrase) -> None:
+    """64 silent drops in one session were indistinguishable from a dead app."""
+    listener, _wake, vad, stt, conversation, bus = phrase
+    stt.text = "so then he said he would be late"
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    assert conversation.sent == []
+    misheard = bus.of(Event.MISHEARD)
+    assert misheard and misheard[0]["text"] == "so then he said he would be late"

@@ -14,11 +14,14 @@ import type { AssistantState, SidecarEvent } from '@/types/bridge'
 
 /** How long the last exchange stays readable after she stops talking. */
 const LINGER_MS = 4500
+/** A miss is worth a glance, not a read. */
+const MISHEARD_MS = 2200
 
 export function OverlayApp(): JSX.Element {
   const [mode, setMode] = useState<RimMode>(null)
   const [asked, setAsked] = useState('')
   const [reply, setReply] = useState('')
+  const [misheard, setMisheard] = useState('')
   // Read once a frame by the canvas, so it must never be React state.
   const level = useRef(0)
   const linger = useRef<number | undefined>(undefined)
@@ -46,7 +49,16 @@ export function OverlayApp(): JSX.Element {
         return
       }
 
+      if (event.method === 'misheard') {
+        // Shown so a run of silent drops is visibly a mishearing rather than
+        // an app that has stopped responding.
+        setMisheard(String(event.params.text ?? ''))
+        window.setTimeout(() => setMisheard(''), MISHEARD_MS)
+        return
+      }
+
       if (event.method === 'heard') {
+        setMisheard('')
         clearLinger()
         setAsked(String(event.params.text ?? ''))
         setReply('')
@@ -80,7 +92,7 @@ export function OverlayApp(): JSX.Element {
   return (
     <>
       <ScreenRim mode={mode} getLevel={() => level.current} />
-      <Caption asked={asked} reply={reply} />
+      <Caption asked={asked} reply={reply} misheard={misheard} />
     </>
   )
 }

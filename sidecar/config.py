@@ -80,6 +80,15 @@ class Settings(BaseSettings):
     # voice through the speakers, so this needs the renderer's echo cancellation
     # to be working; set it false if she interrupts herself.
     barge_in_enabled: bool = True
+    # How long she waits to be asked after being called by name, and how long a
+    # conversation then stays open for follow-ups without it. Zero on either
+    # would restore the one-breath-only behaviour that answered 12 of 80
+    # utterances in a measured session — see `core/listener.ListenerState`.
+    armed_window_s: float = 10.0
+    follow_up_window_s: float = 12.0
+    # A short blip when she starts listening. The glow says the same thing, but
+    # only if you happen to be looking at the screen when you speak.
+    wake_chime: bool = True
 
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.

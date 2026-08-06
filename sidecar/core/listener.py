@@ -5,10 +5,18 @@ about them is made here**, in the sidecar, per CLAUDE.md rule 1. The renderer
 never decides that a wake word fired or that a sentence ended — it forwards
 audio and renders what it is told.
 
-    waiting  --speech-->  capturing  --700ms silence-->  transcribe
-       ^                                                     |
-       |                          "aria, ..."? --yes--> turn  |
-       +------------------------------------------------------+
+    waiting  --"aria"-->  armed  --any speech-->  capturing  --> turn
+       ^                    |  10s quiet                 |
+       |                    v                            v
+       +-----------------  waiting  <--12s quiet--  open  --any speech--> ...
+
+**Saying her name arms her; the question is a separate sentence.** The first
+build required both in one continuous breath, and measured over a real session
+it answered 12 of 80 utterances — everything else was dropped for not naming
+her, including every "Aria" said on its own and every question that followed
+one. `ARMED` and `OPEN` are windows in which the name is not required: the
+first because she has just been called, the second because a conversation does
+not restate your name before every sentence.
 
 **She answers to her own name, decided from the transcript** (`WakeMode.PHRASE`,
 the default). openWakeWord ships six pretrained phrases and "aria" is not among
@@ -24,7 +32,8 @@ alternative for anyone who would rather say "hey jarvis".
 
 Three ways into `capturing`:
 
-* **speech**, in phrase mode — the transcript decides afterwards;
+* **speech** — inside a window it is the question; outside one the transcript
+  decides afterwards whether it was for her;
 * **the wake word**, in model mode, scored by openWakeWord on every frame;
 * **barge-in**, when she is speaking and someone talks over her. That path
   stops playback and cancels generation before it starts recording, because
@@ -42,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -82,6 +92,17 @@ PREROLL_MS = 600.0
 # still covers the run-up.
 SPEECH_ONSET_MS = 96.0
 
+# How long she waits to be asked after her name, and how long a conversation
+# stays open for follow-ups afterwards.
+#
+# Both exist because saying a name and then talking is how every voice
+# assistant has trained people to behave, and requiring one continuous breath
+# instead threw away 64 of 80 utterances in a measured session. The follow-up
+# window is the longer of the two: being called and then saying nothing is a
+# mistake, but pausing to think mid-conversation is not.
+ARMED_WINDOW_S = 10.0
+FOLLOW_UP_WINDOW_S = 12.0
+
 # How often to report the arrival rate of frames. ~20s at 12.5/s.
 #
 # This exists because "is she still hearing me with the window hidden" is not
@@ -102,9 +123,11 @@ NAME_SPELLINGS = ("aria", "arya", "ariya", "area", "aaria")
 # request, and no one says the same one every time.
 _GREETING = r"(?:hey|hi|hello|ok|okay|yo)"
 
-# Whisper punctuates with em and en dashes, so both belong in the separator
-# class alongside the ASCII ones — "Aria — what time is it" is one utterance.
-_AFTER_NAME = "[\\s,.!?:;\\-—–]*"  # noqa: RUF001 — the dashes are the point
+# Whitespace and punctuation that can follow the name — em and en dashes
+# included, because Whisper writes both and "Aria — what time is it" is one
+# utterance, not a name followed by a sentence about a dash.
+_SEPARATORS = " ,.!?:;-—–"  # noqa: RUF001 — both dashes are deliberate
+_AFTER_NAME = f"[\\s{re.escape(_SEPARATORS)}]*"
 
 _WAKE_PREFIX = re.compile(
     rf"^\W*(?:{_GREETING}\W+)?(?:{'|'.join(NAME_SPELLINGS)})\b{_AFTER_NAME}",
@@ -116,25 +139,94 @@ _WAKE_PREFIX = re.compile(
 _MODEL_WAKE_PREFIX = re.compile(r"^\W*(hey|hi|ok|okay)?\W*jarvis\b\W*", re.IGNORECASE)
 
 
+# Pulls the first word out, ignoring a greeting in front of it, so the fuzzy
+# pass has something to compare.
+_FIRST_WORD = re.compile(rf"^\W*(?:{_GREETING}\W+)?([A-Za-z']+)", re.IGNORECASE)
+
+
+def _near_the_name(word: str) -> bool:
+    """Is this first word a plausible mishearing of her name?
+
+    `base.en` on a single short word is not reliable, and every miss was
+    silent — 64 of them in one session. One edit away from a known spelling is
+    the right bar: it catches "ariah", "arya", "aaria" and "aria" heard with a
+    dropped letter, while three-letter words that merely rhyme fail the length
+    check before the ratio is even considered.
+    """
+    lowered = word.lower()
+    if len(lowered) < 3:
+        return False
+    for spelling in NAME_SPELLINGS:
+        if abs(len(lowered) - len(spelling)) > 1:
+            continue
+        # The first letter must survive. Without this "Maria" is one edit from
+        # "aria" and every Maria in earshot wakes her up.
+        if lowered[0] != spelling[0]:
+            continue
+        # `difflib` rather than a hand-rolled Levenshtein: stdlib, and its
+        # ratio over words this short is equivalent for our purposes.
+        if SequenceMatcher(None, lowered, spelling).ratio() >= 0.8:
+            return True
+    return False
+
+
 def starts_with_wake_phrase(text: str) -> bool:
     """Was this utterance addressed to her?
 
     The whole of phrase mode rests on this one question: everything else the
     room says is transcribed, asked this, and thrown away.
+
+    Exact spellings first, then one fuzzy pass over the first word. The strict
+    pass carries the common case; the fuzzy one exists because a name she does
+    not recognise is indistinguishable, to the user, from an app that ignores
+    them.
     """
-    return _WAKE_PREFIX.match(text.strip()) is not None
+    stripped = text.strip()
+    if _WAKE_PREFIX.match(stripped) is not None:
+        return True
+    match = _FIRST_WORD.match(stripped)
+    return match is not None and _near_the_name(match.group(1))
 
 
 def strip_wake_word(text: str) -> str:
     """Remove a leading wake phrase. Leaves the name alone mid-sentence."""
-    stripped = _WAKE_PREFIX.sub("", text.strip(), count=1)
+    stripped = text.strip()
+    before = stripped
+    stripped = _WAKE_PREFIX.sub("", stripped, count=1)
+    if stripped == before:
+        # The fuzzy pass matched, so the exact one will not strip anything.
+        # Drop the first word by hand rather than leaving a misheard name
+        # sitting at the front of the question.
+        match = _FIRST_WORD.match(before)
+        if match is not None and _near_the_name(match.group(1)):
+            stripped = before[match.end() :].lstrip(_SEPARATORS)
     return _MODEL_WAKE_PREFIX.sub("", stripped, count=1).strip()
 
 
 class ListenerState(StrEnum):
+    """Where she is in a conversation.
+
+    ``WAITING`` and ``CAPTURING`` are the whole machine as first built, and it
+    could not hold a conversation: the name and the question had to arrive in
+    one breath, because anything else was two utterances and the second one did
+    not start with her name. Measured over a real session, 64 of 80 utterances
+    were thrown away for exactly that reason.
+
+    ``ARMED`` and ``OPEN`` are the fix. Both are windows in which the name is
+    not required — the first because she has just been called and is waiting to
+    be asked, the second because a conversation does not restate your name
+    before every sentence.
+    """
+
     OFF = "off"
+    #: Only an utterance starting with her name gets through.
     WAITING = "waiting"
+    #: Called, and waiting for the question. Any speech counts.
+    ARMED = "armed"
+    #: Recording an utterance.
     CAPTURING = "capturing"
+    #: She has just answered; a follow-up needs no name.
+    OPEN = "open"
 
 
 class WakeMode(StrEnum):
@@ -169,6 +261,8 @@ class Listener:
         wake: WakeWord | None = None,
         mode: WakeMode = WakeMode.PHRASE,
         barge_in: bool = True,
+        armed_window_s: float = ARMED_WINDOW_S,
+        follow_up_window_s: float = FOLLOW_UP_WINDOW_S,
     ) -> None:
         # PHRASE mode needs no wake model at all — that is the point of it.
         if mode is WakeMode.MODEL and wake is None:
@@ -183,6 +277,8 @@ class Listener:
         self._conversation = conversation
         self._bus = bus
         self.barge_in_enabled = barge_in
+        self.armed_window_s = armed_window_s
+        self.follow_up_window_s = follow_up_window_s
 
         self._state = ListenerState.OFF
         self._utterance: Utterance | None = None
@@ -193,6 +289,8 @@ class Listener:
         self._jobs: set[asyncio.Task[None]] = set()
         self._frames = 0
         self._frames_since = time.monotonic()
+        self._window: asyncio.Task[None] | None = None
+        self._needs_name = True
 
     @property
     def state(self) -> ListenerState:
@@ -237,9 +335,48 @@ class Listener:
             log.info("listener.disabled")
 
     async def aclose(self) -> None:
+        self._close_window()
         for job in list(self._jobs):
             job.cancel()
         await asyncio.gather(*self._jobs, return_exceptions=True)
+
+    # ── the windows in which her name is not required ───────────────────
+
+    def _close_window(self) -> None:
+        """Cancel any open listening window. Safe to call repeatedly."""
+        if self._window is not None:
+            self._window.cancel()
+            self._window = None
+
+    async def _open_window(self, state: ListenerState, seconds: float, reason: str) -> None:
+        """Listen without the name for a while, then stop.
+
+        The timer matters as much as the window does: an assistant that stays
+        open indefinitely after one "aria" is one that answers the room, and
+        the microphone is already the thing people are right to be wary of.
+        """
+        self._close_window()
+        self._state = state
+        await self._bus.set_state(
+            AssistantState.LISTENING if state is ListenerState.ARMED else AssistantState.IDLE
+        )
+        log.info("listener.window_open", state=str(state), seconds=seconds, reason=reason)
+
+        async def expire() -> None:
+            try:
+                await asyncio.sleep(seconds)
+            except asyncio.CancelledError:
+                return
+            async with self._lock:
+                # Speech may have moved her on while the sleep was unwinding.
+                if self._state is not state:
+                    return
+                self._state = ListenerState.WAITING
+                self._window = None
+                await self._bus.set_state(AssistantState.IDLE)
+                log.info("listener.window_closed", was=str(state))
+
+        self._window = asyncio.create_task(expire())
 
     # ── the frame path ──────────────────────────────────────────────────
 
@@ -278,7 +415,15 @@ class Listener:
             # never was on the model path — the name is the *first* word, and
             # without it the deciding evidence is the part that got clipped.
             if not speaking and speech_ms >= SPEECH_ONSET_MS:
-                await self._begin_capture(reason="speech", preroll=True)
+                # Inside a window she has already been addressed, so this is
+                # the question rather than a candidate for one.
+                inside = self._state in (ListenerState.ARMED, ListenerState.OPEN)
+                self._close_window()
+                await self._begin_capture(
+                    reason="answering" if inside else "speech",
+                    preroll=True,
+                    needs_name=not inside,
+                )
             return
 
         assert self._wake is not None  # guaranteed by the constructor
@@ -299,8 +444,12 @@ class Listener:
 
     # ── transitions ─────────────────────────────────────────────────────
 
-    async def _begin_capture(self, *, reason: str, preroll: bool) -> None:
+    async def _begin_capture(self, *, reason: str, preroll: bool, needs_name: bool = True) -> None:
         import numpy as np
+
+        # Remembered for `_transcribe_and_send`, which runs after the state has
+        # already moved on and so cannot ask the state machine.
+        self._needs_name = needs_name
 
         if reason == "barge_in":
             # Silence her before anything else. Audio already queued in the
@@ -377,15 +526,35 @@ class Listener:
             )
             return
 
+        # Her name and nothing else: she has been called, not asked. **This is
+        # the case the first build dropped on the floor** — it stripped the
+        # name, found an empty string, and silently gave up, which is exactly
+        # what everyone does when they expect to be acknowledged before
+        # speaking. Now it opens the window instead.
+        if addressed and not text:
+            async with self._lock:
+                await self._open_window(
+                    ListenerState.ARMED, self.armed_window_s, reason="name"
+                )
+            await self._bus.broadcast(Event.WAKE, {"listening_for_s": self.armed_window_s})
+            log.info("listener.armed", heard=heard)
+            return
+
         if not text:
             log.info("listener.empty_transcript")
             await self._bus.set_state(AssistantState.IDLE)
             return
 
-        if self._mode is WakeMode.PHRASE and not addressed:
+        if self._mode is WakeMode.PHRASE and self._needs_name and not addressed:
             # The room was talking, not her. Nothing is kept and nothing is
             # sent anywhere — the transcript existed only to answer this.
-            log.info("listener.not_addressed", chars=len(heard))
+            #
+            # It *is* logged, and shown. A character count was all this
+            # recorded before, which made 64 dropped utterances in one session
+            # impossible to explain: there was no way to see what she had
+            # mistaken the name for.
+            log.info("listener.not_addressed", heard=heard)
+            await self._bus.broadcast(Event.MISHEARD, {"text": heard})
             await self._bus.set_state(AssistantState.IDLE)
             return
 
@@ -398,6 +567,14 @@ class Listener:
         # while she is still thinking about it.
         await self._bus.broadcast(Event.HEARD, {"text": text})
         await self._conversation.send(text, spoken=True)
+
+        # Keep listening. A conversation does not restate your name before
+        # every sentence, and requiring it is what made this feel like issuing
+        # commands rather than talking.
+        async with self._lock:
+            await self._open_window(
+                ListenerState.OPEN, self.follow_up_window_s, reason="follow-up"
+            )
 
     # ── frame plumbing ──────────────────────────────────────────────────
 

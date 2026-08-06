@@ -219,6 +219,34 @@ listens or speaks, with a caption showing what was asked and answered.
   fades instead of freezing. Nothing is sent while she is quiet.
 - `sendToRenderer` broadcasts to both windows — one conversation, two views.
 
+## She holds a conversation now (2026-08-07)
+    python scripts/gate_conversation.py    # 10/10; the baseline was 15%
+
+**Requiring the name and the question in one breath answered 12 of 80
+utterances in a real session.** 64 were dropped as "not addressed" and 4 as
+empty. The cause was structural, not tuning: everyone says the name, waits to
+be acknowledged, then asks — and that is two utterances, of which the first
+strips to `""` and the second does not name her.
+
+- **`ListenerState` gained `ARMED` and `OPEN`.** Called by name → armed for
+  10s, any speech is the question. After she answers → open for 12s, follow-ups
+  need no name. Both are cancellable timers falling back to `WAITING`, because
+  a window that never shuts is a microphone answering the room.
+- **The one-breath form still works** and is in the gate so it cannot regress.
+- **Name matching is fuzzy on the first word** (`difflib`, ≤1 edit) because
+  `base.en` on a single short word is unreliable. **The first letter must
+  match** — without that guard "Maria" is one edit from "aria" and every Maria
+  in earshot wakes her.
+- **`listener.not_addressed` logs the transcript, not a character count.** The
+  old log made 64 dropped utterances impossible to explain: there was no way to
+  see what she had mistaken the name for. It also emits `misheard`, captioned
+  dimly for 2s — silence is indistinguishable from a dead app.
+- **A chime on waking**, synthesised in WebAudio (`useWakeChime`). The glow says
+  the same thing only if you happen to be looking at the screen you just spoke
+  at.
+- Windows are constructor arguments, not constants, so tests use 50ms instead
+  of sleeping ten seconds.
+
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.
 

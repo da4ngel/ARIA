@@ -14,10 +14,13 @@ interface Props {
   asked: string
   /** Her reply, streaming in. */
   reply: string
+  /** Speech she captured and then discarded because it did not name her.
+   *  Shown dimly and briefly: not an answer, but not nothing either. */
+  misheard?: string
 }
 
-export function Caption({ asked, reply }: Props): JSX.Element {
-  const showing = Boolean(asked || reply)
+export function Caption({ asked, reply, misheard }: Props): JSX.Element {
+  const showing = Boolean(asked || reply || misheard)
 
   return (
     <AnimatePresence>
@@ -31,7 +34,22 @@ export function Caption({ asked, reply }: Props): JSX.Element {
           exit={{ opacity: 0, y: 10 }}
           transition={{ type: 'spring', stiffness: 320, damping: 30 }}
         >
-          <div className="max-w-[46rem] rounded-2xl bg-black/65 px-5 py-3.5 text-center shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+          <div
+            className={`max-w-[46rem] rounded-2xl px-5 py-3.5 text-center shadow-2xl backdrop-blur-xl ${
+              misheard && !asked && !reply
+                ? // A miss is information, not an answer. Dimmer, quieter,
+                  // and gone in a couple of seconds.
+                  'bg-black/45 ring-1 ring-white/5'
+                : 'bg-black/65 ring-1 ring-white/10'
+            }`}
+          >
+            {misheard && !asked && !reply && (
+              <p className="text-small italic leading-relaxed text-white/40">
+                heard {'“'}
+                {misheard}
+                {'”'}
+              </p>
+            )}
             {asked && (
               <p className="text-small leading-relaxed text-white/55">
                 {'“'}
