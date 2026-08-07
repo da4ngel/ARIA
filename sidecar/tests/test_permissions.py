@@ -49,7 +49,13 @@ ran: list[str] = []
 
 @pytest.fixture(autouse=True)
 def _tools() -> Iterator[None]:
-    """A registry with one tool per tier, torn down after each test."""
+    """A registry with one tool per tier, put back exactly as found.
+
+    The snapshot matters: the real tools register at import time, and a bare
+    `clear()` here left every later test in the suite looking at an empty
+    registry — which passed in isolation and failed in the run.
+    """
+    saved = registry.snapshot()
     registry.clear()
     ran.clear()
 
@@ -78,7 +84,7 @@ def _tools() -> Iterator[None]:
         raise RuntimeError("boom")
 
     yield
-    registry.clear()
+    registry.restore(saved)
 
 
 def engine(bus: RecordingBus, journal: RecordingJournal, **kwargs: Any) -> PermissionEngine:

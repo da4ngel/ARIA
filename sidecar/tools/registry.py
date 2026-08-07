@@ -229,6 +229,22 @@ def schemas(*, tier_max: Tier = Tier.CONFIRM) -> list[dict[str, Any]]:
     return [t.schema for t in all_tools() if t.tier <= tier_max]
 
 
+def snapshot() -> dict[str, Tool]:
+    """A copy of the registry, for tests that install their own tools.
+
+    Paired with `restore`, because `clear` on its own is global vandalism: the
+    real tools register at import time, so a test that clears and walks away
+    leaves every later test looking at an empty registry.
+    """
+    return dict(_REGISTRY)
+
+
+def restore(state: dict[str, Tool]) -> None:
+    """Put back what `snapshot` took. For tests only."""
+    _REGISTRY.clear()
+    _REGISTRY.update(state)
+
+
 def clear() -> None:
-    """Empty the registry. For tests only."""
+    """Empty the registry. For tests only, and only with `restore` after it."""
     _REGISTRY.clear()

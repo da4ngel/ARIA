@@ -48,7 +48,16 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # Neither ships type stubs or a py.typed marker.
-module = ["sqlite_vec.*", "faster_whisper.*", "kokoro_onnx.*", "openwakeword.*"]
+module = [
+    "sqlite_vec.*",
+    "faster_whisper.*",
+    "kokoro_onnx.*",
+    "openwakeword.*",
+    "comtypes.*",
+    "pycaw.*",
+    "psutil",
+    "win32gui",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
