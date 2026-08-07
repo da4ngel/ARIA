@@ -93,7 +93,15 @@ async def system_health(_params: dict[str, Any]) -> dict[str, Any]:
     # Everything Ollama has pulled, not just the default — the picker greys out
     # local models by exactly this list.
     report.models = list(runtime.local_models)
-    report.pending_probes = [p for p in report.pending_probes if p not in ("ollama", "models")]
+
+    # Phase 4a. Carried as null since Phase 0; it is now a thing that has an
+    # answer, and the UI can say plainly that search is running narrow.
+    from sidecar.tools.finder import everything_path
+
+    report.everything = everything_path() is not None
+    report.pending_probes = [
+        p for p in report.pending_probes if p not in ("ollama", "models", "everything")
+    ]
     return report.model_dump()
 
 

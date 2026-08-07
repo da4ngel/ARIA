@@ -3,8 +3,16 @@
 Importing this package registers every tool. `main.py` imports it once at
 startup; nothing else should need to, because `registry.get` is the only
 supported way to reach a tool (CLAUDE.md rule 4).
+
+The imports below look unused and are not: the `@tool` decorator runs on
+import, and dropping one silently removes that tool from the registry — which
+is exactly what happened to `finder` once, leaving the model unable to search
+for files while every test still passed.
 """
 
-from sidecar.tools import apps, files, system
+from sidecar.tools import apps as apps
+from sidecar.tools import files as files
+from sidecar.tools import finder as finder
+from sidecar.tools import system as system
 
-__all__ = ["apps", "files", "system"]
+__all__ = ["apps", "files", "finder", "system"]

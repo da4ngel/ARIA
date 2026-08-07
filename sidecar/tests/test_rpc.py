@@ -109,15 +109,17 @@ def test_system_health_returns_report(client: TestClient) -> None:
     assert result["status"] == "ok"
     assert result["db"] is True
     assert result["uptime_s"] >= 0
-    # Phase 1 fills in the ollama and models probes...
+    # Phase 1 filled in ollama and models; Phase 4a filled in everything.
     assert "ollama" not in result["pending_probes"]
     assert "models" not in result["pending_probes"]
-    # ...but the §9.6 probes owned by later phases are still present-and-null,
-    # not missing. The wire shape never changes; only the nulls fill in.
+    assert "everything" not in result["pending_probes"]
+    # Whether Everything is installed varies by machine; that it is now a
+    # boolean rather than "not asked yet" does not.
+    assert isinstance(result["everything"], bool)
+    # ...while the §9.6 probes owned by later phases stay present-and-null
+    # rather than missing. The wire shape never changes; only the nulls fill in.
     assert result["gpu_free_mb"] is None
-    assert result["everything"] is None
     assert "gpu_free_mb" in result["pending_probes"]
-    assert "everything" in result["pending_probes"]
 
 
 def test_malformed_json_returns_invalid_request(client: TestClient) -> None:
