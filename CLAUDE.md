@@ -409,6 +409,25 @@ Six tools so far, one per tier boundary: `list_windows`, `get_system_info`
   `functionCall`, or it rejects the follow-up outright: *"Function call is
   missing a thought_signature in functionCall parts"*. `ToolCall.signature`
   carries it opaquely for every provider.
+- **`open_app` matches on a scorer, and the bands are ordered by how badly
+  each can go wrong** — exact, then shared words, then prefix, then substring,
+  then run-together spelling, then edit distance last. Measured 29/29 on names
+  said the way people say them (`scripts/gate_apps.py`), against 20/24 for the
+  if-ladder it replaced. The four it used to miss were a hyphen ("7 zip"), a
+  number word ("seven zip") and two typos — one of which Eyaas typed unprompted.
+- **`MATCH_FLOOR` is what stops nonsense resolving to something.** Opening the
+  wrong app is worse than opening nothing.
+- **"Help" and "Uninstall" entries are demoted**, but only when the user did not
+  ask for them: "7 zip" matched "7-Zip Help" over "7-Zip File Manager" purely
+  because Help is the shorter name, while "7 zip help" must still find it.
+- **Three sources, merged and cached**: `Get-StartApps` (214), registry
+  `App Paths` (+42), and PATH. Each entry carries how to launch it, because
+  the three need different launchers.
+- **`_ALIASES` is a fallback, never a rewrite.** It used to replace the query
+  before matching, so "terminal" became "wt" and the real "Terminal" entry was
+  never considered — an alias could make matching *worse*.
+- **A miss names the near misses.** "I could not find X" is a dead end; the
+  closest three let the model or the user retry immediately.
 - **Exact beats fuzzy, or she opens the wrong thing.** "open youtube" matched
   the *YouTube Music* app by prefix. Order is now: exact app, exact website,
   then fuzzy app — so "youtube" opens the site, "youtube music" opens the app,

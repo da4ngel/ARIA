@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import sidecar.tools  # noqa: F401 — registers everything
-from sidecar.tools.apps import list_windows
+from sidecar.tools.apps import AppEntry, Launch, best, list_windows, normalise, rank
 from sidecar.tools.files import delete_file, move_file
 from sidecar.tools.registry import Tier, ToolContext, get, schemas
 from sidecar.tools.system import get_system_info
@@ -155,3 +155,97 @@ async def test_listing_windows_summarises_rather_than_dumps() -> None:
     assert "\n" not in result.summary
     if result.data:
         assert result.display is not None
+
+
+# ── finding the app someone meant ─────────────────────────────────────
+# A pure function over a fake index: no PowerShell, no registry, no launching.
+
+
+def app(label: str) -> AppEntry:
+    return AppEntry(label, label, Launch.APPS_FOLDER)
+
+
+INDEX = [
+    app("7-Zip File Manager"),
+    app("7-Zip Help"),
+    app("Adobe Photoshop 2023"),
+    app("Calculator"),
+    app("Calendar"),
+    app("Calendar (Microsoft 365)"),
+    app("YouTube Music"),
+    app("Spotify"),
+    app("Visual Studio Code"),
+]
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("calculator", "Calculator"),
+        ("Calculator", "Calculator"),
+        ("spotify", "Spotify"),
+        # Punctuation and number words — two of the four original failures.
+        ("7 zip", "7-Zip File Manager"),
+        ("seven zip", "7-Zip File Manager"),
+        ("7zip", "7-Zip File Manager"),
+        # Typos — the other two.
+        ("photoshp", "Adobe Photoshop 2023"),
+        ("youtbe music", "YouTube Music"),
+        ("calulator", "Calculator"),
+        # Word order and partial names.
+        ("photoshop", "Adobe Photoshop 2023"),
+        ("code", "Visual Studio Code"),
+    ],
+)
+def test_it_finds_the_app_however_it_was_said(said: str, expected: str) -> None:
+    match = best(said, INDEX)
+    assert match is not None and match.label == expected
+
+
+def test_a_help_entry_never_beats_the_app() -> None:
+    """"7 zip" matched "7-Zip Help" purely because it is the shorter name."""
+    match = best("7 zip", INDEX)
+    assert match is not None and "Help" not in match.label
+
+
+def test_asking_for_help_still_finds_help() -> None:
+    """The demotion must not make the entry unreachable."""
+    match = best("7 zip help", INDEX)
+    assert match is not None and match.label == "7-Zip Help"
+
+
+def test_the_shortest_name_wins_a_tie() -> None:
+    match = best("calendar", INDEX)
+    assert match is not None and match.label == "Calendar"
+
+
+def test_nonsense_matches_nothing() -> None:
+    """Opening the wrong app is worse than opening nothing."""
+    assert best("qwertyuiop nonsense", INDEX) is None
+    assert best("zzzz", INDEX) is None
+
+
+def test_exact_only_refuses_a_near_match() -> None:
+    """This is what stops "open youtube" launching the YouTube Music app: the
+    website is checked between the exact and fuzzy passes."""
+    assert best("youtube", INDEX, exact_only=True) is None
+    assert best("youtube music", INDEX, exact_only=True) is not None
+
+
+def test_ranking_offers_the_near_misses() -> None:
+    """A dead end is useless; naming the closest lets the model retry."""
+    labels = [entry.label for _, entry in rank("calend", INDEX)]
+    assert "Calendar" in labels
+
+
+@pytest.mark.parametrize(
+    ("raw", "folded"),
+    [
+        ("7-Zip File Manager", "7 zip file manager"),
+        ("seven zip", "7 zip"),
+        ("  Visual   Studio  Code ", "visual studio code"),
+        ("CapCut", "capcut"),
+    ],
+)
+def test_normalisation_folds_what_should_not_matter(raw: str, folded: str) -> None:
+    assert normalise(raw) == folded
