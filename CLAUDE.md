@@ -373,6 +373,19 @@ Six tools so far, one per tier boundary: `list_windows`, `get_system_info`
   now fails with `'AudioDevice' object has no attribute 'Activate'`.
 - **`registry.clear()` needs `snapshot`/`restore` in tests.** A bare clear left
   the real tools missing for every later test — passed alone, failed in the run.
+- **Cloud providers call tools too.** They were built accepting-and-ignoring
+  `tools`, and the result was her telling Eyaas "I cannot check the running
+  processes" — routed to Gemini Flash Lite, which had been handed the tools and
+  dropped them. Denying a capability she has is worse than not having it.
+  - OpenAI streams a tool call in *fragments* — name in one frame, argument
+    JSON a character at a time — so they are accumulated and emitted whole.
+  - Gemini nests differently from everyone else: one `tools` entry holding
+    every `functionDeclarations`, and the OpenAI wrapper unwrapped to the
+    function itself. Replies carry `functionCall` parts.
+- **Measured against the real APIs**, not assumed: gemini-flash-lite calls
+  `list_windows`; qwen2.5:7b is 4/4 including correctly *not* calling a tool
+  for "what is the capital of Australia". OpenAI could not be verified — that
+  account returns "Your account is not active".
 - Relevance-based tool selection is **sequenced, not skipped**: the cap is ~12
   and there are six, so it lands with the remaining tools. It needs
   `nomic-embed-text` (274MB, not pulled) on the turn path.

@@ -11,6 +11,7 @@ are `user`/`model` rather than `user`/`assistant`.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,6 +25,7 @@ from sidecar.providers.base import (
     ProviderUnavailable,
     Role,
     StreamDelta,
+    ToolCall,
 )
 from sidecar.providers.credentials import CredentialKey, get_key
 
@@ -80,15 +82,15 @@ class GeminiProvider:
         options: GenerationOptions | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
-        # Accepted and ignored. Phase 3 runs tools on the local model only, and
-        # the seam requires every provider to take the argument so the router
-        # is free to pick any of them. Ignoring is the documented contract for
-        # a provider that cannot call tools — never a hard failure — but a turn
-        # that needed a tool and landed here will simply answer without one.
-        if tools:
-            log.debug("provider.tools_ignored", provider=self.name, count=len(tools))
         opts = options or GenerationOptions()
         body = self._build_body(messages, opts)
+        if tools:
+            # Gemini nests them differently from everyone else: one `tools`
+            # entry holding every declaration, and the OpenAI wrapper object
+            # unwrapped down to the function itself.
+            body["tools"] = [
+                {"functionDeclarations": [t.get("function", t) for t in tools]}
+            ]
         url = f"/models/{model}:streamGenerateContent?alt=sse"
 
         try:
@@ -156,8 +158,18 @@ class GeminiProvider:
             return None
 
         text = ""
+        calls: list[ToolCall] = []
         for candidate in chunk.get("candidates") or []:
             for part in (candidate.get("content") or {}).get("parts") or []:
+                call = part.get("functionCall")
+                if call and call.get("name"):
+                    calls.append(
+                        ToolCall(
+                            id=f"c_{uuid.uuid4().hex[:10]}",
+                            name=str(call["name"]),
+                            arguments=call.get("args") or {},
+                        )
+                    )
                 text += part.get("text") or ""
 
         usage = chunk.get("usageMetadata") or {}
@@ -167,6 +179,7 @@ class GeminiProvider:
             text=text,
             done=False,  # the stream's end is the end; Gemini sends no [DONE]
             prompt_tokens=usage.get("promptTokenCount"),
+            tool_calls=calls,
             completion_tokens=usage.get("candidatesTokenCount"),
         )
 

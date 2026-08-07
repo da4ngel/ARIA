@@ -11,6 +11,7 @@ Keys come from Credential Manager via `credentials.py`, never `.env` (§11).
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,6 +24,7 @@ from sidecar.providers.base import (
     ProviderRateLimited,
     ProviderUnavailable,
     StreamDelta,
+    ToolCall,
     to_wire,
 )
 from sidecar.providers.credentials import CredentialKey, get_key
@@ -32,6 +34,28 @@ log = structlog.get_logger(__name__)
 BASE_URL = "https://api.openai.com/v1"
 CONNECT_TIMEOUT_S = 10.0
 READ_TIMEOUT_S = 300.0
+
+
+def _assemble(partial: dict[int, dict[str, str]]) -> list[ToolCall]:
+    """Streamed fragments into finished calls, dropping anything unusable."""
+    calls: list[ToolCall] = []
+    for index in sorted(partial):
+        slot = partial[index]
+        if not slot["name"]:
+            continue
+        try:
+            arguments = json.loads(slot["arguments"] or "{}")
+        except json.JSONDecodeError:
+            log.warning("openai.bad_tool_args", tool=slot["name"], raw=slot["arguments"][:200])
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=slot["id"] or f"c_{uuid.uuid4().hex[:10]}",
+                name=slot["name"],
+                arguments=arguments if isinstance(arguments, dict) else {},
+            )
+        )
+    return calls
 
 
 class OpenAIProvider:
@@ -80,19 +104,14 @@ class OpenAIProvider:
         options: GenerationOptions | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
-        # Accepted and ignored. Phase 3 runs tools on the local model only, and
-        # the seam requires every provider to take the argument so the router
-        # is free to pick any of them. Ignoring is the documented contract for
-        # a provider that cannot call tools — never a hard failure — but a turn
-        # that needed a tool and landed here will simply answer without one.
-        if tools:
-            log.debug("provider.tools_ignored", provider=self.name, count=len(tools))
         opts = options or GenerationOptions()
         body: dict[str, object] = {
             "model": model,
             "messages": to_wire(messages),
             "stream": True,
         }
+        if tools:
+            body["tools"] = tools
         if opts.temperature is not None:
             body["temperature"] = opts.temperature
         if opts.max_tokens is not None:
@@ -108,10 +127,19 @@ class OpenAIProvider:
                 "POST", "/chat/completions", json=body, headers=headers
             ) as response:
                 await self._raise_for_stream_status(response)
+                # OpenAI streams a tool call in fragments: the name in one
+                # frame, the argument JSON a character at a time after it. They
+                # are assembled here and emitted whole, because a half-parsed
+                # argument object is not something a caller can act on.
+                partial: dict[int, dict[str, str]] = {}
                 async for line in response.aiter_lines():
-                    delta = self._parse_sse(line)
+                    delta = self._parse_sse(line, partial)
                     if delta is None:
                         continue
+                    if delta.done and partial:
+                        delta = delta.model_copy(
+                            update={"tool_calls": _assemble(partial)}
+                        )
                     yield delta
                     if delta.done:
                         return
@@ -127,8 +155,13 @@ class OpenAIProvider:
     # ── internals ───────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_sse(line: str) -> StreamDelta | None:
-        """One `data:` frame into a StreamDelta. Non-data lines are ignored."""
+    def _parse_sse(
+        line: str, partial: dict[int, dict[str, str]] | None = None
+    ) -> StreamDelta | None:
+        """One `data:` frame into a StreamDelta. Non-data lines are ignored.
+
+        `partial` accumulates streamed tool-call fragments across frames.
+        """
         if not line.startswith("data:"):
             return None
         payload = line[5:].strip()
@@ -146,7 +179,20 @@ class OpenAIProvider:
         choices = chunk.get("choices") or []
         if not choices:
             return None
-        text = (choices[0].get("delta") or {}).get("content") or ""
+        delta_body = choices[0].get("delta") or {}
+        text = delta_body.get("content") or ""
+        if partial is not None:
+            for fragment in delta_body.get("tool_calls") or []:
+                slot = partial.setdefault(
+                    int(fragment.get("index", 0)), {"id": "", "name": "", "arguments": ""}
+                )
+                if fragment.get("id"):
+                    slot["id"] = fragment["id"]
+                function = fragment.get("function") or {}
+                if function.get("name"):
+                    slot["name"] = function["name"]
+                if function.get("arguments"):
+                    slot["arguments"] += function["arguments"]
         finished = choices[0].get("finish_reason") is not None
         usage = chunk.get("usage") or {}
         return StreamDelta(
