@@ -7,8 +7,10 @@ nothing at all, and launching an app changes something you can close again.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
+import subprocess
 from typing import Any
 
 import structlog
@@ -93,6 +95,89 @@ async def list_windows(ctx: ToolContext) -> ToolResult:
     )
 
 
+def _start_apps() -> list[tuple[str, str]]:
+    """Everything in the Start menu, as (name, AppID).
+
+    `Get-StartApps` is the only thing that knows about Store and Electron apps
+    — Notion, Calendar, Calculator and most of what people actually name are
+    not executables on PATH, which is why the first version of this tool could
+    only open things like notepad.
+
+    Costs most of a second, so it is cached. A miss refreshes it once, on the
+    theory that the app was probably installed since we last looked.
+    """
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-StartApps | ConvertTo-Json -Compress",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return []
+
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    return [
+        (str(item.get("Name", "")), str(item.get("AppID", "")))
+        for item in parsed
+        if item.get("Name") and item.get("AppID")
+    ]
+
+
+def _best_match(wanted: str, apps: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """Pick the app a person meant.
+
+    Exact name first, then prefix, then substring — and the *shortest* name
+    among equals, so "Calendar" wins over "Calendar (Microsoft 365)". Ordering
+    matters here: matching on substring first would open "Calculator Help"
+    ahead of "Calculator".
+    """
+    lowered = wanted.lower()
+    for test in (
+        lambda n: n == lowered,
+        lambda n: n.startswith(lowered),
+        lambda n: lowered in n,
+    ):
+        hits = [(name, app_id) for name, app_id in apps if test(name.lower())]
+        if hits:
+            return min(hits, key=lambda pair: len(pair[0]))
+    return None
+
+
+class _AppIndex:
+    """The Start menu list, fetched at most once until a lookup misses."""
+
+    def __init__(self) -> None:
+        self._apps: list[tuple[str, str]] | None = None
+
+    async def find(self, wanted: str) -> tuple[str, str] | None:
+        if self._apps is None:
+            self._apps = await asyncio.to_thread(_start_apps)
+        match = _best_match(wanted, self._apps)
+        if match is not None:
+            return match
+
+        # Missed. It may have been installed since we last looked.
+        refreshed = await asyncio.to_thread(_start_apps)
+        if refreshed:
+            self._apps = refreshed
+        return _best_match(wanted, self._apps)
+
+
+_INDEX = _AppIndex()
+
+
 @tool(
     name="open_app",
     tier=Tier.SAFE,
@@ -110,30 +195,43 @@ async def open_app(ctx: ToolContext, name: str) -> ToolResult:
     wanted = name.strip().lower()
     target = _ALIASES.get(wanted, wanted)
 
-    # `shutil.which` first so a missing app is reported as a missing app,
-    # rather than as a shell error the model has to interpret.
+    # Fast path: a real executable on PATH. Cheap, and covers chrome and code.
     resolved = await asyncio.to_thread(shutil.which, target)
-
-    try:
-        if resolved:
+    if resolved:
+        try:
             await asyncio.to_thread(os.startfile, resolved)
-        else:
-            # Not on PATH, but the shell may still know it — Store apps and
-            # registered protocols both live here.
-            await asyncio.to_thread(os.startfile, target)
-    except OSError as exc:
+        except OSError as exc:
+            return ToolResult(ok=False, summary=f"{name} would not start.", error=str(exc))
+        log.info("tool.opened_app", name=name, via="path", target=resolved)
+        return ToolResult(ok=True, data={"name": name, "via": "path"}, summary=f"Opened {name}.")
+
+    # Everything else people actually name — Notion, Calendar, Calculator,
+    # Spotify — is a Store or Electron app with no executable on PATH.
+    match = await _INDEX.find(target)
+    if match is None:
         return ToolResult(
             ok=False,
             summary=(
-                f"I could not find an app called {name!r}. "
-                f"Try the executable name, like 'chrome' or 'code'."
+                f"I could not find an app called {name!r} on this machine. "
+                f"Check the name as it appears in the Start menu."
             ),
-            error=str(exc),
+            error="not_found",
         )
 
-    log.info("tool.opened_app", name=name, target=target)
+    label, app_id = match
+    try:
+        # `shell:AppsFolder\<AppID>` is the one launcher that handles Store
+        # apps, and it has to go through explorer.
+        await asyncio.to_thread(
+            subprocess.Popen,
+            ["explorer.exe", "shell:AppsFolder\\" + app_id],
+        )
+    except OSError as exc:
+        return ToolResult(ok=False, summary=f"{label} would not start.", error=str(exc))
+
+    log.info("tool.opened_app", name=name, via="startapps", app_id=app_id)
     return ToolResult(
         ok=True,
-        data={"name": name, "target": target},
-        summary=f"Opened {name}.",
+        data={"name": label, "app_id": app_id, "via": "startapps"},
+        summary=f"Opened {label}.",
     )

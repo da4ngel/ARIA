@@ -382,6 +382,21 @@ Six tools so far, one per tier boundary: `list_windows`, `get_system_info`
   - Gemini nests differently from everyone else: one `tools` entry holding
     every `functionDeclarations`, and the OpenAI wrapper unwrapped to the
     function itself. Replies carry `functionCall` parts.
+- **The prompt has two capability paragraphs, and using the wrong one is
+  visible.** `_GROUNDING_TEMPLATE` in `core/context.py` said "you have no
+  tools… you cannot run programs" long after Phase 3 gave her some — she opened
+  Calculator and then told Eyaas she could not run programs, reading her own
+  instructions back over what she had just done. `stable_prefix(has_tools=...)`
+  now picks. **Only that paragraph changed**: the rest of the block took
+  qwen2.5:7b from 57% fabrication to 27%, so the anti-invention clauses stay.
+  Both variants are resolved at import, so the KV prefix is still constant.
+- **`os.startfile` only finds PATH.** Notion, Calendar and most of what people
+  name are Store or Electron apps with no executable anywhere. `open_app` now
+  falls back to `Get-StartApps` (214 entries here) and launches through
+  `explorer.exe shell:AppsFolder\<AppID>`. The index is cached, and a miss
+  refreshes it once in case the app was installed since. Match order is exact,
+  then prefix, then substring, shortest name winning — substring first would
+  open "Calculator Help" ahead of "Calculator".
 - **Measured against the real APIs**, not assumed: gemini-flash-lite calls
   `list_windows`; qwen2.5:7b is 4/4 including correctly *not* calling a tool
   for "what is the capital of Australia". OpenAI could not be verified — that

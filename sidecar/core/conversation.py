@@ -839,7 +839,10 @@ class ConversationService:
         # answers immediately, and the summary it produces lands in time for the
         # next one. Voice has a ~1000ms end-to-end budget and cannot absorb a
         # second generation.
-        turn_budget = self._budget - ctx.overhead_tokens(summary, level, machine)
+        has_tools = self._tool_schemas() is not None
+        turn_budget = self._budget - ctx.overhead_tokens(
+            summary, level, machine, has_tools=has_tools
+        )
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
             self._schedule_roll_up(session_id, to_summarize, summary)
@@ -849,7 +852,9 @@ class ConversationService:
         turns = ctx.fit_to_budget(
             turns, summary=summary, hard_cap_tokens=cap, level=level, machine=machine
         )
-        return ctx.assemble(turns, summary=summary, level=level, machine=machine)
+        return ctx.assemble(
+            turns, summary=summary, level=level, machine=machine, has_tools=has_tools
+        )
 
     def _machine_context(
         self, info: ModelInfo | None, history: list[StoredMessage]
