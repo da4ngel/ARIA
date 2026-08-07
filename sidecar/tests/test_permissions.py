@@ -12,6 +12,7 @@ the tier column exists.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -47,7 +48,7 @@ ran: list[str] = []
 
 
 @pytest.fixture(autouse=True)
-def _tools():
+def _tools() -> Iterator[None]:
     """A registry with one tool per tier, torn down after each test."""
     registry.clear()
     ran.clear()
