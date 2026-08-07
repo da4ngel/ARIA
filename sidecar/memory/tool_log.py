@@ -36,6 +36,7 @@ class ToolJournal:
             entry.get("ok"),
             entry.get("error"),
             entry.get("duration_ms"),
+            entry.get("approved_by"),
             datetime.now(UTC).isoformat(),
         )
 
@@ -49,8 +50,8 @@ class ToolJournal:
                     """
                     INSERT INTO tool_log
                       (call_id, session_id, tool, args, tier, approved, ok,
-                       error, duration_ms, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       error, duration_ms, approved_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     row,
                 )

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -311,3 +312,135 @@ def test_the_schema_comes_from_the_signature() -> None:
 def test_a_required_argument_is_marked_required() -> None:
     schema = next(s for s in registry.schemas() if s["function"]["name"] == "overwrite")
     assert schema["function"]["parameters"]["required"] == ["path"]
+
+
+# ── trusted folders ───────────────────────────────────────────────────
+# Trust is a permission bypass, so what matters is where it stops.
+
+
+def trusting(bus: RecordingBus, journal: RecordingJournal, roots: list[str], **kw: Any):
+    engine_ = engine(bus, journal, **kw)
+    engine_.set_trusted(roots)
+    return engine_
+
+
+async def test_inside_a_trusted_folder_it_does_not_ask(tmp_path: Path) -> None:
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)])
+
+    result = await engine_.run("overwrite", {"path": str(tmp_path / "notes.txt")}, CTX)
+
+    assert result.ok
+    assert ran == ["overwrite"]
+    assert not bus.confirms(), "a trusted folder is not asked about"
+
+
+async def test_trust_is_recursive(tmp_path: Path) -> None:
+    """Trusting a folder means trusting what is nested in it."""
+    deep = tmp_path / "projects" / "aria" / "notes"
+    deep.mkdir(parents=True)
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)])
+
+    assert (await engine_.run("overwrite", {"path": str(deep / "a.txt")}, CTX)).ok
+    assert not bus.confirms()
+
+
+async def test_outside_it_still_asks(tmp_path: Path) -> None:
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path / "trusted")], timeout_s=0.05)
+
+    result = await engine_.run("overwrite", {"path": str(tmp_path / "elsewhere.txt")}, CTX)
+
+    assert not result.ok, "unanswered, therefore denied"
+    assert bus.confirms()
+
+
+async def test_a_call_spanning_in_and_out_still_asks(tmp_path: Path) -> None:
+    """Moving a file *out* of a trusted folder is not covered by trusting it —
+    the destination is the part that matters."""
+    inside = tmp_path / "trusted"
+    inside.mkdir()
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(inside)], timeout_s=0.05)
+
+    registry.clear()
+
+    @tool(name="relocate", tier=Tier.CONFIRM, description="Move a file.")
+    async def relocate(ctx: ToolContext, source: str, destination: str) -> ToolResult:
+        ran.append("relocate")
+        return ToolResult(ok=True, summary="moved")
+
+    result = await engine_.run(
+        "relocate",
+        {"source": str(inside / "a.txt"), "destination": str(tmp_path / "out.txt")},
+        CTX,
+    )
+
+    assert not result.ok
+    assert bus.confirms(), "one foot outside is enough to ask"
+
+
+async def test_trust_does_not_resurrect_a_disabled_danger_tool(tmp_path: Path) -> None:
+    """`allow_danger` decides whether the tool exists; trust only decides
+    whether it asks."""
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)])  # allow_danger defaults False
+
+    result = await engine_.run("obliterate", {"path": str(tmp_path / "x")}, CTX)
+
+    assert not result.ok
+    assert result.error == "danger_disabled"
+    assert ran == []
+
+
+async def test_a_trusted_delete_runs_without_asking(tmp_path: Path) -> None:
+    """The choice made: trust covers deletion too."""
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)], allow_danger=True)
+
+    result = await engine_.run("obliterate", {"path": str(tmp_path / "x")}, CTX)
+
+    assert result.ok
+    assert ran == ["obliterate"]
+    assert not bus.confirms()
+
+
+async def test_a_trusted_run_is_recorded_as_such(tmp_path: Path) -> None:
+    """An audit trail that cannot tell "you approved this" from "the folder was
+    trusted" is worth much less than one that can."""
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)])
+
+    await engine_.run("overwrite", {"path": str(tmp_path / "a.txt")}, CTX)
+
+    entry = journal.of("overwrite")[0]
+    assert entry["approved"] == 1
+    assert entry["approved_by"] == "trust"
+
+
+async def test_nothing_is_trusted_until_it_is_added(tmp_path: Path) -> None:
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = engine(bus, journal, timeout_s=0.05)
+
+    assert engine_.trusted == []
+    result = await engine_.run("overwrite", {"path": str(tmp_path / "a.txt")}, CTX)
+    assert not result.ok
+
+
+async def test_a_tool_naming_no_path_is_never_trusted(tmp_path: Path) -> None:
+    """Trust is about places. A tool that names none is not in one."""
+    bus, journal = RecordingBus(), RecordingJournal()
+    engine_ = trusting(bus, journal, [str(tmp_path)], timeout_s=0.05)
+
+    registry.clear()
+
+    @tool(name="broadcast", tier=Tier.CONFIRM, description="Send something.")
+    async def broadcast(ctx: ToolContext, message: str) -> ToolResult:
+        ran.append("broadcast")
+        return ToolResult(ok=True, summary="sent")
+
+    result = await engine_.run("broadcast", {"message": "hello"}, CTX)
+
+    assert not result.ok
+    assert bus.confirms()

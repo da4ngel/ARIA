@@ -24,6 +24,10 @@ ROUTING_BIAS = "routing_bias"
 # defaulted on, because an always-open microphone is the user's decision to
 # make once and have remembered — not one to rediscover on every launch.
 WAKE_WORD_ENABLED = "wake_word_enabled"
+# Folders she may act in without asking, as a JSON array. Empty until added by
+# hand: trust here covers deletion, which is too large a thing to assume on
+# someone's behalf.
+TRUSTED_PATHS = "trusted_paths"
 
 
 class SettingsStore:

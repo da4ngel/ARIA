@@ -735,7 +735,11 @@ class Listener:
 
         log.info(
             "listener.heard",
-            chars=len(text),
+            # The words, not a character count. `not_addressed` was fixed for
+            # exactly this reason and this line was left behind — so when
+            # spoken turns stopped acting, the log said `chars=42` and there
+            # was no way to tell a request from "hi".
+            heard=text,
             took_ms=round((time.perf_counter() - started) * 1000, 1),
         )
         # Before the turn, not after: the overlay should show what you said

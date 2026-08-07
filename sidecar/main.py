@@ -34,6 +34,7 @@ from sidecar.memory.messages import ConversationStore
 from sidecar.memory.settings_store import (
     ROUTING_BIAS,
     SELECTED_MODEL,
+    TRUSTED_PATHS,
     WAKE_WORD_ENABLED,
     SettingsStore,
 )
@@ -156,6 +157,13 @@ async def _start_conversation(settings: Settings) -> None:
         ToolJournal(runtime.require_db()),
         allow_danger=settings.allow_danger_tools,
     )
+    stored_trusted = await settings_store.get(TRUSTED_PATHS)
+    if stored_trusted:
+        import json as _json
+
+        with contextlib.suppress(ValueError, TypeError):
+            runtime.permissions.set_trusted(_json.loads(str(stored_trusted)))
+
     runtime.tts = _build_tts(settings)
     runtime.stt = _build_stt(settings)
     runtime.conversation = ConversationService(

@@ -30,6 +30,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 import structlog
@@ -44,6 +45,48 @@ CONFIRM_TIMEOUT_S = 120.0
 
 #: Tools above this need a *typed* confirmation, not a click.
 TYPED_CONFIRM_FROM = Tier.DANGER
+
+
+# ── trusted folders ──────────────────────────────────────────────────
+# Inside one, she acts without asking — whatever the tier, deletion included.
+# That is a deliberate choice and a large one, which is why nothing is trusted
+# until it is added by hand.
+#
+# Two things trust does *not* do. It never relaxes the refusals in
+# `tools/files.py`: a trusted folder cannot be C:/Windows, and adding it there
+# changes nothing. And it never applies to a call that also touches somewhere
+# untrusted — moving a file *out* of a trusted folder is not covered by
+# trusting it, because the destination is the part that matters.
+
+#: Argument names whose values are paths. Checked by name rather than by
+#: sniffing every string, so a tool taking a `query` cannot accidentally be
+#: read as touching the filesystem.
+_PATH_ARGS = frozenset({"path", "source", "destination", "folder", "file", "dir", "directory"})
+
+
+def paths_in(arguments: dict[str, Any]) -> list[Path]:
+    """The filesystem paths a call would touch."""
+    found: list[Path] = []
+    for name, value in arguments.items():
+        if name in _PATH_ARGS and isinstance(value, str) and value.strip():
+            found.append(Path(value.strip().strip('"')).expanduser())
+    return found
+
+
+def within(path: Path, roots: list[Path]) -> bool:
+    """Whether `path` sits inside any of `roots`. Recursive by design: trusting
+    a folder means trusting what is in it, including what is nested."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if resolved == root or resolved.is_relative_to(root):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 class Bus(Protocol):
@@ -89,11 +132,41 @@ class PermissionEngine:
         # §7.2: DANGER is off by default. Turning it on is a deliberate act,
         # not a side effect of a model asking nicely.
         self.allow_danger = allow_danger
+        #: Folders she may act in without asking. Empty until added.
+        self.trusted: list[Path] = []
         self._pending: dict[str, Pending] = {}
         #: Tools the user chose to stop being asked about, this session only.
         #: Deliberately not persisted: "always allow" said once in a hurry
         #: should not silently outlive the session it was said in.
         self._always: set[str] = set()
+
+    def set_trusted(self, paths: list[str]) -> None:
+        """Replace the trusted set.
+
+        Resolved once here rather than per call, and silently dropping the ones
+        that cannot be resolved — a stale entry for a removed drive should not
+        make every later check raise.
+        """
+        roots: list[Path] = []
+        for raw in paths:
+            try:
+                roots.append(Path(raw).expanduser().resolve())
+            except OSError:
+                log.warning("tool.bad_trusted_path", path=raw)
+        self.trusted = roots
+        log.info("tool.trusted_paths", count=len(roots), paths=[str(p) for p in roots])
+
+    def is_trusted(self, arguments: dict[str, Any]) -> bool:
+        """Whether every path in this call is somewhere she is trusted.
+
+        **Every** path: a call that reaches outside, even partly, still asks.
+        A call with no paths at all is not trusted by default — trust is about
+        places, and a tool that names none is not in one.
+        """
+        if not self.trusted:
+            return False
+        targets = paths_in(arguments)
+        return bool(targets) and all(within(t, self.trusted) for t in targets)
 
     # ── the decision ────────────────────────────────────────────────────
 
@@ -121,6 +194,9 @@ class PermissionEngine:
                 error="unknown_tool",
             )
 
+        # `allow_danger` decides whether the tool exists at all; trust only
+        # decides whether it asks. A disabled DANGER tool stays disabled inside
+        # a trusted folder.
         if tool.tier >= TYPED_CONFIRM_FROM and not self.allow_danger:
             await self._log(
                 call_id, ctx, name, arguments, tool.tier, False, False, "danger disabled", 0
@@ -136,8 +212,14 @@ class PermissionEngine:
             )
 
         approved: bool | None = None
+        approved_by: str | None = None
         if tool.tier >= Tier.CONFIRM:
-            approved = await self._ask(tool, arguments, rationale)
+            if self.is_trusted(arguments):
+                approved, approved_by = True, "trust"
+                log.info("tool.trusted", tool=name, tier=int(tool.tier))
+            else:
+                approved = await self._ask(tool, arguments, rationale)
+                approved_by = "user" if approved else None
             if not approved:
                 await self._log(
                     call_id, ctx, name, arguments, tool.tier, False, False, "denied", 0
@@ -166,7 +248,16 @@ class PermissionEngine:
 
         took = int((time.perf_counter() - started) * 1000)
         await self._log(
-            call_id, ctx, name, arguments, tool.tier, approved, result.ok, result.error, took
+            call_id,
+            ctx,
+            name,
+            arguments,
+            tool.tier,
+            approved,
+            result.ok,
+            result.error,
+            took,
+            approved_by=approved_by,
         )
         log.info("tool.ran", tool=name, tier=int(tool.tier), ok=result.ok, took_ms=took)
         return result
@@ -247,6 +338,7 @@ class PermissionEngine:
         ok: bool,
         error: str | None,
         duration_ms: int,
+        approved_by: str | None = None,
     ) -> None:
         """Rule 6: every call, with its args and result. Including refusals —
         a denial is the entry most worth having."""
@@ -264,6 +356,8 @@ class PermissionEngine:
                     "ok": int(ok),
                     "error": error,
                     "duration_ms": duration_ms,
+                    # "user", "trust", or None when nothing was asked.
+                    "approved_by": approved_by,
                 }
             )
         except Exception:

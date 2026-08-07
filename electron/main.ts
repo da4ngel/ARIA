@@ -81,7 +81,15 @@ const rpc = new RpcClient({
   url: sidecar.rpcUrl,
   getToken: () => sidecar.getToken(),
   onStatus: publishStatus,
-  onNotification: (notification: RpcNotification) => sendToRenderer('aria:event', notification),
+  onNotification: (notification: RpcNotification) => {
+    // Approval is deliberately never by voice: a misheard "yes" is the only
+    // thing that would stand between a file and deletion. That makes the
+    // dialog the *only* way to answer, so it has to be reachable — hidden,
+    // hands-free use would otherwise dead-end at a prompt nobody can see and
+    // the sidecar's 120s timeout would deny it.
+    if (notification.method === 'confirm.request') showWindow()
+    sendToRenderer('aria:event', notification)
+  },
 })
 
 // ── renderer plumbing ─────────────────────────────────────────────────

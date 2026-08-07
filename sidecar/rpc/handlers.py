@@ -421,6 +421,35 @@ async def confirm_respond(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": delivered, "expired": not delivered}
 
 
+@method("tools.trusted")
+async def tools_trusted(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or replace the folders she may act in without asking.
+
+    Whole-list replacement rather than add/remove: the UI holds the list, and
+    two half-applied edits racing is a worse failure than re-sending four
+    strings.
+    """
+    import json
+
+    from sidecar.memory.settings_store import TRUSTED_PATHS
+    from sidecar.state import runtime
+
+    engine = runtime.permissions
+    if engine is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "Tools are not available in this session.")
+
+    requested = params.get("paths")
+    if requested is not None:
+        if not isinstance(requested, list):
+            raise RpcMethodError(ErrorCode.INVALID_PARAMS, "paths must be a list of folders.")
+        cleaned = [str(p) for p in requested if str(p).strip()]
+        engine.set_trusted(cleaned)
+        if runtime.settings is not None:
+            await runtime.settings.set(TRUSTED_PATHS, json.dumps(cleaned))
+
+    return {"paths": [str(p) for p in engine.trusted]}
+
+
 @method("voice.interrupt")
 async def voice_interrupt(_params: dict[str, Any]) -> dict[str, Any]:
     """Stop her talking, now.

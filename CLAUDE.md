@@ -62,6 +62,37 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - **Measured gate**: "the quotation I sent the banquet hall" finds
   `doc_final_v3.txt`, whose name contains none of those words.
 
+## Files, and trusted folders (2026-08-07)
+Fifteen tools. `read_file`, `list_folder` (T0), `create_folder` (T1),
+`write_file`, `rename_file`, `move_file` (T2), `delete_file`, `delete_folder`
+(T3).
+
+- **A trusted folder is trusted completely**, deletion included, and **nothing
+  is trusted until it is added**. Recursive.
+- **Trust decides whether she asks, never what is allowed.** The refusals in
+  `files.py` — drive roots, `Windows`, `Program Files` — are untouched by it,
+  and `allow_danger_tools` still decides whether a DANGER tool exists at all.
+- **A call spanning trusted and untrusted still asks.** Moving a file *out* of
+  a trusted folder is not covered by trusting it — the destination is the part
+  that matters. Mutation-checked: `all` → `any` moves a file out silently.
+- **`tool_log.approved_by`** ("user" / "trust" / null, migration 004). An audit
+  trail that cannot tell those apart is worth much less than one that can.
+- **Approval is never by voice**, by choice — a misheard "yes" would be the
+  only thing between a file and deletion. That obliges the *window to come
+  forward* on `confirm.request`, or hands-free use dead-ends at a dialog nobody
+  can see and the 120s timeout denies it.
+- **Relative paths resolve against the named folder**, not the sidecar's
+  working directory, which is the repo. The local model reliably emits
+  `downloads/hello.txt`, and that has to land in Downloads.
+- **`listener.heard` logs the words, not `chars=42`.** The same gap already
+  fixed once for `not_addressed`; leaving it here made a voice bug
+  undiagnosable.
+
+**Fifteen tools is past §7.2's cap of ~12.** Measured on `qwen2.5:7b` with all
+fifteen: 6/7, including "create a file named hello.txt in downloads" and
+correctly *no* tool for "what is the capital of Australia". It holds for now —
+relevance-based selection is the next thing due.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
