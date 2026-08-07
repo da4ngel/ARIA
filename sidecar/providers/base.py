@@ -37,6 +37,11 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    #: Opaque token some providers hand back with a call and require echoed
+    #: verbatim when the call is replayed. Gemini's `thoughtSignature` is one:
+    #: without it the API refuses the follow-up outright. Meaningless to
+    #: everyone else, so it is carried and never inspected.
+    signature: str | None = None
 
 
 class ChatMessage(BaseModel):

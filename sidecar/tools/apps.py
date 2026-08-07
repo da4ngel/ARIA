@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -135,20 +136,27 @@ def _start_apps() -> list[tuple[str, str]]:
     ]
 
 
-def _best_match(wanted: str, apps: list[tuple[str, str]]) -> tuple[str, str] | None:
+def _best_match(
+    wanted: str, apps: list[tuple[str, str]], *, exact_only: bool = False
+) -> tuple[str, str] | None:
     """Pick the app a person meant.
 
     Exact name first, then prefix, then substring — and the *shortest* name
     among equals, so "Calendar" wins over "Calendar (Microsoft 365)". Ordering
     matters here: matching on substring first would open "Calculator Help"
     ahead of "Calculator".
+
+    `exact_only` exists because a fuzzy app match must not beat an exact
+    website. Asked to "open youtube" on a machine with the YouTube Music app
+    installed, the prefix rule matched *YouTube Music* and opened the wrong
+    thing — which is worse than opening nothing.
     """
     lowered = wanted.lower()
-    for test in (
-        lambda n: n == lowered,
-        lambda n: n.startswith(lowered),
-        lambda n: lowered in n,
-    ):
+    tests: list[Callable[[str], bool]] = [lambda n: n == lowered]
+    if not exact_only:
+        tests += [lambda n: n.startswith(lowered), lambda n: lowered in n]
+
+    for test in tests:
         hits = [(name, app_id) for name, app_id in apps if test(name.lower())]
         if hits:
             return min(hits, key=lambda pair: len(pair[0]))
@@ -161,29 +169,57 @@ class _AppIndex:
     def __init__(self) -> None:
         self._apps: list[tuple[str, str]] | None = None
 
-    async def find(self, wanted: str) -> tuple[str, str] | None:
+    async def find(self, wanted: str, *, exact_only: bool = False) -> tuple[str, str] | None:
         if self._apps is None:
             self._apps = await asyncio.to_thread(_start_apps)
-        match = _best_match(wanted, self._apps)
+        match = _best_match(wanted, self._apps, exact_only=exact_only)
         if match is not None:
             return match
+        if exact_only:
+            return None
 
         # Missed. It may have been installed since we last looked.
         refreshed = await asyncio.to_thread(_start_apps)
         if refreshed:
             self._apps = refreshed
-        return _best_match(wanted, self._apps)
+        return _best_match(wanted, self._apps, exact_only=exact_only)
 
 
 _INDEX = _AppIndex()
+
+# Things people say "open" about that are sites, not installed apps. Without
+# this "open youtube" is a flat refusal, which is a strange answer from
+# something sitting on a machine with a browser on it.
+_SITES = {
+    "youtube": "https://www.youtube.com",
+    "youtube music": "https://music.youtube.com",
+    "gmail": "https://mail.google.com",
+    "google": "https://www.google.com",
+    "maps": "https://maps.google.com",
+    "google maps": "https://maps.google.com",
+    "drive": "https://drive.google.com",
+    "google drive": "https://drive.google.com",
+    "github": "https://github.com",
+    "twitter": "https://twitter.com",
+    "x": "https://x.com",
+    "reddit": "https://reddit.com",
+    "chatgpt": "https://chatgpt.com",
+    "claude": "https://claude.ai",
+    "netflix": "https://www.netflix.com",
+    "amazon": "https://www.amazon.com",
+    "linkedin": "https://www.linkedin.com",
+    "whatsapp web": "https://web.whatsapp.com",
+}
 
 
 @tool(
     name="open_app",
     tier=Tier.SAFE,
     description=(
-        "Launch a Windows application by name, for example chrome, code, "
-        "excel, notepad, spotify. Use when asked to open or start a program."
+        "Open an application or a website by name — for example chrome, "
+        "notion, spotify, calculator, youtube, gmail. Use whenever the user "
+        "asks to open, launch or start something. Pass the name exactly as "
+        "they said it; do not substitute a different app you think is similar."
     ),
 )
 async def open_app(ctx: ToolContext, name: str) -> ToolResult:
@@ -207,7 +243,28 @@ async def open_app(ctx: ToolContext, name: str) -> ToolResult:
 
     # Everything else people actually name — Notion, Calendar, Calculator,
     # Spotify — is a Store or Electron app with no executable on PATH.
-    match = await _INDEX.find(target)
+    # Order is: an app called exactly this, then a website called exactly
+    # this, then an app that merely resembles it. The middle step is what stops
+    # "open youtube" launching the YouTube Music app, while "open spotify"
+    # still opens the Spotify app rather than the web player.
+    match = await _INDEX.find(target, exact_only=True)
+
+    if match is None and target in _SITES:
+        url = _SITES[target]
+        try:
+            await asyncio.to_thread(os.startfile, url)
+        except OSError as exc:
+            return ToolResult(ok=False, summary=f"{name} would not open.", error=str(exc))
+        log.info("tool.opened_app", name=name, via="browser", url=url)
+        return ToolResult(
+            ok=True,
+            data={"name": name, "url": url, "via": "browser"},
+            summary=f"Opened {name} in your browser.",
+        )
+
+    if match is None:
+        match = await _INDEX.find(target)
+
     if match is None:
         return ToolResult(
             ok=False,

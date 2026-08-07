@@ -397,6 +397,22 @@ Six tools so far, one per tier boundary: `list_windows`, `get_system_info`
   refreshes it once in case the app was installed since. Match order is exact,
   then prefix, then substring, shortest name winning — substring first would
   open "Calculator Help" ahead of "Calculator".
+- **A tool turn is not a text turn, and getting that wrong is invisible until
+  she contradicts herself.** She opened WhatsApp and said "I cannot open
+  WhatsApp directly": Gemini was receiving her own tool call as an *empty model
+  turn* and the result as a plain user message, so it never learned it had done
+  anything. Gemini needs `functionCall` / `functionResponse` parts (and the
+  response must be an object, not a bare string); OpenAI needs `type:
+  "function"`, an `id`, and arguments as a **JSON string** where Ollama wants
+  an object — one shared `to_wire` cannot serve both.
+- **Gemini requires `thoughtSignature` echoed back** on a replayed
+  `functionCall`, or it rejects the follow-up outright: *"Function call is
+  missing a thought_signature in functionCall parts"*. `ToolCall.signature`
+  carries it opaquely for every provider.
+- **Exact beats fuzzy, or she opens the wrong thing.** "open youtube" matched
+  the *YouTube Music* app by prefix. Order is now: exact app, exact website,
+  then fuzzy app — so "youtube" opens the site, "youtube music" opens the app,
+  and "spotify" still opens the app rather than the web player.
 - **Measured against the real APIs**, not assumed: gemini-flash-lite calls
   `list_windows`; qwen2.5:7b is 4/4 including correctly *not* calling a tool
   for "what is the capital of Australia". OpenAI could not be verified — that

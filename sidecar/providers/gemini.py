@@ -36,6 +36,19 @@ CONNECT_TIMEOUT_S = 10.0
 READ_TIMEOUT_S = 300.0
 
 
+def _function_call_part(call: ToolCall) -> dict[str, Any]:
+    """Replay a tool call in the shape Gemini demands back.
+
+    The signature is not optional: without it the API rejects the follow-up
+    with "Function call is missing a thought_signature in functionCall parts",
+    and the turn dies rather than degrading.
+    """
+    part: dict[str, Any] = {"functionCall": {"name": call.name, "args": call.arguments}}
+    if call.signature:
+        part["thoughtSignature"] = call.signature
+    return part
+
+
 class GeminiProvider:
     """Implements `LLMProvider` against the Gemini generateContent API."""
 
@@ -117,16 +130,55 @@ class GeminiProvider:
 
     @staticmethod
     def _build_body(messages: list[ChatMessage], opts: GenerationOptions) -> dict[str, Any]:
-        """Split system messages out; map assistant -> model."""
+        """Split system messages out; map assistant -> model.
+
+        **Tool turns are not text.** Gemini wants a `functionCall` part for the
+        request and a `functionResponse` part for the result, and sending them
+        as prose is not a formatting nicety — it is why she opened WhatsApp and
+        then said "I cannot open WhatsApp directly". Her own tool call arrived
+        as an empty model turn, and the result arrived looking like something
+        the *user* had said, so she never learned she had done anything.
+        """
         system_parts = [m.content for m in messages if m.role is Role.SYSTEM]
-        contents = [
-            {
-                "role": "model" if m.role is Role.ASSISTANT else "user",
-                "parts": [{"text": m.content}],
-            }
-            for m in messages
-            if m.role is not Role.SYSTEM
-        ]
+
+        contents: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role is Role.SYSTEM:
+                continue
+
+            if m.role is Role.TOOL:
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": m.name or "tool",
+                                    # Gemini requires an object here, not a
+                                    # bare string.
+                                    "response": {"result": m.content},
+                                }
+                            }
+                        ],
+                    }
+                )
+                continue
+
+            if m.role is Role.ASSISTANT and m.tool_calls:
+                contents.append(
+                    {
+                        "role": "model",
+                        "parts": [_function_call_part(c) for c in m.tool_calls],
+                    }
+                )
+                continue
+
+            contents.append(
+                {
+                    "role": "model" if m.role is Role.ASSISTANT else "user",
+                    "parts": [{"text": m.content}],
+                }
+            )
 
         body: dict[str, Any] = {"contents": contents}
         if system_parts:
@@ -168,6 +220,8 @@ class GeminiProvider:
                             id=f"c_{uuid.uuid4().hex[:10]}",
                             name=str(call["name"]),
                             arguments=call.get("args") or {},
+                            # Required back verbatim on the follow-up turn.
+                            signature=part.get("thoughtSignature"),
                         )
                     )
                 text += part.get("text") or ""

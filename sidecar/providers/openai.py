@@ -23,9 +23,9 @@ from sidecar.providers.base import (
     GenerationOptions,
     ProviderRateLimited,
     ProviderUnavailable,
+    Role,
     StreamDelta,
     ToolCall,
-    to_wire,
 )
 from sidecar.providers.credentials import CredentialKey, get_key
 
@@ -34,6 +34,40 @@ log = structlog.get_logger(__name__)
 BASE_URL = "https://api.openai.com/v1"
 CONNECT_TIMEOUT_S = 10.0
 READ_TIMEOUT_S = 300.0
+
+
+def _to_openai_wire(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Messages in the shape OpenAI actually accepts.
+
+    Not `to_wire`: OpenAI needs `type: "function"` and an `id` on every tool
+    call, and it wants the arguments as a **JSON string** rather than an
+    object. Ollama wants the object. One shared mapping cannot satisfy both, so
+    this is the OpenAI one.
+    """
+    wire: list[dict[str, Any]] = []
+    for m in messages:
+        if m.role is Role.TOOL:
+            wire.append(
+                {
+                    "role": "tool",
+                    "content": m.content,
+                    "tool_call_id": m.tool_call_id or "",
+                }
+            )
+            continue
+
+        item: dict[str, Any] = {"role": str(m.role), "content": m.content}
+        if m.tool_calls:
+            item["tool_calls"] = [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": json.dumps(c.arguments)},
+                }
+                for c in m.tool_calls
+            ]
+        wire.append(item)
+    return wire
 
 
 def _assemble(partial: dict[int, dict[str, str]]) -> list[ToolCall]:
@@ -107,7 +141,7 @@ class OpenAIProvider:
         opts = options or GenerationOptions()
         body: dict[str, object] = {
             "model": model,
-            "messages": to_wire(messages),
+            "messages": _to_openai_wire(messages),
             "stream": True,
         }
         if tools:
