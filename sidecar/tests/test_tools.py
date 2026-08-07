@@ -14,7 +14,7 @@ import pytest
 
 import sidecar.tools  # noqa: F401 — registers everything
 from sidecar.tools.apps import AppEntry, Launch, best, list_windows, normalise, rank
-from sidecar.tools.files import delete_file, move_file
+from sidecar.tools.files import delete_file, known_folder, move_file, open_path
 from sidecar.tools.registry import Tier, ToolContext, get, schemas
 from sidecar.tools.system import get_system_info
 
@@ -249,3 +249,49 @@ def test_ranking_offers_the_near_misses() -> None:
 )
 def test_normalisation_folds_what_should_not_matter(raw: str, folded: str) -> None:
     assert normalise(raw) == folded
+
+
+# ── opening folders ───────────────────────────────────────────────────
+# She was asked to "open downloads folder", had no tool for it, and answered
+# "Opened Downloads." anyway. These exist so that gap cannot reopen quietly.
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["downloads", "Downloads", "my downloads folder", "the downloads folder", "DOWNLOADS"],
+)
+def test_a_named_folder_is_found_however_it_was_said(said: str) -> None:
+    found = known_folder(said)
+    assert found is not None and found.name.lower() == "downloads"
+
+
+@pytest.mark.parametrize("place", ["documents", "desktop", "pictures", "music", "videos", "home"])
+def test_the_usual_places_all_resolve(place: str) -> None:
+    found = known_folder(place)
+    assert found is not None and found.exists()
+
+
+def test_it_uses_the_real_location_not_a_guess() -> None:
+    """OneDrive relocates Documents and Desktop by default, so joining onto
+    %USERPROFILE% is wrong on a very ordinary machine."""
+    found = known_folder("documents")
+    assert found is not None
+    assert found.is_absolute()
+
+
+def test_a_path_is_not_a_named_folder() -> None:
+    assert known_folder("C:/Users/somebody/notes.txt") is None
+    assert known_folder("blorptastic") is None
+
+
+async def test_open_path_refuses_what_is_not_there(tmp_path: Path) -> None:
+    """The whole point: when it cannot be done she must say so, not claim it."""
+    result = await open_path(CTX, path=str(tmp_path / "nothing-here"))
+    assert not result.ok
+    assert result.error == "missing"
+
+
+async def test_open_path_opens_a_real_folder(tmp_path: Path) -> None:
+    result = await open_path(CTX, path=str(tmp_path))
+    assert result.ok
+    assert result.data["kind"] == "folder"

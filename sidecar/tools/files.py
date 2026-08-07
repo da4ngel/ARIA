@@ -14,8 +14,13 @@ does upstream.
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import os
+import re
 import shutil
+import uuid
 from pathlib import Path
+from typing import ClassVar
 
 import structlog
 
@@ -136,4 +141,109 @@ async def delete_file(ctx: ToolContext, path: str) -> ToolResult:
         ok=True,
         data={"path": str(target), "bytes": size},
         summary=f"Deleted {target.name}.",
+    )
+
+
+# ── opening things ───────────────────────────────────────────────────
+# Asked to "open downloads folder" with no tool for it, she answered "Opened
+# Downloads." and nothing happened. The fix for that is not more prompt: it is
+# having the tool, so there is nothing to invent.
+
+
+class _GUID(ctypes.Structure):
+    # ctypes reads this by name; the ClassVar annotation is for the linter's
+    # benefit and changes nothing at runtime.
+    _fields_: ClassVar = [
+        ("d1", ctypes.c_uint32),
+        ("d2", ctypes.c_uint16),
+        ("d3", ctypes.c_uint16),
+        ("d4", ctypes.c_byte * 8),
+    ]
+
+
+# The names people say, and Windows' own ids for them. Resolved through
+# `SHGetKnownFolderPath` rather than joined onto %USERPROFILE%: these folders
+# move, and OneDrive relocates Documents and Desktop by default, so a
+# hardcoded join is wrong on a very ordinary machine.
+_KNOWN_FOLDERS = {
+    "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+    "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "pictures": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+    "music": "{4BD8D571-6D19-48D3-BE97-422220080E43}",
+    "videos": "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
+    "home": "{5E6C858F-0E22-4760-9AFE-EA3317B67173}",
+}
+
+_FOLDER_WORDS = re.compile(r"\b(the|my|folder|directory|open)\b")
+
+
+def known_folder(name: str) -> Path | None:
+    """A named place, or None if it is not one.
+
+    Tolerant of how people say it — "my downloads folder" and "Downloads" are
+    the same request.
+    """
+    cleaned = _FOLDER_WORDS.sub(" ", name.lower()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    guid = _KNOWN_FOLDERS.get(cleaned)
+    if guid is None:
+        return None
+
+    parsed = uuid.UUID(guid)
+    handle = _GUID()
+    handle.d1, handle.d2, handle.d3 = parsed.time_low, parsed.time_mid, parsed.time_hi_version
+    for index, byte in enumerate(parsed.bytes[8:]):
+        handle.d4[index] = byte if byte < 128 else byte - 256
+
+    out = ctypes.c_wchar_p()
+    if ctypes.windll.shell32.SHGetKnownFolderPath(
+        ctypes.byref(handle), 0, None, ctypes.byref(out)
+    ):
+        return None
+    return Path(out.value) if out.value else None
+
+
+@tool(
+    name="open_path",
+    tier=Tier.SAFE,
+    description=(
+        "Open a folder or a file in Windows — for example the Downloads "
+        "folder, Documents, or a full path like C:/Users/me/notes.txt. Use "
+        "when asked to open, show or go to a folder or a specific file."
+    ),
+)
+async def open_path(ctx: ToolContext, path: str) -> ToolResult:
+    """Open a folder or file.
+
+    Args:
+        path: A folder name like "downloads", or a full path to a file or folder
+    """
+    wanted = path.strip().strip('"')
+    if not wanted:
+        return ToolResult(ok=False, summary="Tell me what to open.", error="empty")
+
+    target = known_folder(wanted) or Path(wanted).expanduser()
+
+    if not await asyncio.to_thread(target.exists):
+        return ToolResult(
+            ok=False,
+            summary=(
+                f"There is nothing at {target}. "
+                f"Give me a full path, or a name like Downloads or Documents."
+            ),
+            error="missing",
+        )
+
+    try:
+        await asyncio.to_thread(os.startfile, str(target))
+    except OSError as exc:
+        return ToolResult(ok=False, summary=f"{target} would not open.", error=str(exc))
+
+    kind = "folder" if await asyncio.to_thread(target.is_dir) else "file"
+    log.info("tool.opened_path", path=str(target), kind=kind)
+    return ToolResult(
+        ok=True,
+        data={"path": str(target), "kind": kind},
+        summary=f"Opened {target.name or target} ({kind}).",
     )
