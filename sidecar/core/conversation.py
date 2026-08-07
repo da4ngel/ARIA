@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from pydantic import BaseModel
@@ -33,12 +34,16 @@ from sidecar.providers.base import (
     ProviderRateLimited,
     ProviderUnavailable,
     Role,
+    ToolCall,
 )
 from sidecar.providers.catalog import ModelInfo
 from sidecar.providers.connectivity import connectivity
 from sidecar.providers.health import HealthTracker
 from sidecar.providers.tts import TextToSpeech, split_for_speech
 from sidecar.rpc.events import AssistantState, Event, EventBus
+from sidecar.tools import registry
+from sidecar.tools.permissions import PermissionEngine
+from sidecar.tools.registry import ToolContext
 
 log = structlog.get_logger(__name__)
 
@@ -197,6 +202,7 @@ class ConversationService:
         health: HealthTracker | None = None,
         selected_model: str = catalog.SMART_ID,
         usable_models: Callable[[], set[str]] | None = None,
+        permissions: PermissionEngine | None = None,
         tts: TextToSpeech | None = None,
     ) -> None:
         self._store = store
@@ -213,6 +219,10 @@ class ConversationService:
         # tests. Startup injects the real resolver so the router never picks a
         # provider with no key behind it.
         self._usable_models = usable_models
+        # None means she has no hands, and the model is never told a tool
+        # exists — which is the only safe default for a thing that can
+        # delete files.
+        self._permissions = permissions
         # None means she types and does not speak. Voice is additive: a
         # missing or broken engine must never stop a turn completing.
         self._tts = tts
@@ -451,10 +461,15 @@ class ConversationService:
 
             for attempt, info in enumerate(chain):
                 messages = await self._build_context(session_id, info)
+                requested: list[ToolCall] = []
                 try:
                     first_token_ms = await self._stream_one(
-                        turn_id, info, messages, collected, started
+                        turn_id, info, messages, collected, started, tool_calls=requested
                     )
+                    if requested:
+                        first_token_ms = await self._use_one_tool(
+                            turn_id, session_id, info, messages, collected, started, requested
+                        )
                 except (ProviderUnavailable, ProviderRateLimited) as exc:
                     self._health.record_failure(
                         info.id, str(exc), rate_limited=isinstance(exc, ProviderRateLimited)
@@ -501,8 +516,17 @@ class ConversationService:
         messages: list[ChatMessage],
         collected: list[str],
         started: float,
+        *,
+        tool_calls: list[ToolCall] | None = None,
+        offer_tools: bool = True,
     ) -> float | None:
-        """Stream one model's reply into `collected`. Returns TTFT in ms."""
+        """Stream one model's reply into `collected`. Returns TTFT in ms.
+
+        `tool_calls` collects anything the model asked to run. `offer_tools` is
+        False on the continuation pass, and that is what keeps this to a
+        *single* tool call per turn (BUILD_SPEC §9 Phase 3) — a model handed
+        its own tools again straight after using one will happily loop.
+        """
         provider = self._registry.for_model(info)
         await self._free_vram_for(info)
         first_token_ms: float | None = None
@@ -515,7 +539,10 @@ class ConversationService:
                 num_ctx=min(self._num_ctx, info.context_tokens),
                 temperature=info.temperature,
             ),
+            tools=self._tool_schemas() if offer_tools else None,
         ):
+            if delta.tool_calls and tool_calls is not None:
+                tool_calls.extend(delta.tool_calls)
             if delta.text:
                 if first_token_ms is None:
                     first_token_ms = (time.perf_counter() - started) * 1000
@@ -540,6 +567,94 @@ class ConversationService:
 
         await speech.finish(turn_id)
         return first_token_ms
+
+    def _tool_schemas(self) -> list[dict[str, Any]] | None:
+        """What the model is allowed to know exists.
+
+        None rather than an empty list when there is no permission engine:
+        some Ollama builds refuse a request carrying an empty `tools` array.
+        """
+        if self._permissions is None:
+            return None
+        return registry.schemas() or None
+
+    async def _use_one_tool(
+        self,
+        turn_id: str,
+        session_id: str,
+        info: ModelInfo,
+        messages: list[ChatMessage],
+        collected: list[str],
+        started: float,
+        requested: list[ToolCall],
+    ) -> float | None:
+        """Run the first requested tool, then let the model answer with it.
+
+        **One tool, then done.** §9 Phase 3 is explicit that chaining waits for
+        Phase 6. If a model asks for three things at once the rest are dropped
+        and it is told so, which is far better than executing a plan nobody
+        reviewed.
+        """
+        assert self._permissions is not None
+        call = requested[0]
+        dropped = requested[1:]
+
+        await self._bus.broadcast(
+            Event.TOOL_CALL,
+            {"turn_id": turn_id, "call_id": call.id, "tool": call.name, "args": call.arguments},
+        )
+
+        result = await self._permissions.run(
+            call.name,
+            call.arguments,
+            ToolContext(session_id=session_id, turn_id=turn_id),
+            rationale="".join(collected).strip()[:400],
+        )
+
+        await self._bus.broadcast(
+            Event.TOOL_RESULT,
+            {
+                "turn_id": turn_id,
+                "call_id": call.id,
+                "tool": call.name,
+                "ok": result.ok,
+                "summary": result.summary,
+                "display": result.display,
+            },
+        )
+
+        # Whatever it said before asking for the tool was preamble to an answer
+        # it did not have yet. Clearing stops the reply reading as two halves
+        # of different sentences.
+        if collected:
+            collected.clear()
+            await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
+
+        note = ""
+        if dropped:
+            names = ", ".join(c.name for c in dropped)
+            note = (
+                f" You also asked for {names}; only one tool runs per turn, "
+                f"so those were not done."
+            )
+            log.info("turn.tools_dropped", turn_id=turn_id, dropped=[c.name for c in dropped])
+
+        # Only `summary` goes back — never `data` or `display`. §7.2 names
+        # pasting tool output into the context as the second failure mode.
+        followup = [
+            *messages,
+            ChatMessage(role=Role.ASSISTANT, content="", tool_calls=[call]),
+            ChatMessage(
+                role=Role.TOOL,
+                content=result.summary + note,
+                tool_call_id=call.id,
+                name=call.name,
+            ),
+        ]
+        await self._bus.set_state(AssistantState.THINKING)
+        return await self._stream_one(
+            turn_id, info, followup, collected, started, offer_tools=False
+        )
 
     async def _free_vram_for(self, info: ModelInfo) -> None:
         """Evict the previous local model before loading a different one.

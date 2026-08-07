@@ -34,10 +34,10 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - Error messages must say what to do next, not just what failed.
 
 ## Current phase
-Phase 2 stages 1-3 built (she speaks, you speak, hands free). The machine-
-checkable parts of every gate pass; the two that need a person at a microphone
-are listed under stage 3 and are still unverified. Update this line when they
-are, then move to Phase 3 — Tools.
+Phase 2 signed off by Eyaas after live testing (2026-08-07).
+Phase 3 in progress: the tool contract, the tier engine and six tools are
+built and tested; the model has not yet been driven against them end to end.
+Remaining: the other 13 tools, relevance-based selection, ToolCallCard.
 
 ## Phase 2 stage 1 — she speaks (2026-08-06)
 kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
@@ -350,6 +350,32 @@ name?"` — all of them "Aria", all correctly rejected, so she was never called.
   went out — saying "I heard you" to someone about to be ignored. It is set
   only once the name is confirmed, or when the wake *model* fires, which is
   its own confirmation.
+
+## Phase 3 — the tool contract (2026-08-07)
+Six tools so far, one per tier boundary: `list_windows`, `get_system_info`
+(T0), `open_app`, `set_volume` (T1), `move_file` (T2), `delete_file` (T3).
+
+- **A confirmation timeout resolves to DENIED.** §7.1's words, and the whole
+  safety property — somebody who walked away has not agreed to anything.
+  Mutation-checked: flipping that one return fails four tests and logs
+  `tool.ran ok=True tier=3 tool=obliterate`.
+- **DANGER is off by default *and absent from `schemas()`*.** The model is not
+  told those tools exist, which is stronger than asking it not to use them.
+- **Schemas are derived from type hints and the docstring**, never written
+  twice (§7.2). `ctx` is excluded — offered as a field, models try to fill it.
+- **Only `summary` goes back into the context**, never `data` or `display`.
+  §7.2 names pasting tool output into the prompt as the #2 failure mode.
+- **The continuation pass is not offered tools again.** One tool per turn until
+  Phase 6; a model handed its own tools straight after using one will loop.
+  Extra calls in a single response are dropped and the model is told so.
+- **`pycaw`'s API changed**: `GetSpeakers()` returns a wrapper with
+  `.EndpointVolume`, so every `Activate(IID, CLSCTX_ALL, None)` example online
+  now fails with `'AudioDevice' object has no attribute 'Activate'`.
+- **`registry.clear()` needs `snapshot`/`restore` in tests.** A bare clear left
+  the real tools missing for every later test — passed alone, failed in the run.
+- Relevance-based tool selection is **sequenced, not skipped**: the cap is ~12
+  and there are six, so it lands with the remaining tools. It needs
+  `nomic-embed-text` (274MB, not pulled) on the turn path.
 
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.

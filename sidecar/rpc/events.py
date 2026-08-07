@@ -67,6 +67,13 @@ class Event(StrEnum):
     AUDIO_DUCK = "audio.duck"
     # It was not an interruption after all. Back to full volume.
     AUDIO_RESUME = "audio.resume"
+    # Phase 3. A tool is about to run, and then what it did. Emitted whatever
+    # the tier — the user should be able to see her reach for something even
+    # when she did not have to ask first.
+    TOOL_CALL = "tool.call"
+    TOOL_RESULT = "tool.result"
+    # Blocks the agent loop until `confirm.respond` arrives (§7.1).
+    CONFIRM_REQUEST = "confirm.request"
 
 
 class Sender(Protocol):

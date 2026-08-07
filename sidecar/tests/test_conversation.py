@@ -21,6 +21,7 @@ from sidecar.providers.base import (
     ProviderUnavailable,
     Role,
     StreamDelta,
+    ToolCall,
 )
 from sidecar.providers.health import HealthTracker
 from sidecar.rpc.events import AssistantState, Event, EventBus
@@ -618,3 +619,150 @@ async def test_a_spoken_turn_is_answered_locally(database: Database, make_servic
     assert complete[0]["full_text"] == "Local."
     answered = catalog.get(complete[0]["model"])
     assert answered is not None and answered.local, complete[0]["model"]
+
+
+# ── tools on the turn path (Phase 3) ──────────────────────────────────
+
+
+class ToolCallingProvider(FakeProvider):
+    """Asks for a tool on the first pass, then answers on the second.
+
+    The two-pass shape is the whole point: a tool call is not an answer, and
+    the model has to be given the result and asked again.
+    """
+
+    def __init__(self, calls: list[ToolCall], reply: str = "Done.") -> None:
+        super().__init__(chunks=[reply])
+        self._calls = calls
+        self.passes = 0
+        self.offered: list[list[str]] = []
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str,
+        options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamDelta]:
+        self.passes += 1
+        self.calls.append(messages)
+        self.offered.append([t["function"]["name"] for t in (tools or [])])
+        if self.passes == 1:
+            yield StreamDelta(text="Let me check. ")
+            yield StreamDelta(tool_calls=self._calls, done=True)
+            return
+        for chunk in self.chunks:
+            yield StreamDelta(text=chunk)
+        yield StreamDelta(done=True)
+
+
+class OpenEngine:
+    """A permission engine that always allows, recording what it ran."""
+
+    def __init__(self, summary: str = "9 windows open") -> None:
+        self.ran: list[tuple[str, dict]] = []
+        self.summary = summary
+
+    async def run(self, name, arguments, ctx, *, rationale=""):
+        from sidecar.tools.registry import ToolResult
+
+        self.ran.append((name, arguments))
+        return ToolResult(ok=True, summary=self.summary, display={"big": "payload"})
+
+
+def tool_service(database: Database, make_service, provider, engine):
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+        permissions=engine,
+    )
+    return svc, bus
+
+
+async def test_a_tool_call_runs_and_the_model_answers_with_it(
+    database: Database, make_service
+) -> None:
+    provider = ToolCallingProvider([ToolCall(id="c1", name="list_windows", arguments={})])
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("what is open")
+    await _drain(svc)
+
+    assert engine.ran == [("list_windows", {})]
+    assert provider.passes == 2, "the result has to go back to the model"
+    assert bus.of(Event.TOOL_CALL) and bus.of(Event.TOOL_RESULT)
+    assert bus.of(Event.TURN_COMPLETE)[0]["full_text"] == "Done."
+
+
+async def test_only_the_summary_reaches_the_model(database: Database, make_service) -> None:
+    """§7.2's second failure mode: never paste the payload into the context."""
+    provider = ToolCallingProvider([ToolCall(id="c1", name="list_windows", arguments={})])
+    engine = OpenEngine(summary="9 windows open")
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("what is open")
+    await _drain(svc)
+
+    second_pass = provider.calls[-1]
+    tool_turn = [m for m in second_pass if m.role is Role.TOOL]
+    assert tool_turn and "9 windows open" in tool_turn[0].content
+    assert all("payload" not in m.content for m in second_pass)
+
+
+async def test_the_continuation_is_not_offered_tools_again(
+    database: Database, make_service
+) -> None:
+    """Otherwise a model loops: use a tool, see the tools, use one again."""
+    provider = ToolCallingProvider([ToolCall(id="c1", name="list_windows", arguments={})])
+    svc, _bus = tool_service(database, make_service, provider, OpenEngine())
+
+    await svc.send("what is open")
+    await _drain(svc)
+
+    assert provider.offered[0], "the first pass offers tools"
+    assert provider.offered[1] == [], "the second must not"
+
+
+async def test_extra_tool_calls_are_dropped_and_declared(
+    database: Database, make_service
+) -> None:
+    """One tool per turn until Phase 6. Executing an unreviewed plan is worse
+    than doing less than asked."""
+    provider = ToolCallingProvider(
+        [
+            ToolCall(id="c1", name="list_windows", arguments={}),
+            ToolCall(id="c2", name="delete_file", arguments={"path": "C:/x"}),
+        ]
+    )
+    engine = OpenEngine()
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("tidy up")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["list_windows"]
+    tool_turn = next(m for m in provider.calls[-1] if m.role is Role.TOOL)
+    assert "delete_file" in tool_turn.content, "the model is told what was skipped"
+
+
+async def test_no_engine_means_the_model_is_never_told_tools_exist(
+    database: Database, make_service
+) -> None:
+    provider = ToolCallingProvider([])
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+    )
+
+    await svc.send("hello")
+    await _drain(svc)
+
+    assert provider.offered[0] == []

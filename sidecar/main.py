@@ -36,6 +36,7 @@ from sidecar.memory.settings_store import (
     WAKE_WORD_ENABLED,
     SettingsStore,
 )
+from sidecar.memory.tool_log import ToolJournal
 from sidecar.providers import catalog
 from sidecar.providers.availability import AvailabilityService
 from sidecar.providers.base import LLMProvider, ProviderError
@@ -51,6 +52,7 @@ from sidecar.providers.wakeword import OpenWakeWord, missing_models
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
+from sidecar.tools.permissions import PermissionEngine
 
 log = structlog.get_logger(__name__)
 
@@ -142,6 +144,14 @@ async def _start_conversation(settings: Settings) -> None:
     # exactly what the router refuses to use.
     local_default = catalog.default_local(runtime.local_models)
     runtime.local_model = local_default.id
+    # Importing the package is what registers the tools (rule 4).
+    import sidecar.tools  # noqa: F401
+
+    runtime.permissions = PermissionEngine(
+        bus,
+        ToolJournal(runtime.require_db()),
+        allow_danger=settings.allow_danger_tools,
+    )
     runtime.tts = _build_tts(settings)
     runtime.stt = _build_stt(settings)
     runtime.conversation = ConversationService(
@@ -156,6 +166,7 @@ async def _start_conversation(settings: Settings) -> None:
         health=tracker,
         selected_model=selected if isinstance(selected, str) else catalog.SMART_ID,
         usable_models=availability.usable,
+        permissions=runtime.permissions,
         tts=runtime.tts,
     )
     log.info(

@@ -17,6 +17,7 @@ import { ComposerBar } from '@/components/ComposerBar'
 import { ConnectionStatus } from '@/components/ConnectionStatus'
 import { ConversationView } from '@/components/ConversationView'
 import { EmptyState } from '@/components/EmptyState'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { HandsFreeToggle } from '@/components/HandsFreeToggle'
 import { VoiceAura, type AuraMode } from '@/components/VoiceAura'
 import { HistoryPanel } from '@/components/HistoryPanel'
@@ -25,6 +26,7 @@ import { Orb } from '@/components/Orb'
 import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
 import { useAudio } from '@/hooks/useAudio'
+import { useConfirm } from '@/hooks/useConfirm'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
 import { useHandsFree } from '@/hooks/useHandsFree'
@@ -45,6 +47,8 @@ export default function App(): JSX.Element {
   const { turns, busy, send, cancel, newChat, openSession, sessionId, lastFirstTokenMs } =
     useConversation(connected)
   const models = useModels(connected)
+  // The sidecar's agent loop is suspended while one of these is open.
+  const confirm = useConfirm()
   const audio = useAudio()
   // A spoken turn is marked as such: the sidecar answers it on this machine
   // whatever the Smart bias says, because the network hop alone costs more
@@ -133,6 +137,10 @@ export default function App(): JSX.Element {
         {/* Behind everything and inert: it must never take a click or push the
             layout, only tint the window while there is a voice in it. */}
         <VoiceAura mode={auraMode} getLevel={auraLevel} />
+
+        {/* Above everything, including the history rail: it is holding a
+            lock in the sidecar, so nothing else should be reachable. */}
+        <ConfirmDialog request={confirm.current} onRespond={confirm.respond} />
 
         {/* Expanded turns history from an overlay into a permanent rail.
             18rem wide, not 16: at the narrower width every title truncated and

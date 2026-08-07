@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # only if you happen to be looking at the screen when you speak.
     wake_chime: bool = True
 
+    # ── Tools (Phase 3) ──────────────────────────────────────────────
+    # DANGER-tier tools are irreversible, so they are off until somebody
+    # deliberately turns them on (§7.2). While this is false the model is
+    # not even told they exist, which is a stronger guarantee than asking.
+    allow_danger_tools: bool = False
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from sidecar.providers.base import LLMProvider
     from sidecar.providers.stt import WhisperSTT
     from sidecar.providers.tts import KokoroTTS
+    from sidecar.tools.permissions import PermissionEngine
 
 
 @dataclass
@@ -52,6 +53,8 @@ class Runtime:
     # Hands-free listening. None when the wake word weights are absent — the
     # rest of voice still works, so this is never a startup failure.
     listener: Listener | None = None
+    # The tier engine. None means she has no hands this session.
+    permissions: PermissionEngine | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -96,6 +99,7 @@ class Runtime:
         self.stt = None
         self.stt_warm = None
         self.listener = None
+        self.permissions = None
 
 
 runtime = Runtime()

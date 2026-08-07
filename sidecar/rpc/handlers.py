@@ -387,6 +387,32 @@ async def voice_frame(params: dict[str, Any]) -> None:
     return None
 
 
+@method("confirm.respond")
+async def confirm_respond(params: dict[str, Any]) -> dict[str, Any]:
+    """Answer a pending confirmation (§7.1).
+
+    The agent loop is suspended on an `asyncio.Future` waiting for exactly
+    this. If nothing is waiting the answer is late — the 120s timeout already
+    denied it — and saying so is better than pretending it landed.
+    """
+    from sidecar.state import runtime
+
+    request_id = params.get("request_id")
+    if not isinstance(request_id, str):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "request_id is required.")
+
+    engine = runtime.permissions
+    if engine is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "Tools are not available in this session.")
+
+    delivered = engine.respond(
+        request_id,
+        approved=params.get("approved") is True,
+        remember=params.get("remember") is True,
+    )
+    return {"ok": delivered, "expired": not delivered}
+
+
 @method("voice.interrupt")
 async def voice_interrupt(_params: dict[str, Any]) -> dict[str, Any]:
     """Stop her talking, now.
