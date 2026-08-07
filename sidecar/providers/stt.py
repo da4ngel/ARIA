@@ -32,20 +32,27 @@ if TYPE_CHECKING:  # pragma: no cover
 
 log = structlog.get_logger(__name__)
 
-# **Measured, not assumed** (`scripts/gate_latency.py`, 8 spoken requests):
+# `tiny.en` was measured as accurate as `base.en` and 221ms faster, and that
+# measurement was **wrong in the way that mattered**: it used one synthesised
+# US voice saying "Aria" cleanly. On a real voice both models mishear the name,
+# tiny.en badly — a live session produced "Hallelujah.", "Ah, yeah." and "Oh
+# yeah, what's your full name?" where "Aria" had been said every time.
 #
-#     base.en   528ms median   661ms p90   5/8 clips with a missed word
-#     tiny.en   307ms median   330ms p90   5/8 clips with a missed word
+# A corpus of one speaker cannot measure a wake word. `scripts/gate_name.py`
+# now runs it across every voice kokoro has.
+MODEL_SIZE = "base.en"
+
+# **`hotwords="Aria"` was tried and measured worse, twice over.** Across six
+# voices (`scripts/gate_name.py`):
 #
-# Identical accuracy on that set — both miss exactly the same words ("pytest",
-# "onomatopoeia", "Thiruvananthapuram") — and 221ms faster on every single
-# turn, which is the largest saving available anywhere in the voice path.
+#     no hint    woke 32/36 (89%)   0 false wakes
+#     hotwords   woke 24/36 (67%)   1 false wake
 #
-# **The caveat is real:** that corpus is synthesised speech, which is cleaner
-# than a person across a room. tiny.en is the model that degrades first on
-# accented or noisy input. If she starts mishearing, `ARIA_STT_MODEL=base.en`
-# puts it back with no code change.
-MODEL_SIZE = "tiny.en"
+# It biases the decoder toward the word, and the way that plays out is that the
+# *leading* name gets treated as context already given and dropped: "Aria, what
+# is the capital of Australia?" comes back as "What is the capital of
+# Australia?". It also turned "Ah, yeah, that makes sense." into "Aria, that
+# makes sense." and woke her. Do not re-add it without re-running that gate.
 SAMPLE_RATE = 16_000
 # Below this there is no speech worth sending to the model — a stray key press
 # rather than an utterance.

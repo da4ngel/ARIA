@@ -313,6 +313,44 @@ Measured over a real session, then fixed:
   log. `_unduck()` is the single exit and `useAudio` also resets gain on a new
   answer, because that one cannot be allowed to be wrong.
 
+### She could not hear her own name (2026-08-07)
+    python scripts/gate_name.py    # every kokoro voice, name alone and in front of a question
+
+"It doesn't respond" was never the state machine. The log showed the name
+arriving as `'Hallelujah.'`, `'Ah, yeah.'` and `"Oh yeah, what's your full
+name?"` — all of them "Aria", all correctly rejected, so she was never called.
+
+- **`hotwords="Aria"` makes it worse, measured.** 24/36 with it against 32/36
+  without, plus a false wake. Biasing the decoder toward the word makes it
+  treat a *leading* name as context already given and drop it: "Aria, what is
+  the capital of Australia?" comes back without the "Aria". It also turned
+  "Ah, yeah, that makes sense." into "Aria, that makes sense.". Do not re-add
+  it without re-running that gate.
+- **"hay" is a greeting.** Whisper writes "Hay Area" for "Hey Aria" on four of
+  six voices — the only remaining miss once the hint was dropped. With it,
+  both models score 36/36 with 0 false wakes.
+- **`tiny.en` is reverted.** Its accuracy win was measured on *one* synthesised
+  voice, which is why the gate passed while the thing was broken. **A corpus of
+  one speaker cannot measure a wake word.**
+- **The synthetic gate can no longer separate the models** (both 36/36), which
+  is itself the finding: it is a floor, not a verdict. The live log is what
+  chose base.en.
+
+### Two silence thresholds, not one
+- Scanning the room needs only an utterance boundary (500ms). Somebody
+  composing a question pauses to think, and cutting them off there is what
+  makes her feel absent — so an *armed* capture allows 1100ms
+  (`ARMED_TRAILING_SILENCE_MS`).
+- **A false start must not disarm her.** A cough after "Aria" used to open a
+  capture, produce nothing, and drop to `WAITING` with the window gone, so the
+  question needed a second "Aria". `_rearm()` restores the window with whatever
+  time is left.
+- **Blue means she is listening to *you*.** `_begin_capture` set `LISTENING` on
+  every speculative capture, so the rim lit for any noise in the room and then
+  went out — saying "I heard you" to someone about to be ignored. It is set
+  only once the name is confirmed, or when the wake *model* fires, which is
+  its own confirmation.
+
 ## Measuring answer quality
 Two suites, both mechanical — no model grades another model.
 

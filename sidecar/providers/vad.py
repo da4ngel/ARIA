@@ -37,6 +37,13 @@ THRESHOLD = 0.5
 # survives the pause inside a sentence; below about 400 it starts cutting
 # people off mid-thought, which is far worse than waiting.
 TRAILING_SILENCE_MS = 500
+
+# Once she has actually been called, the pause is allowed to be much longer.
+# These are two different situations wearing the same name: scanning the room
+# for her name only needs enough silence to bound an utterance, but somebody
+# composing a question mid-sentence pauses to think, and cutting them off there
+# is the thing that makes her feel like she is not listening.
+ARMED_TRAILING_SILENCE_MS = 1100
 MAX_UTTERANCE_S = 30.0
 # Speech this brief is a cough or a door, not a sentence worth transcribing.
 MIN_SPEECH_MS = 200

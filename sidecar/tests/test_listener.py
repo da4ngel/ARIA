@@ -23,7 +23,13 @@ from sidecar.core.listener import (
     starts_with_wake_phrase,
     strip_wake_word,
 )
-from sidecar.providers.vad import FRAME_SAMPLES, SAMPLE_RATE, Endpoint, Utterance
+from sidecar.providers.vad import (
+    ARMED_TRAILING_SILENCE_MS,
+    FRAME_SAMPLES,
+    SAMPLE_RATE,
+    Endpoint,
+    Utterance,
+)
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
 FRAME_MS = FRAME_SAMPLES / SAMPLE_RATE * 1000  # 32ms
@@ -247,7 +253,8 @@ async def test_a_full_utterance_becomes_a_spoken_turn(parts) -> None:
     for _ in range(10):  # ~800ms of speech
         await listener.feed(frame())
     vad.speech = False
-    for _ in range(12):  # past the 700ms trailing silence
+    # A wake-word capture is an armed one, so it gets the longer pause.
+    for _ in range(int(ARMED_TRAILING_SILENCE_MS / 80) + 4):
         await listener.feed(frame())
 
     await drain(listener)
@@ -540,12 +547,17 @@ def test_model_mode_without_a_model_is_refused_loudly() -> None:
 
 
 async def speak(listener: Listener, vad: ScriptedVAD, frames_of_speech: int = 10) -> None:
-    """One utterance: speech, then enough silence to end it."""
+    """One utterance: speech, then enough silence to end it.
+
+    The silence has to clear the *armed* threshold, which is deliberately much
+    longer than the scanning one — somebody composing a question is allowed to
+    pause without being cut off.
+    """
     vad.speech = True
     for _ in range(frames_of_speech):
         await listener.feed(frame())
     vad.speech = False
-    for _ in range(12):
+    for _ in range(int(ARMED_TRAILING_SILENCE_MS / 80) + 4):
         await listener.feed(frame())
     await drain(listener)
 
@@ -766,3 +778,89 @@ async def test_switching_her_off_mid_duck_does_not_leave_her_quiet(phrase) -> No
 
     await listener.disable()
     assert bus.of(Event.AUDIO_RESUME)
+
+
+# ── blue means she is listening to you ────────────────────────────────
+
+
+async def test_room_speech_never_lights_her_up(phrase) -> None:
+    """The rim went blue for every noise in the room and then quietly went out
+    again — which says "I heard you" to someone about to be ignored."""
+    listener, _wake, vad, stt, _conversation, bus = phrase
+    stt.text = "so then he said he would be late"
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    lit = [
+        p
+        for m, p in bus.events
+        if m == str(Event.STATE_CHANGE) and p["state"] == "listening"
+    ]
+    assert not lit
+
+
+async def test_her_name_lights_her_up(phrase) -> None:
+    listener, _wake, vad, stt, _conversation, bus = phrase
+    stt.text = "Aria."
+    await listener.enable()
+
+    await speak(listener, vad)
+
+    assert bus.state is AssistantState.LISTENING
+
+
+# ── a sentence gets to finish ─────────────────────────────────────────
+
+
+async def test_a_pause_mid_question_does_not_end_it(phrase) -> None:
+    """Once called, thinking for most of a second is not the end of a
+    sentence. The scanning threshold would have cut this in half."""
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    stt.text = "Aria."
+    await listener.enable()
+    await speak(listener, vad)
+    armed = listener.state
+
+    stt.text = "what is the capital of Australia"
+    vad.speech = True
+    for _ in range(6):
+        await listener.feed(frame())
+    # A 720ms gap: past the scanning threshold, inside the armed one.
+    vad.speech = False
+    for _ in range(9):
+        await listener.feed(frame())
+    mid_pause = listener.state
+    assert armed is ListenerState.ARMED
+    assert mid_pause is ListenerState.CAPTURING, "it must still be listening"
+
+    vad.speech = True
+    for _ in range(6):
+        await listener.feed(frame())
+    await speak(listener, vad, frames_of_speech=2)
+
+    assert conversation.sent == [("what is the capital of Australia", True)]
+
+
+async def test_a_cough_after_her_name_does_not_disarm_her(phrase) -> None:
+    """It used to: the capture opened, produced nothing, and dropped back to
+    WAITING with the window gone — so the question needed a second "Aria"."""
+    listener, _wake, vad, stt, conversation, _bus = phrase
+    stt.text = "Aria."
+    await listener.enable()
+    await speak(listener, vad)
+    assert listener.state is ListenerState.ARMED
+
+    # Too little speech to be worth transcribing.
+    vad.speech = True
+    await listener.feed(frame(FRAME_SAMPLES))
+    vad.speech = False
+    for _ in range(int(ARMED_TRAILING_SILENCE_MS / 32) + 4):
+        await listener.feed(frame(FRAME_SAMPLES))
+    await drain(listener)
+
+    assert listener.state is ListenerState.ARMED, "still waiting to be asked"
+
+    stt.text = "what time is it"
+    await speak(listener, vad)
+    assert conversation.sent == [("what time is it", True)]

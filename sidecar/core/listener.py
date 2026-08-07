@@ -60,12 +60,14 @@ from typing import TYPE_CHECKING
 import structlog
 
 from sidecar.providers.vad import (
-    FRAME_SAMPLES as VAD_FRAME,
-)
-from sidecar.providers.vad import (
+    ARMED_TRAILING_SILENCE_MS,
     SAMPLE_RATE,
+    TRAILING_SILENCE_MS,
     SileroVAD,
     Utterance,
+)
+from sidecar.providers.vad import (
+    FRAME_SAMPLES as VAD_FRAME,
 )
 from sidecar.rpc.events import AssistantState, Event, EventBus
 
@@ -158,7 +160,11 @@ NAME_SPELLINGS = ("aria", "arya", "ariya", "area", "aaria")
 
 # An optional greeting before it: "aria", "hey aria" and "ok aria" are one
 # request, and no one says the same one every time.
-_GREETING = r"(?:hey|hi|hello|ok|okay|yo)"
+#
+# "hay" is in there because it is what Whisper writes for "hey" in front of a
+# vowel — "Hey Aria, set a timer" came back as "Hay Area set a timer" on four
+# of six voices, and was the only remaining miss in `scripts/gate_name.py`.
+_GREETING = r"(?:hey|hay|hi|hello|ok|okay|yo)"
 
 # Whitespace and punctuation that can follow the name — em and en dashes
 # included, because Whisper writes both and "Aria — what time is it" is one
@@ -327,6 +333,7 @@ class Listener:
         self._frames_since = time.monotonic()
         self._window: asyncio.Task[None] | None = None
         self._needs_name = True
+        self._armed_until = 0.0
         # Whether sound is actually coming out of the speakers, reported by the
         # renderer that owns the audio graph.
         #
@@ -425,6 +432,8 @@ class Listener:
         """
         self._close_window()
         self._state = state
+        if state is ListenerState.ARMED:
+            self._armed_until = time.monotonic() + seconds
         await self._bus.set_state(
             AssistantState.LISTENING if state is ListenerState.ARMED else AssistantState.IDLE
         )
@@ -499,7 +508,9 @@ class Listener:
         # capture twice.
         frame = (np.clip(samples, -1.0, 1.0) * 32767).astype("int16")
         if await self._wake.feed(frame) >= self._wake.threshold:
-            await self._begin_capture(reason="wake", preroll=False)
+            # The model firing *is* the confirmation, so this lights up
+            # immediately and the transcript is not asked for the name again.
+            await self._begin_capture(reason="wake", preroll=False, needs_name=False)
 
     async def _capture(self, samples: np.ndarray) -> None:
         """Capturing: accumulate until the speaker stops or runs out of time."""
@@ -530,7 +541,14 @@ class Listener:
             await self._bus.broadcast(Event.AUDIO_DUCK, {"reason": "speech"})
             log.info("listener.ducked")
 
-        self._utterance = Utterance(self._vad)
+        # Someone answering her has room to think; someone who has not called
+        # her yet only needs an utterance boundary.
+        self._utterance = Utterance(
+            self._vad,
+            trailing_silence_ms=(
+                TRAILING_SILENCE_MS if needs_name else ARMED_TRAILING_SILENCE_MS
+            ),
+        )
         self._vad.reset()
         self._speech_run_ms = 0.0
         self._pending = None
@@ -542,9 +560,23 @@ class Listener:
         self._preroll.clear()
 
         self._state = ListenerState.CAPTURING
-        # Before any I/O: the gate is orb-reacts-within-300ms of the wake word.
-        await self._bus.set_state(AssistantState.LISTENING)
+        # **Only light up once she knows it is for her.** Every capture used to
+        # set LISTENING, so the rim went blue for any noise in the room and
+        # then quietly went out again — which says "I heard you" to someone she
+        # is about to ignore. Blue now means she has been called: it is set on
+        # arming, and a capture that follows arming keeps it.
+        if not needs_name:
+            await self._bus.set_state(AssistantState.LISTENING)
         log.info("listener.capturing", reason=reason)
+
+    async def _rearm(self) -> bool:
+        """Go back to waiting for the question, if there is time left on the
+        window she was called with. Returns whether she is still armed."""
+        remaining = self._armed_until - time.monotonic()
+        if not self._needs_name and remaining > 0.5:
+            await self._open_window(ListenerState.ARMED, remaining, reason="false start")
+            return True
+        return False
 
     async def _unduck(self) -> None:
         """Undo a duck, if one is outstanding.
@@ -583,7 +615,12 @@ class Listener:
                 endpoint=endpoint,
             )
             await self._unduck()
-            await self._bus.set_state(AssistantState.IDLE)
+            # A cough after "Aria" must not disarm her. It used to: the capture
+            # opened, produced nothing, and dropped back to WAITING with the
+            # window gone, so the question that followed was ignored for want
+            # of a second "Aria".
+            if not await self._rearm():
+                await self._bus.set_state(AssistantState.IDLE)
             return
 
         audio = utterance.audio()
@@ -679,7 +716,8 @@ class Listener:
 
         if not text:
             log.info("listener.empty_transcript")
-            await self._bus.set_state(AssistantState.IDLE)
+            if not await self._rearm():
+                await self._bus.set_state(AssistantState.IDLE)
             return
 
         if self._mode is WakeMode.PHRASE and self._needs_name and not addressed:
