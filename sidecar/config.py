@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     # not even told they exist, which is a stronger guarantee than asking.
     allow_danger_tools: bool = False
 
+    # ── The file index (Phase 4b) ────────────────────────────────────
+    # Reads your documents so they can be found by what they say rather than
+    # what they are called. Off would leave `search_content` unavailable and
+    # name search unaffected.
+    #
+    # §9: "a background indexer that makes the machine feel slow will get
+    # uninstalled." 20 files/min is that number, and it pauses entirely while
+    # she is answering or the machine is busy.
+    index_files: bool = True
+    index_files_per_min: int = 20
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)

@@ -80,11 +80,21 @@ pywin32==306
 psutil==6.0.*
 pycaw==20251023
 
+# ── Phase 4: the finder ───────────────────────────────────────────
+# Text extraction for the semantic index. watchfiles is already present via
+# uvicorn[standard] at 1.2.0 rather than §4's 0.24 pin — pinning it down while
+# the sidecar holds its .pyd open fails on Windows, and the API used here is
+# unchanged between them.
+#
+# Embeddings come from Ollama over httpx (`nomic-embed-text`, ~274MB, pulled
+# separately), so there is no embedding library here and no torch.
+pypdf==5.0.*
+python-docx==1.1.*
+openpyxl==3.1.*
+
 # ── Deferred, with the phase that introduces each (BUILD_SPEC §4) ──
 # Phase 1  — (none; Ollama is reached over httpx)
 # Phase 3  — pywinauto==0.6.8 (with focus_window / close_app)
-# Phase 4  — numpy==1.26.*, watchfiles==0.24.*, python-docx==1.1.*,
-#            pypdf==5.0.*, openpyxl==3.1.*
 # Phase 5  — apscheduler==3.10.*
 # Phase 6  — anthropic==0.39.*, mss==9.0.*
 # Phase 7  — playwright==1.47.*

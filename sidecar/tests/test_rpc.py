@@ -34,6 +34,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     # first Whisper load downloads ~150MB and takes ~33s — which turned an
     # 11-second suite into minutes of silence.
     monkeypatch.setenv("ARIA_VOICE_ENABLED", "false")
+    # Nor on the file indexer, which otherwise walks the *real* Documents,
+    # Desktop and Downloads of whoever runs the suite — reading their
+    # spreadsheets, and taking as long as that takes.
+    monkeypatch.setenv("ARIA_INDEX_FILES", "false")
     get_settings.cache_clear()
     try:
         # TestClient's context manager is what runs the lifespan.

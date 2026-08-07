@@ -19,6 +19,7 @@ from sidecar.memory.db import Database
 if TYPE_CHECKING:
     from sidecar.core.conversation import ConversationService
     from sidecar.core.listener import Listener
+    from sidecar.memory.indexer import Indexer
     from sidecar.memory.settings_store import SettingsStore
     from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
@@ -55,6 +56,8 @@ class Runtime:
     listener: Listener | None = None
     # The tier engine. None means she has no hands this session.
     permissions: PermissionEngine | None = None
+    # Reads documents in the background so they can be found by meaning.
+    indexer: Indexer | None = None
 
     @property
     def db_ready(self) -> bool:
@@ -100,6 +103,7 @@ class Runtime:
         self.stt_warm = None
         self.listener = None
         self.permissions = None
+        self.indexer = None
 
 
 runtime = Runtime()

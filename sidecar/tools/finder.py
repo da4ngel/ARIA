@@ -404,3 +404,159 @@ async def open_file(ctx: ToolContext, query: str) -> ToolResult:
         summary=f"Opened {_describe(chosen)}.{others}",
         display={"chosen": str(chosen.path), "others": [str(f.path) for f in found[1:]]},
     )
+
+
+# ── search by meaning, and the two together ──────────────────────────
+
+
+class _Semantic:
+    """Holds the pieces the content search needs.
+
+    A module-level holder rather than something on `ToolContext`, because a
+    tool takes only what the model can supply and neither a database handle
+    nor an embeddings client is that. Startup fills it in; when it is empty
+    the content search says so instead of failing.
+    """
+
+    def __init__(self) -> None:
+        self.db: object | None = None
+        self.embeddings: object | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.db is not None and self.embeddings is not None
+
+
+SEMANTIC = _Semantic()
+
+
+@tool(
+    name="search_content",
+    tier=Tier.AUTO,
+    description=(
+        "Find files by what is written inside them rather than by filename. "
+        "Use when the user describes a document by its subject or contents — "
+        "'the quotation I sent the banquet hall', 'the invoice about catering' "
+        "— and the words probably do not appear in the file's name."
+    ),
+)
+async def search_content(ctx: ToolContext, query: str, limit: int = 5) -> ToolResult:
+    """Find files by what they say.
+
+    Args:
+        query: What the document is about, in your own words
+        limit: How many files to return at most
+    """
+    wanted = query.strip()
+    if not wanted:
+        return ToolResult(ok=False, summary="Tell me what to look for.", error="empty")
+    if not SEMANTIC.ready:
+        return ToolResult(
+            ok=False,
+            summary=(
+                "I have not indexed your documents yet, so I can only search "
+                "by filename at the moment."
+            ),
+            error="not_indexed",
+        )
+
+    from sidecar.memory.indexer import search_chunks
+
+    started = time.perf_counter()
+    try:
+        hits = await search_chunks(SEMANTIC.db, SEMANTIC.embeddings, wanted, limit=limit * 3)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 — falling back to names is fine
+        return ToolResult(
+            ok=False, summary=f"I could not search inside your files: {exc}", error=str(exc)
+        )
+    took = round((time.perf_counter() - started) * 1000)
+
+    # Chunks collapse to files: five hits in one document is one answer.
+    best_per_file: dict[str, tuple[float, str]] = {}
+    for path, text, distance in hits:
+        if path not in best_per_file or distance < best_per_file[path][0]:
+            best_per_file[path] = (distance, text)
+    ordered = sorted(best_per_file.items(), key=lambda kv: kv[1][0])[:limit]
+
+    if not ordered:
+        return ToolResult(
+            ok=True, data=[], summary=f"Nothing I have read mentions {wanted!r}."
+        )
+
+    listed = "; ".join(Path(p).name for p, _ in ordered)
+    return ToolResult(
+        ok=True,
+        data=[p for p, _ in ordered],
+        summary=f"Found {len(ordered)} by content: {listed}.",
+        display={
+            "took_ms": took,
+            "files": [
+                {"path": p, "name": Path(p).name, "excerpt": text[:280], "distance": distance}
+                for p, (distance, text) in ordered
+            ],
+        },
+    )
+
+
+#: Reciprocal rank fusion's damping constant. 60 is the usual choice and the
+#: results are not sensitive to it; what matters is that a file ranked well by
+#: either method beats one ranked moderately by both.
+_RRF_K = 60
+
+
+@tool(
+    name="find",
+    tier=Tier.AUTO,
+    description=(
+        "Find a file when you are not sure whether the words are in its name "
+        "or in its contents. Searches both and merges the results. Prefer this "
+        "over search_files or search_content when the request is vague."
+    ),
+)
+async def find(ctx: ToolContext, query: str, limit: int = 5) -> ToolResult:
+    """Search filenames and file contents together.
+
+    Args:
+        query: What to look for, in whatever words come naturally
+        limit: How many files to return at most
+    """
+    wanted = query.strip()
+    if not wanted:
+        return ToolResult(ok=False, summary="Tell me what to look for.", error="empty")
+
+    by_name, backend = await find_files(wanted, limit=limit * 3)
+    ranks: dict[str, float] = {}
+    via: dict[str, set[str]] = {}
+
+    for position, item in enumerate(by_name):
+        key = str(item.path)
+        ranks[key] = ranks.get(key, 0.0) + 1.0 / (_RRF_K + position + 1)
+        via.setdefault(key, set()).add("name")
+
+    if SEMANTIC.ready:
+        content = await search_content(ctx, query=wanted, limit=limit * 3)
+        if content.ok and content.data:
+            for position, path in enumerate(content.data):
+                ranks[path] = ranks.get(path, 0.0) + 1.0 / (_RRF_K + position + 1)
+                via.setdefault(path, set()).add("content")
+
+    if not ranks:
+        return ToolResult(
+            ok=True,
+            data=[],
+            summary=f"I could not find anything matching {wanted!r}.{_install_hint(backend)}",
+        )
+
+    ordered = sorted(ranks.items(), key=lambda kv: -kv[1])[:limit]
+    listed = "; ".join(f"{Path(p).name} (by {'+'.join(sorted(via[p]))})" for p, _ in ordered)
+    return ToolResult(
+        ok=True,
+        data=[p for p, _ in ordered],
+        summary=f"Found {len(ordered)}: {listed}.",
+        display={
+            "files": [
+                {"path": p, "name": Path(p).name, "matched_via": sorted(via[p])}
+                for p, _ in ordered
+            ]
+        },
+    )

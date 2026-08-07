@@ -29,6 +29,7 @@ from sidecar.handshake import (
 )
 from sidecar.logging_setup import configure_logging
 from sidecar.memory.db import Database
+from sidecar.memory.indexer import Indexer
 from sidecar.memory.messages import ConversationStore
 from sidecar.memory.settings_store import (
     ROUTING_BIAS,
@@ -41,6 +42,7 @@ from sidecar.providers import catalog
 from sidecar.providers.availability import AvailabilityService
 from sidecar.providers.base import LLMProvider, ProviderError
 from sidecar.providers.connectivity import connectivity
+from sidecar.providers.embeddings import OllamaEmbeddings
 from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
@@ -52,6 +54,8 @@ from sidecar.providers.wakeword import OpenWakeWord, missing_models
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
+from sidecar.tools import finder
+from sidecar.tools.files import known_folder
 from sidecar.tools.permissions import PermissionEngine
 
 log = structlog.get_logger(__name__)
@@ -177,6 +181,7 @@ async def _start_conversation(settings: Settings) -> None:
     )
 
     await _build_listener(settings, settings_store)
+    _build_indexer(settings)
 
     if not settings.warm_on_startup:
         return
@@ -317,6 +322,37 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
     if wanted:
         await listener.enable()
     log.info("listener.ready", mode=str(mode), enabled=listener.enabled)
+
+
+def _build_indexer(settings: Settings) -> None:
+    """Start reading documents in the background, if that is wanted.
+
+    Deliberately last in startup and deliberately lazy: it must never be the
+    reason the window takes longer to appear, and the first thing it does is
+    ask whether the machine is busy.
+    """
+    if not settings.index_files:
+        log.info("indexer.disabled")
+        return
+
+    roots = [p for p in (known_folder(n) for n in ("documents", "desktop", "downloads")) if p]
+    if not roots:
+        return
+
+    embeddings = OllamaEmbeddings(settings.ollama_url)
+    indexer = Indexer(
+        runtime.require_db(),
+        embeddings,
+        roots,
+        files_per_min=settings.index_files_per_min,
+        # The one input that keeps a turn quick: while she is answering, the
+        # indexer stops entirely rather than competing for the same cores.
+        is_busy=lambda: bool(runtime.conversation and runtime.conversation.busy),
+    )
+    runtime.indexer = indexer
+    finder.SEMANTIC.db = runtime.require_db()
+    finder.SEMANTIC.embeddings = embeddings
+    indexer.start()
 
 
 def _resolve_bias(stored: object) -> RoutingBias:

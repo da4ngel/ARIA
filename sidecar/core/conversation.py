@@ -259,6 +259,16 @@ class ConversationService:
         self._selected = model_id
 
     @property
+    def busy(self) -> bool:
+        """Whether a turn is in flight.
+
+        Read by the file indexer, which stops entirely while she is answering:
+        a turn has a ~1s budget and background embedding competes for the same
+        cores (§9 Phase 4b).
+        """
+        return any(not task.done() for task in self._tasks.values())
+
+    @property
     def selected_model(self) -> str:
         return self._selected
 

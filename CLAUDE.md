@@ -33,11 +33,42 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - Small functions. If it exceeds ~50 lines, split it.
 - Error messages must say what to do next, not just what failed.
 
+## Phase 4 — the finder (2026-08-07)
+`open_path`, `search_files`, `open_file`, `search_content`, `find`.
+
+- **`num_gpu: 0` on every embedding call.** Rule 2, and CLAUDE.md already
+  records what two models on a 6GB card does. Verified with `ollama ps`:
+  `nomic-embed-text 376MB 100% CPU` beside `qwen2.5:7b 5.1GB 18%/82%` — both
+  resident, generation undisturbed. 752ms cold, ~154ms per chunk after.
+- **The throttle is the feature**, not a detail: 20 files/min, and paused
+  entirely while `conversation.busy` or the CPU is over 60%. §9 is blunt about
+  why — an indexer that makes the machine feel slow gets uninstalled.
+- **Everything is not installed here**, so the bounded scan is what runs:
+  Documents, Desktop, Downloads, depth- and time-limited, 163–185ms, cached
+  45s. A deliberate deviation from "tell him to install it" — a feature that
+  does nothing until you install a second program is a poor answer to "say
+  open cv and get my CV". The message still names Everything.
+- **Ranking reuses `tools/apps.score` unchanged.** A filename is the same
+  problem as an app name. Recency is a quarter-weight tiebreaker: "the latest
+  CV" still has to be a CV, and a newer `budget_2026.xlsx` must not answer
+  "cv" — that is a test.
+- **Filler words are stripped first.** Without it "my cv" returned nothing:
+  the model forwards the phrase, not the noun inside it.
+- **`AppData` is in the skip list**, which is correct and also means anything
+  under `%TEMP%` is invisible to the indexer — the first end-to-end probe
+  indexed zero files for exactly that reason.
+- **Tests must set `ARIA_INDEX_FILES=false`.** The RPC fixture runs the real
+  lifespan, which otherwise walks the real Documents of whoever runs the suite.
+- **Measured gate**: "the quotation I sent the banquet hall" finds
+  `doc_final_v3.txt`, whose name contains none of those words.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
-Phase 3 in progress: the tool contract, the tier engine and six tools are
-built and tested; the model has not yet been driven against them end to end.
-Remaining: the other 13 tools, relevance-based selection, ToolCallCard.
+Phase 3 built and exercised against real models. Phase 4 built: name search,
+find-and-open, and the semantic index. Ten tools registered.
+Remaining: relevance-based tool selection (the cap is ~12 and there are now
+10, so it is due), `organize_folder` + undo, focus_window/close_app,
+ToolCallCard, and Everything for whole-disk search.
 
 ## Phase 2 stage 1 — she speaks (2026-08-06)
 kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
