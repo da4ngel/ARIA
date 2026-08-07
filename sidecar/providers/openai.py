@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 import structlog
@@ -77,7 +78,15 @@ class OpenAIProvider:
         *,
         model: str,
         options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
+        # Accepted and ignored. Phase 3 runs tools on the local model only, and
+        # the seam requires every provider to take the argument so the router
+        # is free to pick any of them. Ignoring is the documented contract for
+        # a provider that cannot call tools — never a hard failure — but a turn
+        # that needed a tool and landed here will simply answer without one.
+        if tools:
+            log.debug("provider.tools_ignored", provider=self.name, count=len(tools))
         opts = options or GenerationOptions()
         body: dict[str, object] = {
             "model": model,

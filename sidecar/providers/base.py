@@ -26,11 +26,31 @@ class Role(StrEnum):
     TOOL = "tool"
 
 
+class ToolCall(BaseModel):
+    """A model asking for a tool to be run.
+
+    `id` is the provider's handle for the call where it gives one, so a result
+    can be matched back to the request. Ollama does not, so it is minted here
+    and the field is never empty.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatMessage(BaseModel):
     """One turn on the wire to a provider."""
 
     role: Role
     content: str
+    # Set on an assistant turn that asked for tools, so the exchange can be
+    # replayed back to the model with its own request intact.
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    # Set on a Role.TOOL turn, matching the call it answers.
+    tool_call_id: str | None = None
+    # The tool's name on a Role.TOOL turn. Some providers require it.
+    name: str | None = None
 
 
 class StreamDelta(BaseModel):
@@ -44,6 +64,11 @@ class StreamDelta(BaseModel):
     text: str = ""
     thinking: str = ""
     done: bool = False
+
+    # Tools the model wants run. **Not streamed token by token** — providers
+    # emit these whole, on one delta, because a half-parsed argument object is
+    # not something a caller can act on.
+    tool_calls: list[ToolCall] = Field(default_factory=list)
 
     # Populated on the final delta where the provider reports them.
     prompt_tokens: int | None = None
@@ -107,11 +132,16 @@ class LLMProvider(Protocol):
         *,
         model: str,
         options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """Stream a completion.
 
         Cancellation is cooperative: cancelling the consuming task must abort
         the underlying request promptly (Phase 1 gate: within 200ms).
+
+        `tools` is the JSON-schema list from `tools.registry.schemas()`. A
+        provider that cannot call tools ignores it — it must never be a hard
+        failure, because the router may pick that provider for other reasons.
         """
         ...
 
@@ -121,5 +151,22 @@ class LLMProvider(Protocol):
 
 
 def to_wire(messages: list[ChatMessage]) -> list[dict[str, Any]]:
-    """Common `[{role, content}]` shape most chat APIs accept."""
-    return [{"role": str(m.role), "content": m.content} for m in messages]
+    """Common `[{role, content}]` shape most chat APIs accept.
+
+    Tool fields are only included when set, so a provider that knows nothing
+    about tools sees exactly the payload it saw before.
+    """
+    wire: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {"role": str(message.role), "content": message.content}
+        if message.tool_calls:
+            item["tool_calls"] = [
+                {"function": {"name": c.name, "arguments": c.arguments}}
+                for c in message.tool_calls
+            ]
+        if message.tool_call_id is not None:
+            item["tool_call_id"] = message.tool_call_id
+        if message.name is not None:
+            item["name"] = message.name
+        wire.append(item)
+    return wire

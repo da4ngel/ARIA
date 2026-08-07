@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -163,6 +164,7 @@ async def test_reasoning_is_never_spoken(database: Database) -> None:
         async def stream_chat(
             self, messages: list[ChatMessage], *, model: str,
             options: GenerationOptions | None = None,
+            tools: list[dict[str, Any]] | None = None,
         ) -> AsyncIterator[StreamDelta]:
             yield StreamDelta(thinking="The user wants the capital. Let me recall.")
             yield StreamDelta(thinking="It is Canberra, not Sydney.")
@@ -245,6 +247,7 @@ async def test_cancel_tells_the_renderer_to_stop_playing(database: Database) -> 
         async def stream_chat(
             self, messages: list[ChatMessage], *, model: str,
             options: GenerationOptions | None = None,
+            tools: list[dict[str, Any]] | None = None,
         ) -> AsyncIterator[StreamDelta]:
             for _ in range(200):
                 await asyncio.sleep(0.02)

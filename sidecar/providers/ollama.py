@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,6 +25,7 @@ from sidecar.providers.base import (
     ProviderRateLimited,
     ProviderUnavailable,
     StreamDelta,
+    ToolCall,
     to_wire,
 )
 
@@ -48,6 +50,40 @@ def strip_reasoning_artifacts(text: str) -> str:
     if "<" not in text:  # fast path — the overwhelming majority of deltas
         return text
     return _REASONING_TAG.sub("", _REASONING_BLOCK.sub("", text))
+
+
+def _tool_calls_of(message: dict[str, Any]) -> list[ToolCall]:
+    """Ollama's `message.tool_calls` into the seam's shape.
+
+    Ollama gives no id, so one is minted — the executor needs something to
+    match a result back to a request, and an empty string would collide the
+    moment a model asks for two things at once.
+
+    Arguments arrive already parsed as an object, but a model that emits a
+    JSON *string* instead is common enough to be worth handling rather than
+    losing the whole call to a type error.
+    """
+    calls: list[ToolCall] = []
+    for raw in message.get("tool_calls") or []:
+        function = raw.get("function") or {}
+        name = function.get("name")
+        if not name:
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                log.warning("ollama.bad_tool_args", tool=name, raw=arguments[:200])
+                arguments = {}
+        calls.append(
+            ToolCall(
+                id=f"c_{uuid.uuid4().hex[:10]}",
+                name=str(name),
+                arguments=arguments if isinstance(arguments, dict) else {},
+            )
+        )
+    return calls
 
 
 class OllamaProvider:
@@ -131,9 +167,10 @@ class OllamaProvider:
         *,
         model: str,
         options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
         opts = options or GenerationOptions()
-        body = self._build_body(messages, model=model, options=opts)
+        body = self._build_body(messages, model=model, options=opts, tools=tools)
 
         try:
             async with self._client.stream("POST", "/api/chat", json=body) as response:
@@ -161,6 +198,7 @@ class OllamaProvider:
         *,
         model: str,
         options: GenerationOptions,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         ollama_options: dict[str, Any] = {"num_ctx": options.num_ctx}
         if options.temperature is not None:
@@ -170,7 +208,7 @@ class OllamaProvider:
         if options.stop:
             ollama_options["stop"] = options.stop
 
-        return {
+        body: dict[str, Any] = {
             "model": model,
             "messages": to_wire(messages),
             "stream": True,
@@ -179,6 +217,11 @@ class OllamaProvider:
             "keep_alive": KEEP_ALIVE,
             "options": ollama_options,
         }
+        # Omitted entirely when there are none: sending an empty list makes
+        # some builds refuse the request outright.
+        if tools:
+            body["tools"] = tools
+        return body
 
     @staticmethod
     def _parse_line(line: str) -> StreamDelta | None:
@@ -194,6 +237,7 @@ class OllamaProvider:
             text=strip_reasoning_artifacts(message.get("content") or ""),
             thinking=message.get("thinking") or "",
             done=bool(chunk.get("done")),
+            tool_calls=_tool_calls_of(message),
             prompt_tokens=chunk.get("prompt_eval_count"),
             completion_tokens=chunk.get("eval_count"),
         )

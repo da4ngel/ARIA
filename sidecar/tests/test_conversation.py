@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -50,6 +51,7 @@ class FakeProvider:
         *,
         model: str,
         options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamDelta]:
         self.calls.append(messages)
         if self.fail_with:
@@ -396,6 +398,7 @@ async def test_failover_after_partial_output_tells_the_ui_to_discard_it(
             *,
             model: str,
             options: GenerationOptions | None = None,
+            tools: list[dict[str, Any]] | None = None,
         ) -> AsyncIterator[StreamDelta]:
             yield StreamDelta(text="I think the answer is")
             raise ProviderRateLimited("HTTP 429 mid-stream.")
