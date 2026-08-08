@@ -126,10 +126,11 @@ Fifteen tools. `read_file`, `list_folder` (T0), `create_folder` (T1),
   fixed once for `not_addressed`; leaving it here made a voice bug
   undiagnosable.
 
-**Fifteen tools is past §7.2's cap of ~12.** Measured on `qwen2.5:7b` with all
-fifteen: 6/7, including "create a file named hello.txt in downloads" and
-correctly *no* tool for "what is the capital of Australia". It holds for now —
-relevance-based selection is the next thing due.
+**Fifteen tools is past §7.2's cap of ~12, and that turned out to be fine.**
+Measured on `qwen2.5:7b` with all fifteen: 16/17, including "create a file
+named hello.txt in downloads" and correctly *no* tool for "what is the capital
+of Australia". Filtering them down scored **9/17** — see the closed
+relevance-selection section below before reaching for that cap again.
 
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
@@ -137,9 +138,11 @@ Phase 3 built and exercised against real models. Phase 4 built: name search,
 find-and-open, and the semantic index. Ten tools registered.
 Shell reworked 2026-08-08: sidebar rail, window controls, glass on every
 surface, and a catalog that discovers models rather than listing them by hand.
-Remaining: **relevance-based tool selection — now 17 tools against a cap of ~12,
-so it is overdue and is the next thing to build**; `organize_folder` + undo;
-focus_window/close_app; ToolCallCard; Everything for whole-disk search.
+Relevance-based tool selection is **closed, measured, and not being built** —
+filtering made tool choice worse (16/17 -> 9/17). See its section above.
+Remaining: `organize_folder` + undo; focus_window/close_app; ToolCallCard;
+Everything for whole-disk search; and the Gemini half of `measure_models.py`,
+which could not run while that key is quota-exhausted.
 
 ## Phase 2 stage 1 — she speaks (2026-08-06)
 kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
@@ -786,6 +789,37 @@ routable. `by_class` is untouched, so the hand-pick-only property still holds.
 
 **The Gemini free tier is quota-exhausted** — 429 on a one-word call to
 flash-lite. Not a bug here; the whole Gemini half of the battery could not run.
+
+## Closed: relevance-based tool selection is NOT worth building (2026-08-09)
+    python scripts/gate_tool_selection.py
+
+Carried as "overdue" since Phase 3 on the strength of §7.2's ~12-tool cap. It
+was never measured. Measured now, on `qwen2.5:7b` with 17 probes:
+
+| tools offered | correct |
+|---|---|
+| **all 15** | **16/17** |
+| a filtered 8 | **9/17** |
+
+**Filtering makes it worse, badly.** A correct tool that was filtered out cannot
+be chosen, so selection converts right answers into wrong ones — `set_volume`,
+`list_windows` and `rename_file` all became "no tool at all", and
+`move budget.xlsx to documents` became `open_path`.
+
+And the selector cannot be made safe by tuning `k`. Embedding recall is
+**14/15 at every size from 6 to 12**, because the one miss — `find` for "the
+quotation I sent the banquet hall" — ranks **dead last of fifteen**. The
+semantic-search tool scores worst for a semantic-search query, so no threshold
+rescues it.
+
+There is a third reason that needs no measurement: **tool schemas live in the
+stable prefix so Ollama's KV cache can hold them.** A set that changes with the
+message invalidates that prefix whenever the topic moves, so selection would
+*spend* prefill rather than save it. The 1654 tokens of schemas are prefilled
+once and reused; that is the whole point of stable-first ordering.
+
+§7.2's cap is a rule of thumb. This machine's evidence overrides it. Re-run the
+gate when the tool count grows — the number to watch is recall, not the cap.
 
 ## Acrylic was on, and painted over (2026-08-09)
 "I asked for glass everywhere and I can't see it" was correct.
