@@ -295,3 +295,59 @@ async def test_open_path_opens_a_real_folder(tmp_path: Path) -> None:
     result = await open_path(CTX, path=str(tmp_path))
     assert result.ok
     assert result.data["kind"] == "folder"
+
+
+# ── the matcher must not substitute one app for another ───────────────
+# Measured on five models: every one of them sent the right argument and the
+# matcher opened something else. Both defects are here.
+
+
+def test_punctuation_that_names_a_different_product_is_not_folded_away() -> None:
+    """`normalise("notepad++")` is `"notepad"`, which scored an exact 1.00
+    against the real Notepad — so asking for one opened the other."""
+    entries = [AppEntry("Notepad", "notepad.exe", Launch.EXECUTABLE)]
+    assert best("notepad++", entries) is None
+    assert best("notepad plus plus", entries) is None
+    # And the real one is untouched.
+    assert best("notepad", entries) is not None
+
+
+def test_the_symbol_guard_is_one_directional() -> None:
+    """Asking for "notepad" may well mean Notepad++; the ranking can decide.
+    Asking for "notepad++" cannot mean Notepad."""
+    plus = [AppEntry("Notepad++", "notepad++.exe", Launch.EXECUTABLE)]
+    assert best("notepad++", plus) is not None
+    assert best("notepad", plus) is not None
+
+
+def test_a_shared_symbol_still_matches() -> None:
+    entries = [AppEntry("C++ Redistributable", "vc.exe", Launch.EXECUTABLE)]
+    assert best("c++", entries) is not None
+
+
+def test_hyphens_and_dots_are_still_noise() -> None:
+    """Only `+` and `#` name a different product. The 7-Zip cases depend on
+    everything else still being folded away."""
+    entries = [AppEntry("7-Zip File Manager", "7zFM.exe", Launch.EXECUTABLE)]
+    assert best("7 zip", entries) is not None
+    assert best("seven zip", entries) is not None
+
+
+def test_category_words_are_recognised_before_they_are_matched() -> None:
+    """"browser" scored 0.88 against LockDown Browser and won. A category is
+    not a name; Windows already knows which program answers it."""
+    from sidecar.tools.apps import _CATEGORIES, _CATEGORY_FILLER, normalise
+
+    for phrase in ("the browser", "my email", "some music", "open the browser"):
+        words = [w for w in normalise(phrase).split() if w not in _CATEGORY_FILLER]
+        assert " ".join(words) in _CATEGORIES, phrase
+
+
+def test_a_real_name_is_not_treated_as_a_category() -> None:
+    from sidecar.tools.apps import default_app
+
+    # Resolved before the fuzzy bands but after exact, so these must not even
+    # be recognised as categories — "chrome" is a browser but it is also a name.
+    assert default_app("chrome") is None
+    assert default_app("brave") is None
+    assert default_app("spotify") is None

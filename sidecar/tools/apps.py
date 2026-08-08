@@ -15,6 +15,7 @@ actually arrive.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -198,6 +199,40 @@ def normalise(text: str) -> str:
     return " ".join(_NUMBER_WORDS.get(word, word) for word in lowered.split())
 
 
+#: Punctuation that names a *different product* rather than decorating the same
+#: one. Everything else — hyphens, dots, spaces — is noise that `normalise`
+#: is right to throw away; these two are not.
+_MEANINGFUL_SYMBOLS = "+#"
+
+#: How they are said out loud, which is how they arrive from speech.
+_SPOKEN_SYMBOLS = ((" plus plus", "++"), (" sharp", "#"), (" plus", "+"))
+
+
+def signature(text: str) -> str:
+    """`normalise`, but keeping the symbols that distinguish one app from another.
+
+    `normalise("notepad++")` is `"notepad"`, which scored an **exact 1.00**
+    against the real Notepad — so asking for Notepad++ opened Notepad and she
+    reported having opened Notepad++. Measured on all five models; every one of
+    them sent the right argument and the matcher substituted a different app.
+    """
+    lowered = text.lower().strip()
+    for spoken, symbol in _SPOKEN_SYMBOLS:
+        if lowered.endswith(spoken):
+            lowered = lowered[: -len(spoken)] + symbol
+            break
+    return "".join(c for c in lowered if c.isalnum() or c in _MEANINGFUL_SYMBOLS)
+
+
+def _loses_a_symbol(query: str, candidate: str) -> bool:
+    """Whether the query names something the candidate demonstrably is not.
+
+    Only in this direction. Asking for "notepad" may well mean Notepad++ and
+    the ranking can decide; asking for "notepad++" cannot mean Notepad.
+    """
+    return bool(set(signature(query)) & set(_MEANINGFUL_SYMBOLS) - set(signature(candidate)))
+
+
 #: Below this, nothing matches. Without a floor a nonsense name always resolves
 #: to *something*, and opening the wrong app is worse than opening nothing —
 #: which "open youtube" launching YouTube Music already demonstrated.
@@ -214,6 +249,11 @@ def score(query: str, candidate: str) -> float:
     """
     q, c = normalise(query), normalise(candidate)
     if not q or not c:
+        return 0.0
+    # Before any band: "notepad++" is not a fuzzy way of saying "Notepad", it
+    # is a different program. Zero rather than a demotion, because every band
+    # below would still put it above `MATCH_FLOOR` and open the wrong thing.
+    if _loses_a_symbol(query, candidate):
         return 0.0
     if q == c:
         return 1.0
@@ -355,6 +395,159 @@ def _registered_executables() -> list[AppEntry]:
     return entries
 
 
+# ── "the browser", "my email", "some music" ──────────────────────────
+# A category is not a name, and matching it like one picks nonsense: measured,
+# "browser" scored 0.88 against **LockDown Browser** and won, while the actual
+# default is Brave. "music" reached YouTube Music, "email" reached Mail.
+#
+# Windows already knows the answer to every one of these — it is the handler
+# the user themselves chose — so ask it instead of guessing from a substring.
+
+#: The word said, and the association that answers it. `url` keys live under
+#: UrlAssociations, `ext` keys under FileExts; both end at a ProgId.
+_CATEGORIES: dict[str, tuple[str, str]] = {
+    "browser": ("url", "http"),
+    "web browser": ("url", "http"),
+    "internet": ("url", "http"),
+    "web": ("url", "http"),
+    "email": ("url", "mailto"),
+    "e mail": ("url", "mailto"),
+    "mail": ("url", "mailto"),
+    "inbox": ("url", "mailto"),
+    "music": ("ext", ".mp3"),
+    "music player": ("ext", ".mp3"),
+    "pdf": ("ext", ".pdf"),
+    "pdf reader": ("ext", ".pdf"),
+    "text editor": ("ext", ".txt"),
+    "photos": ("ext", ".jpg"),
+    "photo viewer": ("ext", ".jpg"),
+    "video player": ("ext", ".mp4"),
+}
+
+#: Words people put around the category. "open my email" is "email".
+_CATEGORY_FILLER = frozenset(
+    {"the", "my", "a", "an", "some", "default", "up", "app", "open", "launch", "start", "please"}
+)
+
+
+def _user_choice(kind: str, key: str) -> str | None:
+    """The ProgId the user picked for this association, if they picked one."""
+    import winreg
+
+    path = (
+        rf"SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\{key}\UserChoice"
+        if kind == "url"
+        else rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{key}\UserChoice"
+    )
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as handle:
+            prog_id, _ = winreg.QueryValueEx(handle, "ProgId")
+    except OSError:
+        return None
+    return str(prog_id) or None
+
+
+def _entry_for_prog_id(prog_id: str) -> AppEntry | None:
+    """Turn a ProgId into something launchable.
+
+    Three shapes, in the order they are worth having: a real command line, then
+    an AppUserModelID for Store apps that have no exe to point at, and a label
+    from whichever of `ApplicationName` or the key's own default value is a
+    readable string. `ApplicationName` is sometimes an unresolved
+    `@{…ms-resource://…}` reference, which is not a name.
+    """
+    import winreg
+
+    label: str | None = None
+    command: str | None = None
+    aumid: str | None = None
+
+    # HKEY_CLASSES_ROOT, not the two hives separately: it is the merged view
+    # Windows itself resolves associations through, so per-user entries and
+    # machine-wide ones arrive already in the right precedence.
+    try:
+        root = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog_id)
+    except OSError:
+        return None
+
+    with root:
+        with contextlib.suppress(OSError):
+            default, _ = winreg.QueryValueEx(root, "")
+            if isinstance(default, str) and default.strip():
+                label = default.strip()
+
+        with contextlib.suppress(OSError), winreg.OpenKey(root, "Application") as handle:
+            with contextlib.suppress(OSError):
+                raw, _ = winreg.QueryValueEx(handle, "ApplicationName")
+                text = str(raw).strip()
+                # Sometimes an unresolved `@{…ms-resource://…}` reference, which
+                # is a lookup key rather than a name. Notepad's is exactly that.
+                if text and not text.startswith("@{"):
+                    label = text
+            with contextlib.suppress(OSError):
+                raw, _ = winreg.QueryValueEx(handle, "AppUserModelID")
+                aumid = str(raw).strip() or None
+
+        with contextlib.suppress(OSError), winreg.OpenKey(root, r"shell\open\command") as handle:
+            raw, _ = winreg.QueryValueEx(handle, "")
+            command = str(raw)
+
+    if command:
+        # `"C:\...\brave.exe" --single-argument %1` — the exe, not the switches.
+        match = re.match(r'^"([^"]+)"|^(\S+)', command.strip())
+        exe = (match.group(1) or match.group(2)) if match else None
+        if exe and exe.lower().endswith(".exe"):
+            name = label or os.path.splitext(os.path.basename(exe))[0]
+            return AppEntry(name, exe, Launch.EXECUTABLE)
+    if aumid:
+        return AppEntry(label or prog_id, aumid, Launch.APPS_FOLDER)
+    return None
+
+
+def default_app(query: str, entries: list[AppEntry] | None = None) -> AppEntry | None:
+    """The user's chosen handler for a category word, or None if not a category.
+
+    Strips the words people wrap around it, so "open my email" and "the
+    browser" both arrive as the bare category.
+    """
+    words = [w for w in normalise(query).split() if w not in _CATEGORY_FILLER]
+    category = _CATEGORIES.get(" ".join(words))
+    if category is None:
+        return None
+
+    prog_id = _user_choice(*category)
+    if not prog_id:
+        return None
+    entry = _entry_for_prog_id(prog_id)
+    if entry is None:
+        return None
+
+    entry = _readable(entry, entries or [])
+    log.info("apps.default_for_category", asked=query, prog_id=prog_id, opened=entry.label)
+    return entry
+
+
+def _readable(entry: AppEntry, entries: list[AppEntry]) -> AppEntry:
+    """Give a resolved default the name the Start menu already has for it.
+
+    Some ProgIds carry no usable name at all — the music handler's
+    `ApplicationName` is an unresolved resource reference and its default value
+    is empty, which left the label as the literal `AppXqj98qxeaynz6…`. The
+    index knows it as "Media Player"; saying that is the whole point of
+    reporting what was opened.
+    """
+    if not entry.label.lower().startswith(("appx", "{")):
+        return entry
+    target = entry.target.lower()
+    for known in entries:
+        if known.target.lower() == target:
+            return AppEntry(known.label, entry.target, entry.launch)
+    # Nothing better available: `Microsoft.ZuneMusic_8wekyb…!App` still reads
+    # as a name, where the ProgId hash does not.
+    stem = entry.target.split("!")[0].split("_")[0].split(".")[-1]
+    return AppEntry(stem or entry.label, entry.target, entry.launch)
+
+
 def _build_index() -> list[AppEntry]:
     """Every source, merged. Start menu first so its friendlier labels win."""
     entries = _start_apps()
@@ -396,6 +589,10 @@ def _resolve(name: str, entries: list[AppEntry]) -> AppEntry | None:
     An app named exactly this, then a website named exactly this, then an app
     that resembles it. Swapping the middle two is what made "open youtube"
     launch the YouTube Music app.
+
+    A *category* — "the browser", "my email" — is answered before any of that
+    by whatever the user set as their default, because no amount of name
+    matching can turn the word "browser" into the right program.
     """
     query = name.strip()
     normalised = normalise(query)
@@ -403,6 +600,12 @@ def _resolve(name: str, entries: list[AppEntry]) -> AppEntry | None:
     exact = best(query, entries, exact_only=True)
     if exact is not None:
         return exact
+
+    # After exact, so "chrome" still opens Chrome even though it is a browser,
+    # and before fuzzy, which is where "browser" found LockDown Browser.
+    category = default_app(query, entries)
+    if category is not None:
+        return category
 
     if normalised in _SITES:
         return AppEntry(query, _SITES[normalised], Launch.BROWSER)

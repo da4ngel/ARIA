@@ -55,8 +55,21 @@ CASES: list[Case] = [
     ("youtube music", "YouTube Music", "the installed app, not the site"),
     ("spotify", "Spotify", "the app, not the web player"),
     ("calendar", "Calendar", "not Calendar (Microsoft 365)"),
+    # A kind of program, not a name. Answered by whatever the user set as
+    # their default — "browser" used to score 0.88 against LockDown Browser.
+    ("browser", "Brave", "the default browser, not a name that contains it"),
+    ("the browser", "Brave", "filler words stripped"),
+    ("my email", "Outlook", "the default mail handler"),
+    ("music", "Media Player", "the default .mp3 handler, not YouTube Music"),
+    ("chrome", "chrome", "a real name still beats the category"),
     # Must not resolve to anything.
     ("qwertyuiop nonsense", "", "must miss"),
+    # Punctuation that names a different product. Notepad++ is not installed
+    # here, and `normalise` folded it to "notepad", which matched Notepad
+    # exactly — so asking for one opened the other on every model tested.
+    ("notepad++", "", "must miss; it is not Notepad"),
+    ("notepad plus plus", "", "same, said out loud"),
+    ("notepad", "Notepad", "and the real one still opens"),
 ]
 
 
