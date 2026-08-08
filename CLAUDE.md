@@ -720,6 +720,96 @@ Never on the turn path (§10, ~1000ms voice budget): cached in `settings`, loade
 at startup, refreshed only when stale (24h), behind the button, or after a key
 is added.
 
+## "Apps open well for Flash Lite, not other models" — it was the matcher (2026-08-09)
+Two things, and the models were neither. **Smart *is* Flash Lite for these
+turns**: in `quality` bias every non-trivial message went to the FAST class,
+ranked by latency, which flash-lite always won.
+
+The rest was `tools/apps.py`. Probed five models with the real prompt and the
+real 15 schemas — **every one picks `open_app` correctly, 6/6**. They differ in
+the *argument*, and the matcher substituted:
+
+| said | matcher opened |
+|---|---|
+| `notepad++` | **Notepad**, on every model |
+| `browser` | **LockDown Browser** (0.88); the default is Brave |
+| `music` | YouTube Music |
+| `email` | Mail |
+
+- **`normalise("notepad++")` is `"notepad"`**, an exact 1.00 against a different
+  program — so she opened one and reported the other. Only `+` and `#` name a
+  different product; hyphens and dots stay noise, or the 7-Zip cases regress.
+  The guard is **one-directional**: "notepad" may mean Notepad++ and ranking can
+  decide; "notepad++" cannot mean Notepad.
+- **A category is not a name.** Windows already knows which program answers
+  "browser" — it is the handler the user chose. Read `UserChoice`, resolve the
+  ProgId through **`HKEY_CLASSES_ROOT`** (the merged view associations actually
+  resolve through). Checked *after* exact, so "chrome" still opens Chrome.
+- Some ProgIds carry no readable name — the music handler's `ApplicationName`
+  is an unresolved `@{…ms-resource…}` and its default value is empty, which
+  showed the literal `AppXqj98qxeaynz6…` as what was opened. Borrow the Start
+  menu's label for the same target.
+- One prompt line telling her to pass a category phrase through unchanged. It
+  is what Flash Lite already did and the others did not, so it lifts the
+  weakest model rather than the best.
+
+After: all four models agree. `gate_apps.py` **37/37**, up from 29.
+
+## Smart mode routed real work to the cheapest model (2026-08-09)
+Measured: **"write me a python script to sort a file" → `gemini-flash-lite`.**
+`_CODE_HINTS` wanted a code fence or a literal `def `/`import `/`class`, and
+**`_quality_first` never consulted `_DEEP_VERBS` at all**. Both fixed;
+`_WRITES_CODE` catches the plain-English form, and named languages and file
+extensions count as code hints. In `fastest`, the code check now runs **before**
+the short-message shortcut — "fix this python script" is 22 characters and a 7B
+answer to it is worth nothing. Mutation-checked.
+
+## Adopting a discovered model costs a measurement (2026-08-09)
+    python scripts/measure_models.py --models gpt-5.4-mini,gpt-5.4-nano
+
+| model | TTFT | battery | fabricated | over-refused | |
+|---|---|---|---|---|---|
+| `gpt-5.4-nano` | **700ms** | 76/83 | **0** | 0 | adopted |
+| `gpt-5.4-mini` | 960ms | **78/83** | 2 | 0 | adopted |
+| `gpt-5.6-luna` | 1177ms | 74/83 | 3 | 1 | **rejected** |
+| `o4-mini` | 1619ms | 69/83 | 7 | 2 | **rejected** |
+
+**The newest model lost.** Both rejections failed the `grounded` category — the
+control group, plain facts they should simply know. Reading the aggregate alone
+would have adopted luna at 74/83; that is the `qwen3.5:4b` mistake exactly.
+
+`gpt-5.4-nano` at 700ms replaces `gemini-flash-lite` (1236ms) as what Smart
+reaches for first — faster *and* the only model that fabricated nothing.
+
+**Adoption means moving into `CATALOG` by hand**, which is what makes a model
+routable. `by_class` is untouched, so the hand-pick-only property still holds.
+
+**The Gemini free tier is quota-exhausted** — 429 on a one-word call to
+flash-lite. Not a bug here; the whole Gemini half of the battery could not run.
+
+## Acrylic was on, and painted over (2026-08-09)
+"I asked for glass everywhere and I can't see it" was correct.
+`backgroundMaterial: 'acrylic'` was set **together with an opaque
+`backgroundColor: '#0a0c11'`**, which composites straight over the DWM material
+and hides it completely. The acrylic was being applied and then covered on
+every frame. `#00000000` is the fix.
+
+**The 0.86 tint was measured in a world that no longer exists.** It dates from
+`transparent: true` with no compositor blur, where the editor behind read
+straight through. DWM acrylic blurs the backdrop itself, so legibility no
+longer depends on being nearly opaque. Now 0.62.
+
+Verified both directions rather than assumed, by putting known surfaces behind
+the window: a saturated magenta form **bleeds through blurred** (so the acrylic
+composites), and a white document full of black text stays **completely
+unreadable through the panel** while Aria's own text stays crisp (so the tint
+still does its job). If those two ever fight, readability wins and the tint
+goes back up.
+
+The dark fallback for machines without transparency effects moved into CSS
+under `prefers-reduced-transparency`, where it sits *under* the tint instead of
+over the material.
+
 ## Look at the UI. Typecheck and tests do not see it. (2026-08-08)
 Same lesson as VoiceAura, and it bit again. `npm run typecheck`, 56 renderer
 tests and 400+ sidecar tests were all green while the sidebar took **208px of a

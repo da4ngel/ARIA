@@ -68,10 +68,6 @@ export default function App(): JSX.Element {
   // labels and an expanded one could not hide them.
   const sidebar = useSidebar()
   const [overlay, setOverlay] = useState<Overlay>(null)
-  // Expanded, history is a docked column rather than a sheet, so "Chats" has
-  // to mean show/hide that column — otherwise the rail item would be dead in
-  // the one mode where history is most useful.
-  const [historyDocked, setHistoryDocked] = useState(true)
 
   const started = turns.length > 0
   // Real playback beats the sidecar's own state here: `speaking` should mean
@@ -100,19 +96,23 @@ export default function App(): JSX.Element {
   // Audible, because the glow only helps if you are looking at it.
   useWakeChime()
 
-  // One name for "show me my chats", whichever shape they currently take.
-  const toggleChats = useCallback(() => {
-    if (expanded) setHistoryDocked((open) => !open)
-    else setOverlay((o) => (o === 'history' ? null : 'history'))
-  }, [expanded])
-
   const selectSection = useCallback(
-    (section: Section) => {
-      if (section === 'history') toggleChats()
-      else setOverlay((o) => (o === section ? null : section))
-    },
-    [toggleChats],
+    (section: Section) => setOverlay((o) => (o === section ? null : section)),
+    [],
   )
+
+  // Chats live in the menu when there is room, and become a sheet when there
+  // is not. One control either way — the previous split gave the menu a
+  // collapse button and gave the chat list none. Room means the window is
+  // expanded *and* the rail is not collapsed; either alone is not enough.
+  const chatsInMenu = overlay === 'history' && expanded && !sidebar.collapsed
+
+  // Collapsing the menu collapses what is inside it. Chats is part of the menu
+  // now, so leaving it behind as a floating sheet would say the opposite.
+  const toggleSidebar = useCallback(() => {
+    if (chatsInMenu) setOverlay(null)
+    sidebar.toggle()
+  }, [chatsInMenu, sidebar])
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -121,7 +121,7 @@ export default function App(): JSX.Element {
       const ctrl = event.ctrlKey || event.metaKey
       if (ctrl && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        toggleChats()
+        selectSection('history')
       } else if (ctrl && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         void newChat()
@@ -145,14 +145,16 @@ export default function App(): JSX.Element {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [overlay, newChat, toggleExpanded, toggleChats])
+  }, [overlay, newChat, toggleExpanded, selectSection])
 
   const openFromHistory = useCallback(
     (id: string) => {
       void openSession(id)
-      if (!expanded) setOverlay(null)
+      // The docked list stays open — it is the menu. A sheet is covering the
+      // conversation the user just asked to see, so it goes.
+      if (!chatsInMenu) setOverlay(null)
     },
-    [openSession, expanded],
+    [openSession, chatsInMenu],
   )
 
   return (
@@ -173,11 +175,9 @@ export default function App(): JSX.Element {
             named. Always present in both window modes. */}
         <Sidebar
           collapsed={sidebar.collapsed}
-          onToggleCollapsed={sidebar.toggle}
+          onToggleCollapsed={toggleSidebar}
           canExpand={expanded}
-          active={
-            expanded && historyDocked ? 'history' : overlay === 'shortcuts' ? null : overlay
-          }
+          active={overlay === 'shortcuts' ? null : overlay}
           onSelect={selectSection}
           onNewChat={() => void newChat()}
           canNewChat={started}
@@ -185,22 +185,16 @@ export default function App(): JSX.Element {
           orbState={orbState}
           orbLevel={orbLevel}
           listening={handsFree.active}
-        />
-
-        {/* Expanded turns history from a sheet into a permanent column, beside
-            the rail rather than instead of it. 18rem wide, not 16: at the
-            narrower width every title truncated and the time and message count
-            wrapped onto two lines. */}
-        {expanded && historyDocked && (
-          <aside className="relative z-10 w-72 shrink-0 border-r border-white/5" style={noDrag}>
+        >
+          {chatsInMenu && (
             <HistoryPanel
               variant="rail"
               activeSessionId={sessionId}
               onOpen={openFromHistory}
-              onClose={() => undefined}
+              onClose={() => setOverlay(null)}
             />
-          </aside>
-        )}
+          )}
+        </Sidebar>
 
         <div className="relative z-10 flex min-w-0 flex-1 flex-col">
           <header
@@ -305,7 +299,7 @@ export default function App(): JSX.Element {
               permanent column, so opening it again would be a sheet over a
               copy of itself. */}
           <AnimatePresence>
-            {overlay === 'history' && !expanded && (
+            {overlay === 'history' && !chatsInMenu && (
               <HistoryPanel
                 key="history"
                 activeSessionId={sessionId}

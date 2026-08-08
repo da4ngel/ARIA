@@ -2,8 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/* The window is frameless and transparent; the glass panel in App.tsx is the
-   only thing that should paint. */
+/* The window is frameless; the glass panel in App.tsx is what paints.
+   `backgroundColor` on the BrowserWindow is transparent so DWM's acrylic is
+   actually visible — an opaque one composites over the material and hides it,
+   which is exactly what made "glass everywhere" look like a dark rectangle. */
 html,
 body,
 #root {
@@ -11,6 +13,18 @@ body,
   margin: 0;
   background: transparent;
   overflow: hidden;
+}
+
+/* The fallback, and the reason it can live here rather than on the window:
+   where acrylic does apply, this sits *behind* it and is never seen. Where it
+   does not — Windows 10, or transparency effects switched off — this is what
+   keeps the panel a readable dark surface instead of a see-through one.
+
+   `prefers-reduced-transparency` is the browser's name for that setting. */
+@media (prefers-reduced-transparency: reduce) {
+  #root {
+    background: theme('colors.aria.void');
+  }
 }
 
 body {

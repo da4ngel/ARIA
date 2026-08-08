@@ -55,16 +55,38 @@ class RouteDecision(BaseModel):
 # ── signals ───────────────────────────────────────────────────────────
 
 # Verbs that imply real work rather than conversation (§9.7 stage 3).
+#
+# The second line is the way people actually ask. Measured before it existed:
+# "write me a python script to sort a file" matched none of these, so quality
+# mode sent it to the cheapest cloud model. `write`/`build`/`fix` are only deep
+# in company — "write it down", "fix the typo" are not — so they are paired
+# with an object below rather than listed bare.
 _DEEP_VERBS = re.compile(
     r"\b(analys|analyz|compar|plan|strateg|debug|refactor|implement|draft|"
     r"review|summaris|summariz|translat|design|architect|optimis|optimiz|"
-    r"research|investigat|explain how|walk me through)\w*",
+    r"research|investigat|explain how|walk me through|troubleshoot|"
+    r"rewrite|restructure|migrat|benchmark|diagnos)\w*",
+    re.IGNORECASE,
+)
+
+#: Asking for code without using any of the words a parser would recognise.
+#: This is the gap that sent "write me a python script" to Flash Lite.
+_WRITES_CODE = re.compile(
+    r"\b(write|build|create|make|generate|give me|show me)\b[^.?!]{0,40}?"
+    r"\b(script|program|code|function|class|query|regex|snippet|app|"
+    r"component|module|test|algorithm|command)\b",
     re.IGNORECASE,
 )
 
 _CODE_HINTS = re.compile(
     r"(```|\bfunction\b|\bclass\b|\bdef \b|\bimport \b|\bSELECT \b|"
-    r"\berror\b|\bstack trace\b|\btraceback\b|\bregex\b|\bAPI\b)",
+    r"\berror\b|\bstack trace\b|\btraceback\b|\bregex\b|\bAPI\b|"
+    # Named languages and runtimes, and the file extensions that stand in for
+    # them. "sort a file in python" carries no keyword at all otherwise.
+    r"\b(python|javascript|typescript|rust|golang|c\+\+|java|kotlin|swift|"
+    r"sql|bash|powershell|react|django|fastapi|numpy|pandas)\b|"
+    r"\.(py|ts|tsx|js|jsx|rs|go|java|sql|sh|ps1|css|html)\b|"
+    r"\b(stack ?trace|exception|segfault|compile|runtime error|null pointer)\b)",
     re.IGNORECASE,
 )
 
@@ -105,6 +127,7 @@ def needs_deep_model(message: str, step: int = 0) -> bool:
         _THINK_HARD.search(message)
         or step >= 3
         or _CODE_HINTS.search(message)
+        or _WRITES_CODE.search(message)
         or _SEQUENCED.search(message)
     )
 
@@ -181,10 +204,17 @@ class Router:
         return self._fastest(message, usable, step)
 
     def _quality_first(self, message: str, usable: set[str], step: int) -> RouteDecision:
-        """Cloud unless the turn is trivial. The default."""
+        """Cloud unless the turn is trivial. The default.
+
+        `_DEEP_VERBS` is checked here and was not before, which is the whole
+        reason "analyse this" and "write me a python script" were answered by
+        the cheapest model in the catalog. In this bias the user has already
+        said they want the better answer, so a deep verb is enough on its own —
+        `balanced` still requires more.
+        """
         if is_trivial(message):
             return self._local(usable, "Just a greeting — answered locally, instantly.")
-        if needs_deep_model(message, step):
+        if needs_deep_model(message, step) or _DEEP_VERBS.search(message):
             return self._cloud(usable, ModelClass.SMART, "This needs careful reasoning.")
         return self._cloud(usable, ModelClass.FAST, "Answered by a cloud model for quality.")
 
@@ -200,10 +230,17 @@ class Router:
         """Local unless the turn clearly needs more. What voice will want."""
         if _THINK_HARD.search(message) or step >= 3:
             return self._cloud(usable, ModelClass.SMART, "You asked for a careful answer.")
+        # Before the length rule, not after. "fix this python script" is 22
+        # characters and a 7B answer to it is worth nothing — being fast is
+        # the point of this bias, but not at the price of being wrong.
+        if (
+            _CODE_HINTS.search(message)
+            or _WRITES_CODE.search(message)
+            or _SEQUENCED.search(message)
+        ):
+            return self._cloud(usable, ModelClass.SMART, "Looks like code or a multi-step task.")
         if len(message) <= SHORT_MESSAGE_CHARS and not _DEEP_VERBS.search(message):
             return self._local(usable, "Short question — answered locally, faster.")
-        if _CODE_HINTS.search(message) or _SEQUENCED.search(message):
-            return self._cloud(usable, ModelClass.SMART, "Looks like code or a multi-step task.")
         if _DEEP_VERBS.search(message) or len(message) >= LONG_MESSAGE_CHARS:
             return self._cloud(usable, ModelClass.FAST, "Needs more than a quick answer.")
         return self._local(usable, "Ordinary turn — answered locally.")

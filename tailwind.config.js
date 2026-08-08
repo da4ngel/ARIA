@@ -26,10 +26,17 @@ module.exports = {
           // Layered glass. Alpha carries the depth, so these compose over the
           // acrylic backdrop and over each other without extra borders.
           //
-          // The panel tint is deliberately heavy. At 0.72 the editor behind was
-          // legible *through* the conversation — glass has to obscure to be
-          // readable, and the blur underneath supplies the depth, not the alpha.
-          glass: 'rgba(13, 16, 22, 0.86)',
+          // 0.86 was measured **when the window was `transparent: true` and
+          // had no compositor blur at all** — the editor behind read straight
+          // through the conversation, so the alpha had to do all the work.
+          //
+          // DWM acrylic changes that premise: it blurs the backdrop itself, so
+          // legibility no longer depends on being nearly opaque, and at 0.86
+          // the blur it supplies is invisible. This is the number that makes
+          // the glass a glass rather than a dark rectangle. Verified on screen
+          // over a bright editor before it was committed; if it ever fights
+          // readability, readability wins and it goes back up.
+          glass: 'rgba(13, 16, 22, 0.62)',
 
           // Docked chrome — the navigation rail. Lifted off the panel by a
           // white wash rather than tinted darker, so the rail reads as nearer
@@ -37,8 +44,9 @@ module.exports = {
           panel: 'rgba(255, 255, 255, 0.035)',
 
           // Floating sheets. Denser than the panel behind them: a sheet that
-          // shares its backdrop's alpha reads as a hole in the window.
-          pop: 'rgba(17, 21, 28, 0.88)',
+          // shares its backdrop's alpha reads as a hole in the window. These
+          // hold forms and dense text, so they stay the most opaque surface.
+          pop: 'rgba(17, 21, 28, 0.80)',
 
           raised: 'rgba(255, 255, 255, 0.06)',
           sunk: 'rgba(0, 0, 0, 0.28)',

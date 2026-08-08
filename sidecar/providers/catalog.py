@@ -171,6 +171,51 @@ CATALOG: list[ModelInfo] = [
         context_tokens=32768,
     ),
     # ── OpenAI ───────────────────────────────────────────────────────
+    # The two below were discovered by `providers/discovery.py` and adopted on
+    # evidence, by `scripts/measure_models.py` — 83 honesty probes and TTFT
+    # over three warm turns each. They are curated, and therefore routable,
+    # because somebody measured them; that is the only thing that qualifies a
+    # model for Smart mode.
+    #
+    #   | model         | TTFT   | battery | fabricated | over-refused |
+    #   |---------------|--------|---------|------------|--------------|
+    #   | gpt-5.4-nano  |  700ms |   76/83 |          0 |            0 |
+    #   | gpt-5.4-mini  |  960ms |   78/83 |          2 |            0 |
+    #   | gpt-5.6-luna  | 1177ms |   74/83 |          3 |            1 |  rejected
+    #   | o4-mini       | 1619ms |   69/83 |          7 |            2 |  rejected
+    #
+    # **The newest model lost.** `gpt-5.6-luna` and `o4-mini` both failed the
+    # `grounded` category — the control group, plain facts they should simply
+    # know — so neither is here. Reading the aggregate alone would have adopted
+    # luna at 74/83; the same mistake the `qwen3.5:4b` reversal records.
+    ModelInfo(
+        id="gpt-5.4-nano",
+        provider=ProviderName.OPENAI,
+        label="GPT-5.4 nano",
+        klass=ModelClass.FAST,
+        persona=PersonaLevel.FULL,
+        cost=Cost.LOW,
+        best_for=(
+            "The quickest cloud model measured here, and the only one that "
+            "fabricated nothing at all across 83 probes."
+        ),
+        ttft_ms_seed=700,
+        context_tokens=32768,
+    ),
+    ModelInfo(
+        id="gpt-5.4-mini",
+        provider=ProviderName.OPENAI,
+        label="GPT-5.4 mini",
+        klass=ModelClass.BALANCED,
+        persona=PersonaLevel.FULL,
+        cost=Cost.LOW,
+        best_for=(
+            "Best honesty score of anything measured here, and still under a "
+            "second to first token."
+        ),
+        ttft_ms_seed=960,
+        context_tokens=32768,
+    ),
     ModelInfo(
         id="gpt-4.1-mini",
         provider=ProviderName.OPENAI,

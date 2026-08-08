@@ -16,6 +16,7 @@ from sidecar.core.router import (
     needs_deep_model,
 )
 from sidecar.providers import catalog
+from sidecar.providers.catalog import ModelClass
 from sidecar.providers.health import HealthTracker
 
 ALL_MODELS = {m.id for m in catalog.CATALOG}
@@ -289,3 +290,61 @@ def test_speech_never_overrides_an_explicit_cloud_choice(health: HealthTracker) 
         spoken=True,
     )
     assert decision.model.id == "gpt-5"
+
+
+# ── quality mode has to spend where it helps ──────────────────────────
+# Measured before this: "write me a python script to sort a file" routed to
+# gemini-flash-lite, the cheapest and weakest cloud model in the catalog.
+# `_CODE_HINTS` wanted a code fence or a literal `def `/`import `, and
+# `_quality_first` never consulted `_DEEP_VERBS` at all.
+
+CODE_REQUESTS = [
+    "write me a python script to sort a file",
+    "can you write a function that dedupes a list",
+    "how do i sort a list in python",
+    "fix the bug in my react component",
+    "debug this traceback",
+    "generate a regex for email addresses",
+    "make me a bash command to find big files",
+]
+
+
+@pytest.mark.parametrize("message", CODE_REQUESTS)
+def test_code_requests_reach_a_reasoning_model(message: str) -> None:
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    decision = router.choose(message, available=ALL_MODELS)
+    assert decision.model.klass is ModelClass.SMART, f"{message!r} -> {decision.model.id}"
+
+
+@pytest.mark.parametrize("message", ["analyse this spreadsheet for me", "compare these two plans"])
+def test_quality_mode_consults_deep_verbs(message: str) -> None:
+    """The line that was missing. Without it these went to the FAST class."""
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    assert router.choose(message, available=ALL_MODELS).model.klass is ModelClass.SMART
+
+
+def test_a_short_code_request_is_not_answered_locally_to_save_time() -> None:
+    """Even in the latency-first bias. Fast and wrong is not the trade."""
+    router = Router(HealthTracker(), RoutingBias.FASTEST)
+    decision = router.choose("fix this python script", available=ALL_MODELS)
+    assert decision.model.klass is ModelClass.SMART
+
+
+@pytest.mark.parametrize("message", ["hi", "thanks", "ok"])
+def test_greetings_still_never_leave_the_machine(message: str) -> None:
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    assert router.choose(message, available=ALL_MODELS).model.local
+
+
+def test_ordinary_questions_do_not_get_the_expensive_tier() -> None:
+    """The control. Widening the detector must not make everything SMART."""
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    for message in ("what is the capital of Australia", "open calculator", "what time is it"):
+        assert router.choose(message, available=ALL_MODELS).model.klass is not ModelClass.SMART
+
+
+def test_a_spoken_turn_still_stays_local() -> None:
+    """§10 budgets ~1000ms end to end; a network hop does not fit in it."""
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    decision = router.choose("write me a python script", available=ALL_MODELS, spoken=True)
+    assert decision.model.local

@@ -72,6 +72,11 @@ interface SidebarProps {
   /** Shown as a dot on the Voice item, so hands-free state reads without
    *  opening the panel. */
   listening: boolean
+  /** Rendered *inside* the rail, beneath the nav items, when a section that
+   *  docks here is open. Chats used to be a separate column with its own
+   *  width and no collapse control of its own, which is the split this
+   *  removes. */
+  children?: React.ReactNode
 }
 
 export function Sidebar({
@@ -86,15 +91,19 @@ export function Sidebar({
   orbState,
   orbLevel,
   listening,
+  children,
 }: SidebarProps): JSX.Element {
   // The window has the final say. A preference to show labels cannot conjure
   // the width to show them in.
   const collapsed = preferCollapsed || !canExpand
+  // Docked content only exists when there is room to show it, so a collapsed
+  // rail is icons and nothing else.
+  const docked = !collapsed && children ? children : null
   return (
     <nav
       aria-label="Main"
-      className={`glass-panel relative z-20 flex shrink-0 flex-col border-r border-white/5 py-2 transition-[width] duration-200 ease-out ${
-        collapsed ? 'w-[3.25rem] px-1.5' : 'w-52 px-2'
+      className={`glass-panel relative z-20 flex shrink-0 flex-col overflow-hidden border-r border-white/5 py-2 transition-[width] duration-200 ease-out ${
+        collapsed ? 'w-[3.25rem] px-1.5' : docked ? 'w-[19rem] px-2' : 'w-52 px-2'
       }`}
       style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
     >
@@ -156,7 +165,15 @@ export function Sidebar({
         onClick={() => onSelect('tools')}
       />
 
-      <div className="mt-auto" />
+      {/* The section's own content, in the menu rather than beside it. It
+          takes the remaining height, so Settings stays pinned to the bottom. */}
+      {docked ? (
+        <div className="mt-2 flex min-h-0 flex-1 flex-col border-t border-white/5 pt-2">
+          {docked}
+        </div>
+      ) : (
+        <div className="mt-auto" />
+      )}
 
       <Item
         icon={<IconGear />}

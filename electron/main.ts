@@ -227,12 +227,17 @@ function createWindow(): BrowserWindow {
     // read straight through the conversation. `backgroundMaterial` is composited
     // by DWM and actually blurs.
     //
-    // It requires `transparent: false`; the opaque backgroundColor below is the
-    // fallback for anything that will not apply acrylic (Windows 10, or a
-    // machine with transparency effects switched off), where a readable dark
-    // panel is much better than a see-through one.
+    // It requires `transparent: false`, and it requires the window's own
+    // background to be **transparent** — an opaque `backgroundColor`
+    // composites straight over the DWM material and hides it completely.
+    // That is why "glass everywhere" looked like a flat dark rectangle: the
+    // acrylic was being applied and then painted over on every frame.
+    //
+    // The dark fallback for machines that will not apply acrylic (Windows 10,
+    // or transparency effects switched off) moves into CSS, where it sits
+    // *under* the tint instead of over the material.
     transparent: false,
-    backgroundColor: '#0a0c11',
+    backgroundColor: '#00000000',
     backgroundMaterial: 'acrylic',
     alwaysOnTop: true,
     resizable: false,
