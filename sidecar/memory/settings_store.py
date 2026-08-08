@@ -28,6 +28,12 @@ WAKE_WORD_ENABLED = "wake_word_enabled"
 # hand: trust here covers deletion, which is too large a thing to assume on
 # someone's behalf.
 TRUSTED_PATHS = "trusted_paths"
+# What the cloud providers last said they offer, as a list of serialised
+# `ModelInfo`. Cached so the picker fills in at startup without a network
+# round-trip, and so it still lists something when the machine is offline.
+DISCOVERED_MODELS = "discovered_models"
+# When that listing was fetched, ISO-8601. Read to decide whether it is stale.
+DISCOVERED_AT = "discovered_at"
 
 
 class SettingsStore:

@@ -51,6 +51,10 @@ class Cost(StrEnum):
     LOW = "$"
     MEDIUM = "$$"
     HIGH = "$$$"
+    # A discovered model whose price nobody here has looked up. Shown as a
+    # blank, never as a guess: "$" on a model that turns out to be "$$$" is
+    # worse than saying nothing.
+    UNKNOWN = "?"
 
 
 class ModelInfo(BaseModel):
@@ -72,6 +76,10 @@ class ModelInfo(BaseModel):
     # and the other reasoning models reject any value but 1.0, and `openai.py`
     # forwards whatever it is given. Set this only where it was measured.
     temperature: float | None = None
+    # Found by asking the provider what it sells, rather than written down here
+    # after being measured. A discovered model can be chosen by hand but is
+    # never routed to automatically — see `by_class`.
+    discovered: bool = False
 
 
 SMART_ID = "smart"
@@ -212,6 +220,43 @@ CATALOG: list[ModelInfo] = [
 
 _BY_ID = {m.id: m for m in CATALOG}
 
+# ── discovered models ─────────────────────────────────────────────────
+# `CATALOG` above is measured knowledge: latency on this machine, which models
+# fabricate, which reject a temperature. `providers/discovery.py` asks the
+# vendors what else the account can reach, and the answer lands here — beside
+# the catalog, never merged into it.
+#
+# That separation is the whole design. The user chose "hand-pick only": a
+# discovered model can be selected deliberately, but Smart mode keeps routing
+# among the ones with measured behaviour, so what happens when you press send
+# never changes underneath you. `get` and `require` read the overlay so an
+# explicit choice resolves; `by_class` — which is the router's only way to
+# reach for a model — does not. The rule is a property of the data structure
+# rather than a flag someone has to remember to check.
+
+_DISCOVERED: dict[str, ModelInfo] = {}
+
+
+def set_discovered(models: Iterable[ModelInfo]) -> None:
+    """Replace what the providers said they offer.
+
+    A curated id always wins: `gpt-5` appearing in both keeps its measured
+    latency and its caveat rather than being overwritten by a bare listing.
+    """
+    _DISCOVERED.clear()
+    for info in models:
+        if info.id not in _BY_ID:
+            _DISCOVERED[info.id] = info
+
+
+def discovered() -> list[ModelInfo]:
+    return list(_DISCOVERED.values())
+
+
+def all_models() -> list[ModelInfo]:
+    """Everything selectable: measured first, then found."""
+    return [*CATALOG, *_DISCOVERED.values()]
+
 
 class ModelAvailability(BaseModel):
     """A catalog entry plus whether it can actually be used right now."""
@@ -233,11 +278,12 @@ class ModelListing(BaseModel):
 
 
 def get(model_id: str) -> ModelInfo | None:
-    return _BY_ID.get(model_id)
+    """Curated first, then discovered — so an explicit choice always resolves."""
+    return _BY_ID.get(model_id) or _DISCOVERED.get(model_id)
 
 
 def require(model_id: str) -> ModelInfo:
-    info = _BY_ID.get(model_id)
+    info = get(model_id)
     if info is None:
         known = ", ".join(sorted(_BY_ID))
         raise KeyError(f"Unknown model {model_id!r}. Known models: {known}.")
@@ -245,6 +291,12 @@ def require(model_id: str) -> ModelInfo:
 
 
 def by_class(klass: ModelClass) -> list[ModelInfo]:
+    """The router's pool, and **curated only**.
+
+    Reading `all_models()` here would let Smart mode route a turn to a model
+    whose speed, cost and honesty nobody has measured. `test_catalog.py` holds
+    this line; changing it to `all_models()` must fail that test.
+    """
     return [m for m in CATALOG if m.klass is klass]
 
 
@@ -314,7 +366,7 @@ def resolve_availability(
     on_disk = set(pulled)
     entries: list[ModelAvailability] = []
 
-    for info in CATALOG:
+    for info in all_models():
         available, reason = _verdict(info, on_disk, keys)
         observed: float | None = None
 

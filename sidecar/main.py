@@ -20,6 +20,7 @@ from sidecar.config import Settings, get_settings
 from sidecar.core.conversation import ConversationService
 from sidecar.core.listener import Listener, WakeMode
 from sidecar.core.router import Router, RoutingBias
+from sidecar.core.tasks import spawn
 from sidecar.handshake import (
     bearer_from_header,
     clear_handshake,
@@ -142,6 +143,13 @@ async def _start_conversation(settings: Settings) -> None:
 
     settings_store = SettingsStore(runtime.require_db())
     runtime.settings = settings_store
+
+    # The picker fills in from the last listing immediately; a refresh only
+    # happens if that listing is stale, and never on the path of a turn.
+    fresh = await availability.load_discovered(settings_store)
+    if not fresh:
+        spawn(availability.refresh_discovered(settings_store), "discovery")
+
     selected = await settings_store.get(SELECTED_MODEL, catalog.SMART_ID)
     bias = _resolve_bias(await settings_store.get(ROUTING_BIAS, str(RoutingBias.QUALITY)))
 

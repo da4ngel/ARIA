@@ -11,6 +11,44 @@ Read BUILD_SPEC.md for the full architecture. Implement ONE PHASE per session.
 - `pytest sidecar/tests -v` — Python tests
 - `npm test` — renderer tests
 - `ruff check sidecar && mypy sidecar` — lint/typecheck Python
+- `graphify update .` — refresh the knowledge graph after code changes
+
+## Keep the knowledge graph current
+`graphify-out/` holds a knowledge graph of this repo (`graph.json`, `graph.html`,
+`GRAPH_REPORT.md`). **It goes stale the moment code changes, so refresh it as part
+of finishing the work — do not wait to be asked.**
+
+Run this at the end of any session that added, deleted, or edited files under
+`sidecar/`, `src/`, `electron/`, or `scripts/`:
+
+    graphify update .
+
+It re-extracts code via AST only — **no LLM, no API key, no tokens, seconds not
+minutes** — merges into the existing graph, and prints
+`No code-graph topology changes detected` and leaves the outputs untouched when
+nothing structural moved. Safe to run when unsure.
+
+- **`update` is code-only, by design.** Changes to `BUILD_SPEC.md`, `CLAUDE.md`,
+  `README.md`, or any image are invisible to it; those need semantic extraction,
+  which means `/graphify --update` in the assistant (it dispatches subagents).
+  The command says so itself when it finishes.
+- **This CLAUDE.md is in the graph.** Editing it — which every phase does —
+  is exactly the case `graphify update .` will *not* pick up. Roughly once a
+  phase, or after a substantial edit here, run `/graphify --update` instead.
+- **A refactor that deletes code shrinks the graph, and the shrink guard blocks
+  that write** (it exists so a failed extraction cannot silently gut a good
+  graph). Only then, and only when the shrink is genuinely intended, use
+  `graphify update . --force`. Never reach for `--force` to make an error go
+  away.
+- `graphify cluster-only .` re-clusters and regenerates the report from the
+  existing graph without re-extracting anything. Use it when the communities
+  look wrong but the code has not moved.
+- `graphify check-update .` reports whether a semantic re-extraction is pending;
+  it is cron-safe and changes nothing.
+- **Two extractors report known gaps here, both benign**: `settings.local.json`
+  yields zero nodes, and 4 `.sql` migration files are skipped because
+  `tree_sitter_sql` is absent (`pip install "graphifyy[sql]"` to include them).
+  Do not treat either warning as a failed update.
 
 ## Non-negotiable rules
 1. ALL state lives in the Python sidecar. The renderer is a pure view.

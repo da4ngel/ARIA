@@ -200,6 +200,30 @@ async def models_select(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "selected": model_id}
 
 
+@method("models.refresh")
+async def models_refresh(_params: dict[str, Any]) -> dict[str, Any]:
+    """Ask the cloud providers what they offer today, and re-list.
+
+    Deliberately synchronous, unlike the startup refresh: this is behind a
+    button, so the caller wants to know the answer before the list redraws.
+    """
+    from sidecar.providers import catalog
+    from sidecar.state import runtime
+
+    availability = runtime.require_availability()
+    conversation = runtime.require_conversation()
+
+    if runtime.settings is not None:
+        await availability.refresh_discovered(runtime.settings)
+
+    listing = catalog.ModelListing(
+        selected=conversation.selected_model,
+        bias=str(conversation.routing_bias),
+        models=availability.entries(),
+    )
+    return listing.model_dump(mode="json")
+
+
 @method("models.bias")
 async def models_bias(params: dict[str, Any]) -> dict[str, Any]:
     """Read or set what Smart mode optimises for.
@@ -272,6 +296,16 @@ async def settings_set_key(params: dict[str, Any]) -> dict[str, Any]:
     # turn, not the next restart.
     if runtime.availability is not None:
         runtime.availability.refresh_keys()
+        # A key that has just been added unlocks a provider whose models have
+        # never been listed. Detached, so saving a key does not wait on two
+        # network round-trips before the dialog closes.
+        if value is not None and runtime.settings is not None:
+            from sidecar.core.tasks import spawn
+
+            spawn(
+                runtime.availability.refresh_discovered(runtime.settings),
+                "discovery.after_key",
+            )
     return {"ok": True, "status": status(key).model_dump(mode="json")}
 
 

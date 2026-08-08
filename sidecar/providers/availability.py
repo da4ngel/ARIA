@@ -11,14 +11,26 @@ whenever a key changes.
 
 from __future__ import annotations
 
-import structlog
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from sidecar.providers import catalog
-from sidecar.providers.catalog import ModelAvailability, ProviderName
+import structlog
+from pydantic import ValidationError
+
+from sidecar.memory.settings_store import DISCOVERED_AT, DISCOVERED_MODELS
+from sidecar.providers import catalog, discovery
+from sidecar.providers.catalog import ModelAvailability, ModelInfo, ProviderName
 from sidecar.providers.credentials import CredentialKey, get_key
 from sidecar.providers.health import HealthTracker
 
+if TYPE_CHECKING:
+    from sidecar.memory.settings_store import SettingsStore
+
 log = structlog.get_logger(__name__)
+
+#: How long a provider listing is trusted before it is worth re-fetching.
+#: Vendors add models in weeks, not minutes, and this is a network round-trip.
+DISCOVERY_MAX_AGE = timedelta(hours=24)
 
 # Which credential unlocks which provider. Ollama needs none.
 _KEY_FOR: dict[ProviderName, CredentialKey] = {
@@ -56,6 +68,60 @@ class AvailabilityService:
 
     def has_key(self, provider: ProviderName) -> bool:
         return self._keys.get(provider, False)
+
+    # ── discovery ───────────────────────────────────────────────────────
+    # What the cloud vendors say they offer, as opposed to what has been
+    # measured here. Never on the turn path: this is a network round-trip and
+    # §10 budgets ~1000ms end to end for a spoken reply.
+
+    async def load_discovered(self, settings: SettingsStore) -> bool:
+        """Fill the overlay from cache. Returns whether it is still fresh.
+
+        A stale cache is still loaded — an old listing beats an empty picker,
+        and offline is exactly when re-fetching cannot help.
+        """
+        raw = await settings.get(DISCOVERED_MODELS) or []
+        models: list[ModelInfo] = []
+        for item in raw:
+            try:
+                models.append(ModelInfo.model_validate(item))
+            except ValidationError:
+                # The shape changed under a cached row. Drop it and re-fetch
+                # rather than refuse to start.
+                log.warning("discovery.cache_unreadable")
+                return False
+
+        catalog.set_discovered(models)
+        log.info("discovery.restored", count=len(models))
+        return bool(models) and not await self._is_stale(settings)
+
+    async def _is_stale(self, settings: SettingsStore) -> bool:
+        stamp = await settings.get(DISCOVERED_AT)
+        if not isinstance(stamp, str):
+            return True
+        try:
+            fetched = datetime.fromisoformat(stamp)
+        except ValueError:
+            return True
+        return datetime.now(UTC) - fetched > DISCOVERY_MAX_AGE
+
+    async def refresh_discovered(self, settings: SettingsStore) -> list[ModelInfo]:
+        """Ask both providers what they offer, then remember the answer.
+
+        A provider being unreachable costs its own listing and nothing else —
+        `discover_all` already degrades per provider. An empty result is *not*
+        written over a good cache: a flaky network should not erase the picker.
+        """
+        found = await discovery.discover_all()
+        if not found:
+            log.warning("discovery.empty_kept_cache")
+            return catalog.discovered()
+
+        catalog.set_discovered(found)
+        await settings.set(DISCOVERED_MODELS, [m.model_dump(mode="json") for m in found])
+        await settings.set(DISCOVERED_AT, datetime.now(UTC).isoformat())
+        log.info("discovery.refreshed", count=len(found))
+        return found
 
     # ── outputs ─────────────────────────────────────────────────────────
 

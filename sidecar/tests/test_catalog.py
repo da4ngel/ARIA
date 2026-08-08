@@ -6,6 +6,8 @@ If these two ever disagree the UI is lying about what pressing send does, so
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from sidecar.core.context import PersonaLevel
@@ -166,3 +168,98 @@ def test_temperature_defaults_to_none() -> None:
         best_for="test",
     )
     assert probe.temperature is None
+
+
+# ── discovered models ─────────────────────────────────────────────────
+# `providers/discovery.py` asks the vendors what the account can reach. Those
+# models sit *beside* the curated catalog, never inside it, and the reason is
+# this: the user chose "hand-pick only", so Smart mode must keep routing among
+# models whose speed and honesty have actually been measured here.
+
+
+@pytest.fixture
+def discovered() -> Iterator[catalog.ModelInfo]:
+    """One discovered model, removed again afterwards.
+
+    The overlay is module state, so leaving it set would change what every
+    later test sees — which is exactly the failure mode `registry.clear()`
+    caused in `test_tools.py`.
+    """
+    found = catalog.ModelInfo(
+        id="gpt-5.6-luna",
+        provider=ProviderName.OPENAI,
+        label="GPT-5.6 Luna",
+        klass=catalog.ModelClass.SMART,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.UNKNOWN,
+        best_for="",
+        discovered=True,
+    )
+    catalog.set_discovered([found])
+    yield found
+    catalog.set_discovered([])
+
+
+def test_smart_never_routes_to_a_discovered_model(discovered) -> None:
+    """**The load-bearing test of the whole feature.**
+
+    `by_class` is the router's only way to reach for a model. If it ever reads
+    `all_models()`, Smart mode starts choosing models with no measured latency,
+    no known cost and no caveat — silently, on the user's next turn.
+    """
+    for klass in catalog.ModelClass:
+        assert discovered.id not in {m.id for m in catalog.by_class(klass)}
+    assert discovered.id not in {m.id for m in catalog.local_models()}
+
+
+def test_a_discovered_model_can_still_be_chosen_by_hand(discovered) -> None:
+    """The other half: hand-pick only means hand-pick *works*."""
+    assert catalog.get(discovered.id) is discovered
+    assert catalog.require(discovered.id) is discovered
+    # `models.select` validates through `get`, so this is what lets the RPC
+    # accept an id that was never written down here.
+    assert catalog.get("nothing-like-this") is None
+
+
+def test_the_picker_lists_discovered_models(discovered) -> None:
+    entries = catalog.resolve_availability(ALL_PULLED, BOTH_KEYS)
+    assert discovered.id in {e.model.id for e in entries}
+    assert entry_for(entries, discovered.id).available
+
+
+def test_a_discovered_model_still_needs_its_provider_key(discovered) -> None:
+    entries = catalog.resolve_availability(ALL_PULLED, NO_KEYS)
+    verdict = entry_for(entries, discovered.id)
+    assert not verdict.available
+    assert "OpenAI" in (verdict.reason or "")
+
+
+def test_measured_notes_survive_rediscovery() -> None:
+    """`gpt-5` comes back from the API as a bare id with no caveat and no
+    latency. Letting that overwrite the curated entry would quietly discard
+    every measurement in this file."""
+    bare = catalog.ModelInfo(
+        id="gpt-5",
+        provider=ProviderName.OPENAI,
+        label="GPT-5",
+        klass=catalog.ModelClass.BALANCED,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.UNKNOWN,
+        best_for="",
+        discovered=True,
+    )
+    catalog.set_discovered([bare])
+    try:
+        kept = catalog.require("gpt-5")
+        assert kept.discovered is False
+        assert kept.ttft_ms_seed == 2434
+        assert kept.best_for
+        # And it is listed once, not twice.
+        assert [m.id for m in catalog.all_models()].count("gpt-5") == 1
+    finally:
+        catalog.set_discovered([])
+
+
+def test_persona_for_a_discovered_model_is_minimal(discovered) -> None:
+    """Nothing is known about how it behaves, so it gets the safe prompt."""
+    assert catalog.persona_for(discovered.id) is PersonaLevel.MINIMAL
