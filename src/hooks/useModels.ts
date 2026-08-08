@@ -20,6 +20,10 @@ export interface UseModels {
   select: (modelId: string) => Promise<void>
   setBias: (bias: RoutingBias) => Promise<void>
   refresh: () => Promise<void>
+  /** Ask the providers what they offer *today*, rather than re-reading the
+   *  cached listing. A network round-trip, so it is behind a button. */
+  rediscover: () => Promise<void>
+  rediscovering: boolean
 }
 
 export function useModels(connected: boolean): UseModels {
@@ -27,6 +31,7 @@ export function useModels(connected: boolean): UseModels {
   const [selected, setSelected] = useState<string>(SMART_ID)
   const [bias, setBiasState] = useState<RoutingBias>('quality')
   const [loading, setLoading] = useState(false)
+  const [rediscovering, setRediscovering] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -73,5 +78,19 @@ export function useModels(connected: boolean): UseModels {
     [bias],
   )
 
-  return { models, selected, bias, loading, select, setBias, refresh }
+  const rediscover = useCallback(async () => {
+    setRediscovering(true)
+    try {
+      const listing = await window.aria.call<ModelListing>('models.refresh', {})
+      setModels(listing.models)
+      setSelected(listing.selected)
+      setBiasState(listing.bias)
+    } catch {
+      /* the cached listing stays on screen — an empty picker helps nobody */
+    } finally {
+      setRediscovering(false)
+    }
+  }, [])
+
+  return { models, selected, bias, loading, select, setBias, refresh, rediscover, rediscovering }
 }

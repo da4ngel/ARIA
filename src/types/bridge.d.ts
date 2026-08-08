@@ -46,12 +46,15 @@ export interface ModelInfo {
   label: string
   klass: 'fast' | 'balanced' | 'smart' | 'vision'
   persona: 'minimal' | 'full'
-  cost: 'free' | '$' | '$$' | '$$$'
+  /** `'?'` is a discovered model nobody has priced — shown blank, never guessed. */
+  cost: 'free' | '$' | '$$' | '$$$' | '?'
   best_for: string
   ttft_ms_seed: number | null
   caveat: string | null
   local: boolean
   context_tokens: number
+  /** Found by asking the provider, rather than measured and written down. */
+  discovered: boolean
 }
 
 /** A catalog entry plus whether it can be used right now (`models.list`). */
@@ -107,7 +110,10 @@ export interface AriaApi {
     handler: (payload: { level: number; mode: 'listening' | 'speaking' | null }) => void,
   ) => Unsubscribe
   restartBrain: () => void
+  /** Put the window away. She keeps listening — this is close-to-tray. */
   hide: () => void
+  /** Down to the taskbar, the way any other window does it. */
+  minimize: () => void
   /** Grow into a working window, or shrink back to the corner companion. */
   setExpanded: (expanded: boolean) => Promise<boolean>
   isExpanded: () => Promise<boolean>

@@ -30,6 +30,16 @@ module.exports = {
           // legible *through* the conversation — glass has to obscure to be
           // readable, and the blur underneath supplies the depth, not the alpha.
           glass: 'rgba(13, 16, 22, 0.86)',
+
+          // Docked chrome — the navigation rail. Lifted off the panel by a
+          // white wash rather than tinted darker, so the rail reads as nearer
+          // the viewer than the conversation instead of as a cut-out.
+          panel: 'rgba(255, 255, 255, 0.035)',
+
+          // Floating sheets. Denser than the panel behind them: a sheet that
+          // shares its backdrop's alpha reads as a hole in the window.
+          pop: 'rgba(17, 21, 28, 0.88)',
+
           raised: 'rgba(255, 255, 255, 0.06)',
           sunk: 'rgba(0, 0, 0, 0.28)',
 
@@ -88,6 +98,12 @@ module.exports = {
       },
       backdropBlur: {
         glass: '32px',
+        // Docked chrome sits inside the window, so it only has the panel to
+        // blur — a heavier radius there buys nothing and costs compositing.
+        panel: '20px',
+        // Floating sheets blur the conversation underneath, which is text.
+        // This is the radius at which it stops being readable through them.
+        pop: '28px',
       },
       keyframes: {
         rise: {

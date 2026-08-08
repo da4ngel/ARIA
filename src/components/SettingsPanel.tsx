@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
+import { Panel } from '@/components/Panel'
 import type { CredentialStatus } from '@/types/bridge'
 
 const KEY_LABEL: Record<string, string> = {
@@ -141,19 +142,8 @@ export function SettingsPanel({
   )
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col bg-aria-void/85 p-4 backdrop-blur-md animate-rise">
-      <div className="flex items-center justify-between">
-        <h2 className="text-small font-semibold text-aria-text">API keys</h2>
-        <button
-          type="button"
-          onClick={onClose}
-          className="interactive rounded px-2 py-0.5 text-tiny text-aria-muted hover:text-aria-text"
-        >
-          Close
-        </button>
-      </div>
-
-      <div className="mt-3">
+    <Panel title="API keys" onClose={onClose}>
+      <div>
         {keys.map((status) => (
           <KeyRow key={status.key} status={status} onSave={save} />
         ))}
@@ -161,10 +151,10 @@ export function SettingsPanel({
 
       {error && <p className="mt-2 text-tiny text-aria-bad">{error}</p>}
 
-      <p className="mt-auto text-micro leading-relaxed text-aria-muted">
+      <p className="mt-4 text-micro leading-relaxed text-aria-muted">
         Stored in Windows Credential Manager, never in the repo or a .env file. Only the last four
         characters are ever shown. Rotate a key at the address above, then Replace it here.
       </p>
-    </div>
+    </Panel>
   )
 }

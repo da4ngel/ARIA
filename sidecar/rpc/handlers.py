@@ -455,6 +455,31 @@ async def confirm_respond(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": delivered, "expired": not delivered}
 
 
+@method("tools.list")
+async def tools_list(_params: dict[str, Any]) -> dict[str, Any]:
+    """Every registered tool and the tier it runs at (rule 4, rule 6).
+
+    Read-only, and it names the DANGER tools too — `schemas()` hides those
+    from the *model* when they are switched off, but the person deciding what
+    to trust a folder with should be able to see the whole list.
+    """
+    from sidecar.state import runtime
+    from sidecar.tools import registry
+
+    engine = runtime.permissions
+    return {
+        "allow_danger": bool(engine and engine.allow_danger),
+        "tools": [
+            {
+                "name": t.name,
+                "tier": int(t.tier),
+                "description": t.description,
+            }
+            for t in sorted(registry.all_tools(), key=lambda t: (t.tier, t.name))
+        ],
+    }
+
+
 @method("tools.trusted")
 async def tools_trusted(params: dict[str, Any]) -> dict[str, Any]:
     """Read or replace the folders she may act in without asking.

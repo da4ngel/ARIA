@@ -18,6 +18,7 @@ function model(overrides: Partial<ModelInfo> = {}): ModelInfo {
     caveat: null,
     local: false,
     context_tokens: 32768,
+    discovered: false,
     ...overrides,
   }
 }
@@ -35,6 +36,8 @@ function models(overrides: Partial<UseModels> = {}): UseModels {
     select: vi.fn().mockResolvedValue(undefined),
     setBias: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn().mockResolvedValue(undefined),
+    rediscover: vi.fn().mockResolvedValue(undefined),
+    rediscovering: false,
     ...overrides,
   }
 }
@@ -116,5 +119,73 @@ describe('ModelPicker', () => {
     open(props)
     fireEvent.click(screen.getByText('Fastest'))
     expect(props.setBias).toHaveBeenCalledWith('fastest')
+  })
+
+  // ── discovered models ───────────────────────────────────────────────
+  // Found by asking the provider rather than measured here. The picker's job
+  // is to keep that distinction visible: these are selectable, but nothing is
+  // known about them and it must not pretend otherwise.
+
+  const found = (id: string, label: string): ModelAvailability =>
+    entry({
+      model: model({
+        id,
+        label,
+        discovered: true,
+        best_for: '',
+        ttft_ms_seed: null,
+        caveat: null,
+        cost: '?',
+        context_tokens: 400000,
+      }),
+    })
+
+  it('folds discovered models away behind a count', () => {
+    open(models({ models: [entry(), found('gpt-5.6-luna', 'GPT-5.6 Luna')] }))
+    // The measured one is listed; the offered one is not, until asked for.
+    expect(screen.getByText('GPT-5')).toBeDefined()
+    expect(screen.queryByText('GPT-5.6 Luna')).toBeNull()
+    expect(screen.getByText('1 more offered, not measured here')).toBeDefined()
+  })
+
+  it('reveals and selects a discovered model', () => {
+    const props = models({ models: [entry(), found('gpt-5.6-luna', 'GPT-5.6 Luna')] })
+    open(props)
+    fireEvent.click(screen.getByText('1 more offered, not measured here'))
+    fireEvent.click(screen.getByText('GPT-5.6 Luna'))
+    expect(props.select).toHaveBeenCalledWith('gpt-5.6-luna')
+  })
+
+  it('states that a discovered model is unmeasured rather than inventing a blurb', () => {
+    const luna = found('gpt-5.6-luna', 'GPT-5.6 Luna')
+    render(<ModelPicker models={models({ models: [luna], selected: 'gpt-5.6-luna' })} />)
+    fireEvent.click(screen.getByText('GPT-5.6 Luna'))
+    expect(screen.getByText(/Nothing about its speed, cost or accuracy/)).toBeDefined()
+  })
+
+  it('shows no latency and no cost for a model nobody has measured', () => {
+    const luna = found('gpt-5.6-luna', 'GPT-5.6 Luna')
+    render(<ModelPicker models={models({ models: [luna], selected: 'gpt-5.6-luna' })} />)
+    fireEvent.click(screen.getByText('GPT-5.6 Luna'))
+    // A fabricated "$$" here would be worse than saying nothing, which is the
+    // same rule discovery follows on the Python side.
+    expect(screen.queryByText(/measured$/)).toBeNull()
+    expect(screen.queryByText(/^cost /)).toBeNull()
+    expect(screen.getByText('400k context')).toBeDefined()
+  })
+
+  it('leaves the row blank rather than printing a bare question mark', () => {
+    // The fallback used to end at `cost`, so every discovered row showed "?"
+    // in the column where a measured one shows its latency.
+    open(models({ models: [entry(), found('gpt-5.6-luna', 'GPT-5.6 Luna')] }))
+    fireEvent.click(screen.getByText('1 more offered, not measured here'))
+    expect(screen.queryByText('?')).toBeNull()
+  })
+
+  it('asks the providers for new models on demand', () => {
+    const props = models()
+    open(props)
+    fireEvent.click(screen.getByText('Check the providers for new models'))
+    expect(props.rediscover).toHaveBeenCalled()
   })
 })

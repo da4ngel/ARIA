@@ -49,16 +49,33 @@ function speedLabel(entry: ModelAvailability): string | null {
  */
 function DetailSheet({ entry }: { entry: ModelAvailability }): JSX.Element {
   const speed = speedLabel(entry)
+  const { model } = entry
   return (
     <div className="border-t border-white/5 bg-aria-sunk px-3 py-2.5">
-      <p className="text-tiny font-semibold text-aria-text">{entry.model.label}</p>
-      <p className="mt-0.5 text-micro leading-relaxed text-aria-muted">{entry.model.best_for}</p>
+      <p className="text-tiny font-semibold text-aria-text">{model.label}</p>
+
+      {model.best_for ? (
+        <p className="mt-0.5 text-micro leading-relaxed text-aria-muted">{model.best_for}</p>
+      ) : (
+        // Blank, not filler. Nobody has measured this model here, and writing
+        // a plausible sentence would be inventing the thing the catalog exists
+        // to record.
+        <p className="mt-0.5 text-micro leading-relaxed text-aria-faint">
+          Offered by {PROVIDER_LABEL[model.provider] ?? model.provider}. Nothing about its speed,
+          cost or accuracy has been measured here.
+        </p>
+      )}
+
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-micro text-aria-faint">
         {speed && <span>{speed}</span>}
-        <span>{entry.model.cost === 'free' ? 'free' : `cost ${entry.model.cost}`}</span>
-        <span>{entry.model.local ? 'private' : 'leaves this machine'}</span>
+        {model.cost !== '?' && (
+          <span>{model.cost === 'free' ? 'free' : `cost ${model.cost}`}</span>
+        )}
+        <span>{model.local ? 'private' : 'leaves this machine'}</span>
+        {model.discovered && <span>{(model.context_tokens / 1000).toFixed(0)}k context</span>}
       </div>
-      {entry.model.caveat && <p className="mt-1.5 text-micro text-aria-warn">{entry.model.caveat}</p>}
+
+      {model.caveat && <p className="mt-1.5 text-micro text-aria-warn">{model.caveat}</p>}
       {!entry.available && entry.reason && (
         <p className="mt-1.5 text-micro text-aria-bad">{entry.reason}</p>
       )}
@@ -96,8 +113,14 @@ function Row({ entry, selected, onSelect, onHover }: RowProps): JSX.Element {
           />
           <span className="truncate text-aria-text">{entry.model.label}</span>
         </span>
+        {/* Latency if it was measured, else price if it is known, else nothing.
+            The fallback used to end at `cost`, which rendered a bare "?" on
+            every discovered row — a column of question marks that says less
+            than an empty column does. */}
         <span className="shrink-0 font-mono text-micro text-aria-faint">
-          {entry.available ? (speed ?? entry.model.cost) : 'unavailable'}
+          {!entry.available
+            ? 'unavailable'
+            : (speed ?? (entry.model.cost === '?' ? '' : entry.model.cost))}
         </span>
       </button>
     </div>
@@ -107,6 +130,9 @@ function Row({ entry, selected, onSelect, onHover }: RowProps): JSX.Element {
 export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [hovered, setHovered] = useState<string | null>(null)
+  // Folded by default, per provider. The measured models are the answer to
+  // "which should I use"; the rest is a catalogue.
+  const [expandedProviders, setExpandedProviders] = useState<string[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
 
   // Click-away and Escape both close it.
@@ -150,7 +176,11 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
       {open && (
         <div
           onMouseLeave={() => setHovered(null)}
-          className="glass rim absolute right-0 z-20 mt-1.5 flex max-h-[24rem] w-72 flex-col overflow-hidden rounded-xl shadow-window animate-rise"
+          // Taller than it was. Measured on screen with the catalog listing 50
+          // models: at 24rem the Smart block and the detail sheet left about
+          // 100px for the list itself, which is four rows of fifty. Capped
+          // against the viewport so the compact window cannot overflow.
+          className="glass-pop absolute right-0 z-20 mt-1.5 flex max-h-[min(32rem,78vh)] w-72 flex-col overflow-hidden rounded-xl animate-rise"
         >
           <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {/* Smart, pinned. */}
@@ -201,23 +231,65 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
           {PROVIDER_ORDER.map((provider) => {
             const group = models.models.filter((m) => m.model.provider === provider)
             if (group.length === 0) return null
+
+            // Measured models are the ones with notes, latency and a known
+            // cost — and the only ones Smart will route to. Everything the
+            // provider merely *offers* goes below, folded away: this account
+            // lists 32 OpenAI chat models, and a flat list of them buries the
+            // three that were actually measured.
+            const measured = group.filter((m) => !m.model.discovered)
+            const found = group.filter((m) => m.model.discovered)
+            const showFound = expandedProviders.includes(provider)
+
+            const pick = (id: string) => () => {
+              void models.select(id)
+              setOpen(false)
+            }
+
             return (
               <div key={provider} className="mt-2">
                 <p className="px-2 pb-1 text-micro uppercase tracking-wide text-aria-muted">
                   {PROVIDER_LABEL[provider] ?? provider}
                 </p>
-                {group.map((entry) => (
+                {measured.map((entry) => (
                   <Row
                     key={entry.model.id}
                     entry={entry}
                     selected={entry.model.id === models.selected}
                     onHover={setHovered}
-                    onSelect={() => {
-                      void models.select(entry.model.id)
-                      setOpen(false)
-                    }}
+                    onSelect={pick(entry.model.id)}
                   />
                 ))}
+
+                {found.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      aria-expanded={showFound}
+                      onClick={() =>
+                        setExpandedProviders((current) =>
+                          current.includes(provider)
+                            ? current.filter((p) => p !== provider)
+                            : [...current, provider],
+                        )
+                      }
+                      className="interactive mt-0.5 flex w-full items-center gap-1 rounded-md px-2 py-1 text-micro text-aria-faint hover:text-aria-muted"
+                    >
+                      <span aria-hidden>{showFound ? '▾' : '▸'}</span>
+                      {found.length} more offered, not measured here
+                    </button>
+                    {showFound &&
+                      found.map((entry) => (
+                        <Row
+                          key={entry.model.id}
+                          entry={entry}
+                          selected={entry.model.id === models.selected}
+                          onHover={setHovered}
+                          onSelect={pick(entry.model.id)}
+                        />
+                      ))}
+                  </>
+                )}
               </div>
             )
           })}
@@ -227,6 +299,17 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
               {models.loading ? 'Loading models…' : 'No models reported. Is the brain connected?'}
             </p>
           )}
+
+          <button
+            type="button"
+            disabled={models.rediscovering}
+            onClick={() => void models.rediscover()}
+            className="interactive mt-2 w-full rounded-md px-2 py-1.5 text-left text-micro text-aria-faint hover:text-aria-muted disabled:opacity-50"
+          >
+            {models.rediscovering
+              ? 'Asking the providers…'
+              : 'Check the providers for new models'}
+          </button>
           </div>
 
           {detail && <DetailSheet entry={detail} />}

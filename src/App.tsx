@@ -22,9 +22,12 @@ import { HandsFreeToggle } from '@/components/HandsFreeToggle'
 import { VoiceAura, type AuraMode } from '@/components/VoiceAura'
 import { HistoryPanel } from '@/components/HistoryPanel'
 import { ModelPicker } from '@/components/ModelPicker'
-import { Orb } from '@/components/Orb'
 import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
+import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
+import { ToolsPanel } from '@/components/ToolsPanel'
+import { VoicePanel } from '@/components/VoicePanel'
+import { WindowControls } from '@/components/WindowControls'
 import { useAudio } from '@/hooks/useAudio'
 import { useConfirm } from '@/hooks/useConfirm'
 import { useConversation } from '@/hooks/useConversation'
@@ -39,7 +42,9 @@ import { useWindowMode } from '@/hooks/useWindowMode'
 const drag = { WebkitAppRegion: 'drag' } as React.CSSProperties
 const noDrag = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 
-type Overlay = 'history' | 'settings' | 'shortcuts' | null
+/** What is open over the conversation. `Section` comes from the rail;
+ *  `shortcuts` has no rail entry because it is reached by pressing `?`. */
+type Overlay = Section | 'shortcuts' | null
 
 export default function App(): JSX.Element {
   const { status, assistantState, lastLog, restartBrain } = useRpc()
@@ -58,7 +63,15 @@ export default function App(): JSX.Element {
   // frames and the wake word, endpointing and turn all happen there.
   const handsFree = useHandsFree(connected)
   const { expanded, toggle: toggleExpanded } = useWindowMode()
+  // Independent of the window mode above: how wide the rail is, versus how big
+  // the window is. Conflating them meant a compact window could not show
+  // labels and an expanded one could not hide them.
+  const sidebar = useSidebar()
   const [overlay, setOverlay] = useState<Overlay>(null)
+  // Expanded, history is a docked column rather than a sheet, so "Chats" has
+  // to mean show/hide that column — otherwise the rail item would be dead in
+  // the one mode where history is most useful.
+  const [historyDocked, setHistoryDocked] = useState(true)
 
   const started = turns.length > 0
   // Real playback beats the sidecar's own state here: `speaking` should mean
@@ -87,6 +100,20 @@ export default function App(): JSX.Element {
   // Audible, because the glow only helps if you are looking at it.
   useWakeChime()
 
+  // One name for "show me my chats", whichever shape they currently take.
+  const toggleChats = useCallback(() => {
+    if (expanded) setHistoryDocked((open) => !open)
+    else setOverlay((o) => (o === 'history' ? null : 'history'))
+  }, [expanded])
+
+  const selectSection = useCallback(
+    (section: Section) => {
+      if (section === 'history') toggleChats()
+      else setOverlay((o) => (o === section ? null : section))
+    },
+    [toggleChats],
+  )
+
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
   useEffect(() => {
@@ -94,7 +121,7 @@ export default function App(): JSX.Element {
       const ctrl = event.ctrlKey || event.metaKey
       if (ctrl && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        setOverlay((o) => (o === 'history' ? null : 'history'))
+        toggleChats()
       } else if (ctrl && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         void newChat()
@@ -118,7 +145,7 @@ export default function App(): JSX.Element {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [overlay, newChat, toggleExpanded])
+  }, [overlay, newChat, toggleExpanded, toggleChats])
 
   const openFromHistory = useCallback(
     (id: string) => {
@@ -142,10 +169,29 @@ export default function App(): JSX.Element {
             lock in the sidecar, so nothing else should be reachable. */}
         <ConfirmDialog request={confirm.current} onRespond={confirm.respond} />
 
-        {/* Expanded turns history from an overlay into a permanent rail.
-            18rem wide, not 16: at the narrower width every title truncated and
-            the time and message count wrapped onto two lines. */}
-        {expanded && (
+        {/* The application menu, and the only place the parts of this app are
+            named. Always present in both window modes. */}
+        <Sidebar
+          collapsed={sidebar.collapsed}
+          onToggleCollapsed={sidebar.toggle}
+          canExpand={expanded}
+          active={
+            expanded && historyDocked ? 'history' : overlay === 'shortcuts' ? null : overlay
+          }
+          onSelect={selectSection}
+          onNewChat={() => void newChat()}
+          canNewChat={started}
+          connected={connected}
+          orbState={orbState}
+          orbLevel={orbLevel}
+          listening={handsFree.active}
+        />
+
+        {/* Expanded turns history from a sheet into a permanent column, beside
+            the rail rather than instead of it. 18rem wide, not 16: at the
+            narrower width every title truncated and the time and message count
+            wrapped onto two lines. */}
+        {expanded && historyDocked && (
           <aside className="relative z-10 w-72 shrink-0 border-r border-white/5" style={noDrag}>
             <HistoryPanel
               variant="rail"
@@ -158,36 +204,14 @@ export default function App(): JSX.Element {
 
         <div className="relative z-10 flex min-w-0 flex-1 flex-col">
           <header
-            className="flex shrink-0 items-center justify-between gap-2 px-3 py-2.5"
+            className="flex shrink-0 items-center justify-between gap-2 px-3 py-2"
             style={drag}
           >
-            <div className="flex min-w-0 items-center gap-2">
-              {started && (
-                <Orb state={orbState} connected={connected} size={20} level={orbLevel} />
-              )}
-              {started && (
-                <span className="truncate text-small font-medium tracking-tight">Aria</span>
-              )}
-            </div>
+            {/* Empty and draggable: the whole strip is the title bar, and the
+                rail already carries the name and the orb. */}
+            <div className="min-w-0 flex-1" />
 
             <div className="flex shrink-0 items-center gap-1" style={noDrag}>
-              <IconButton
-                label="History"
-                hint="History (Ctrl+K)"
-                onClick={() => setOverlay((o) => (o === 'history' ? null : 'history'))}
-                active={overlay === 'history'}
-                disabled={!connected}
-              >
-                <IconHistory />
-              </IconButton>
-              <IconButton
-                label="New chat"
-                hint="New chat (Ctrl+N)"
-                onClick={() => void newChat()}
-                disabled={!connected || !started}
-              >
-                <IconPlus />
-              </IconButton>
               <HandsFreeToggle
                 available={handsFree.available}
                 phrase={handsFree.phrase}
@@ -197,21 +221,7 @@ export default function App(): JSX.Element {
                 onToggle={handsFree.toggle}
               />
               <ModelPicker models={models} />
-              <IconButton
-                label={expanded ? 'Shrink' : 'Expand'}
-                hint={expanded ? 'Shrink (Ctrl+E)' : 'Expand (Ctrl+E)'}
-                onClick={toggleExpanded}
-              >
-                {expanded ? <IconShrink /> : <IconExpand />}
-              </IconButton>
-              <IconButton
-                label="Settings"
-                hint="Settings"
-                onClick={() => setOverlay((o) => (o === 'settings' ? null : 'settings'))}
-                active={overlay === 'settings'}
-              >
-                <IconGear />
-              </IconButton>
+              <WindowControls expanded={expanded} onToggleExpanded={toggleExpanded} />
             </div>
           </header>
 
@@ -290,6 +300,10 @@ export default function App(): JSX.Element {
             </footer>
           </div>
 
+          {/* Panels float over the conversation as glass sheets. History is
+              the exception: when the window is expanded it is already a
+              permanent column, so opening it again would be a sheet over a
+              copy of itself. */}
           <AnimatePresence>
             {overlay === 'history' && !expanded && (
               <HistoryPanel
@@ -299,6 +313,10 @@ export default function App(): JSX.Element {
                 onClose={() => setOverlay(null)}
               />
             )}
+            {overlay === 'voice' && (
+              <VoicePanel key="voice" handsFree={handsFree} onClose={() => setOverlay(null)} />
+            )}
+            {overlay === 'tools' && <ToolsPanel key="tools" onClose={() => setOverlay(null)} />}
             {overlay === 'settings' && (
               <SettingsPanel
                 key="settings"
@@ -313,93 +331,5 @@ export default function App(): JSX.Element {
         </div>
       </div>
     </div>
-  )
-}
-
-// ── header controls ───────────────────────────────────────────────────
-
-function IconButton({
-  label,
-  hint,
-  onClick,
-  children,
-  active = false,
-  disabled = false,
-}: {
-  label: string
-  hint?: string
-  onClick: () => void
-  children: React.ReactNode
-  active?: boolean
-  disabled?: boolean
-}): JSX.Element {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={hint ?? label}
-      onClick={onClick}
-      disabled={disabled}
-      className={`interactive grid h-7 w-7 place-items-center rounded-lg text-aria-muted hover:text-aria-text disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent ${
-        active ? 'bg-white/10 text-aria-text' : ''
-      }`}
-    >
-      {children}
-    </button>
-  )
-}
-
-/* 14px stroke icons, drawn rather than imported — five glyphs is not worth a
-   dependency, and these match the hairline weight of the rest of the chrome. */
-const stroke = {
-  width: 14,
-  height: 14,
-  viewBox: '0 0 14 14',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.4,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-}
-
-function IconHistory(): JSX.Element {
-  return (
-    <svg {...stroke} aria-hidden>
-      <circle cx="7" cy="7" r="5.2" />
-      <path d="M7 4.2V7l1.9 1.4" />
-    </svg>
-  )
-}
-
-function IconPlus(): JSX.Element {
-  return (
-    <svg {...stroke} aria-hidden>
-      <path d="M7 2.8v8.4M2.8 7h8.4" />
-    </svg>
-  )
-}
-
-function IconExpand(): JSX.Element {
-  return (
-    <svg {...stroke} aria-hidden>
-      <path d="M8.4 2.6h3v3M5.6 11.4h-3v-3M11.4 2.6 8 6M2.6 11.4 6 8" />
-    </svg>
-  )
-}
-
-function IconShrink(): JSX.Element {
-  return (
-    <svg {...stroke} aria-hidden>
-      <path d="M11.2 5.6h-3v-3M2.8 8.4h3v3M8.2 5.8 11.4 2.6M5.8 8.2 2.6 11.4" />
-    </svg>
-  )
-}
-
-function IconGear(): JSX.Element {
-  return (
-    <svg {...stroke} aria-hidden>
-      <circle cx="7" cy="7" r="2.1" />
-      <path d="M7 1.6v1.3M7 11.1v1.3M12.4 7h-1.3M2.9 7H1.6M10.8 3.2l-.9.9M4.1 9.9l-.9.9M10.8 10.8l-.9-.9M4.1 4.1l-.9-.9" />
-    </svg>
   )
 }

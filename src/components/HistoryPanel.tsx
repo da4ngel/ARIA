@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+import { Panel } from '@/components/Panel'
 import { type DeletePreview, useSessions } from '@/hooks/useSessions'
 import type { SessionSummary } from '@/types/bridge'
 
@@ -190,27 +191,10 @@ export function HistoryPanel({
     else groups.push([key, [session]])
   }
 
-  return (
-    <div
-      className={
-        isRail
-          ? 'flex h-full flex-col p-3'
-          : 'absolute inset-0 z-30 flex flex-col bg-aria-void/85 p-4 backdrop-blur-md animate-rise'
-      }
-    >
-      <div className="flex items-center justify-between">
-        <h2 className="text-small font-semibold text-aria-text">History</h2>
-        {!isRail && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="interactive rounded px-2 py-0.5 text-tiny text-aria-muted hover:text-aria-text"
-          >
-            Close
-          </button>
-        )}
-      </div>
-
+  // Same list either way — two implementations is how they drift apart. Only
+  // the frame differs: a column docked to the rail, or a floating sheet.
+  const body = (
+    <>
       <input
         ref={inputRef}
         value={store.query}
@@ -251,6 +235,21 @@ export function HistoryPanel({
           </div>
         ))}
       </div>
-    </div>
+    </>
+  )
+
+  if (isRail) {
+    return (
+      <div className="flex h-full flex-col p-3">
+        <h2 className="px-0.5 text-small font-semibold text-aria-text">Chats</h2>
+        {body}
+      </div>
+    )
+  }
+
+  return (
+    <Panel title="Chats" onClose={onClose} width="max-w-sm">
+      {body}
+    </Panel>
   )
 }

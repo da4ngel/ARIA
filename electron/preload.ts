@@ -71,7 +71,12 @@ const api = {
 
   restartBrain: (): void => ipcRenderer.send('aria:restart-brain'),
 
+  /** Close to tray. She keeps listening; this only puts the window away, which
+   *  is why the button says "Close to tray" rather than "Close". */
   hide: (): void => ipcRenderer.send('aria:hide'),
+
+  /** Down to the taskbar, the way any other window does it. */
+  minimize: (): void => ipcRenderer.send('aria:minimize'),
 
   /** Grow into a working window, or shrink back to the corner companion.
    *  Resolves with the mode actually applied. */

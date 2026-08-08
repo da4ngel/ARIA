@@ -62,7 +62,10 @@ export function ConfirmDialog({ request, onRespond }: Props): JSX.Element {
     <AnimatePresence>
       {request && (
         <motion.div
-          className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-sm"
+          // A heavier scrim than the panels use, and deliberately so: this one
+          // holds a lock in the sidecar, and everything behind it is not
+          // merely covered but genuinely unreachable until it is answered.
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-[3px]"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -71,7 +74,7 @@ export function ConfirmDialog({ request, onRespond }: Props): JSX.Element {
             role="alertdialog"
             aria-modal
             aria-label={`Confirm ${request.tool}`}
-            className="raised rim w-full max-w-sm rounded-2xl p-4"
+            className="glass-pop sheen relative w-full max-w-sm rounded-2xl p-4"
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.99 }}

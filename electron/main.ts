@@ -420,6 +420,11 @@ function registerIpc(): void {
     sidecar.restart()
   })
   ipcMain.on('aria:hide', () => hideWindow())
+  // Straight to the taskbar, no fade: minimize has its own animation and
+  // fading first makes the window appear to stutter on the way down.
+  ipcMain.on('aria:minimize', () => {
+    if (window && !window.isDestroyed()) window.minimize()
+  })
   ipcMain.handle('aria:set-expanded', (_event, next: boolean) => setExpanded(Boolean(next)))
   ipcMain.handle('aria:is-expanded', () => expanded)
 }

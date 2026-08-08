@@ -135,9 +135,11 @@ relevance-based selection is the next thing due.
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
 find-and-open, and the semantic index. Ten tools registered.
-Remaining: relevance-based tool selection (the cap is ~12 and there are now
-10, so it is due), `organize_folder` + undo, focus_window/close_app,
-ToolCallCard, and Everything for whole-disk search.
+Shell reworked 2026-08-08: sidebar rail, window controls, glass on every
+surface, and a catalog that discovers models rather than listing them by hand.
+Remaining: **relevance-based tool selection — now 17 tools against a cap of ~12,
+so it is overdue and is the next thing to build**; `organize_folder` + undo;
+focus_window/close_app; ToolCallCard; Everything for whole-disk search.
 
 ## Phase 2 stage 1 — she speaks (2026-08-06)
 kokoro-onnx on CPU, sentence-streamed. `voice_enabled` in config; weights live in
@@ -682,6 +684,54 @@ model call, and it used to run inline on the turn that crossed the budget. It is
 now a background job (see `_maybe_roll_up`), so the turn that triggers it is not
 the turn that pays for it. Do not move it back onto the critical path: voice has
 a ~1000ms end-to-end budget and a second model call does not fit in it.
+
+## The catalog is measured; discovery is only a listing (2026-08-08)
+`providers/discovery.py` asks OpenAI and Gemini what the account can reach.
+**Discovery is a filtering problem, not a fetching one.** Measured against the
+live APIs: OpenAI returns **124** models, Gemini **58**, and most cannot hold a
+conversation — embeddings, Whisper, TTS, image, Sora, moderation. After
+filtering: 32 and 16.
+
+- **Gemini's `generateContent` flag is not a sufficient filter.** It is set on
+  Lyria (music), Nano Banana (image), the TTS previews, `gemini-robotics-er-*`
+  and Deep Research. Reject by name as well.
+- OpenAI returns `{id, created, owned_by}` and nothing else — no context window,
+  no modality. Every judgement is made on the id, which is why the filters are
+  tested against **real payloads** in `tests/fixtures/`, not a mock that agrees
+  with whatever the filter happens to do.
+- Dated snapshots (`gpt-4o-2024-08-06`) and Gemini's `-001` / `-preview` aliases
+  collapse **only when the plain id is also present** — otherwise dropping them
+  removes the model rather than de-duplicating it.
+
+**Discovered models sit beside `CATALOG`, never inside it.** `get()`/`require()`
+read the overlay so an explicit choice resolves; **`by_class()` does not**, and
+that is the router's only way to reach for a model. So Smart mode keeps routing
+among models measured here — hand-pick-only is a property of the data structure,
+not a flag. Mutation-checked: pointing `by_class` at `all_models()` fails
+`test_smart_never_routes_to_a_discovered_model`.
+
+**Nothing invents a measurement.** `best_for`, `caveat`, `ttft_ms_seed` and
+`cost` come from measurement; a discovered model has none, so it gets `Cost.
+UNKNOWN`, no blurb, and `MINIMAL` persona. The picker shows blanks — an early
+version fell through to `cost` and rendered a column of `?`. Curated ids win on
+collision, so `gpt-5` keeps its caveat when the API returns it as a bare id.
+
+Never on the turn path (§10, ~1000ms voice budget): cached in `settings`, loaded
+at startup, refreshed only when stale (24h), behind the button, or after a key
+is added.
+
+## Look at the UI. Typecheck and tests do not see it. (2026-08-08)
+Same lesson as VoiceAura, and it bit again. `npm run typecheck`, 56 renderer
+tests and 400+ sidecar tests were all green while the sidebar took **208px of a
+420px window** and squeezed the conversation into a column. Only a screenshot
+showed it. The rail is now icons-only whenever the window is compact — a
+preference for labels cannot conjure the width to show them in.
+
+Capturing it: find the window by title with `EnumWindows`, `SetForegroundWindow`,
+then `CopyFromScreen` over its `GetWindowRect`. Guessed crop rectangles waste
+turns; the window moves. `Ctrl+Space` toggles visibility, so a stray SendKeys
+hides the thing you are trying to photograph — and toggles hands-free, which is
+a **persisted** setting, so put it back.
 
 ## Provider strategy (decided 2026-08-06, supersedes BUILD_SPEC §4/§9.7)
 Cloud is **OpenAI and Gemini via API keys**, not Anthropic. Ollama is the
