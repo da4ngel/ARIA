@@ -864,12 +864,22 @@ this machine idles at 48–60% with the app running. Not a regression.
     python scripts/gate_tool_selection.py
 
 Carried as "overdue" since Phase 3 on the strength of §7.2's ~12-tool cap. It
-was never measured. Measured now, on `qwen2.5:7b` with 17 probes:
+was never measured. Measured now, on `qwen2.5:7b`, and **re-measured after
+Phase 3's remaining tools took the registry to 25**:
 
 | tools offered | correct |
 |---|---|
 | **all 15** | **16/17** |
-| a filtered 8 | **9/17** |
+| a filtered 8 | 9/17 |
+| **all 23** (after Phase 3 finished) | **21/24** |
+| a filtered 8 | **9/24** |
+
+At 23 the three misses are near-neighbours, and two are defensible: "where did
+I put my cv" chose `find` over `search_files`, and "how much memory am I using"
+chose `list_processes` over `get_system_info`. Both are reasonable answers to
+the question; the probe simply names one. Filtering, meanwhile, gets **worse**
+as the registry grows — 9/24 — because there are now more right answers to
+throw away.
 
 **Filtering makes it worse, badly.** A correct tool that was filtered out cannot
 be chosen, so selection converts right answers into wrong ones — `set_volume`,
@@ -877,10 +887,10 @@ be chosen, so selection converts right answers into wrong ones — `set_volume`,
 `move budget.xlsx to documents` became `open_path`.
 
 And the selector cannot be made safe by tuning `k`. Embedding recall is
-**14/15 at every size from 6 to 12**, because the one miss — `find` for "the
-quotation I sent the banquet hall" — ranks **dead last of fifteen**. The
-semantic-search tool scores worst for a semantic-search query, so no threshold
-rescues it.
+**14/15 at every size from 6 to 12** — and **21/22 at 23 tools**, with the same
+single miss: `find` for "the quotation I sent the banquet hall" ranks **21st of
+23**. The semantic-search tool scores worst for a semantic-search query, so no
+threshold rescues it, at either size.
 
 There is a third reason that needs no measurement: **tool schemas live in the
 stable prefix so Ollama's KV cache can hold them.** A set that changes with the
@@ -888,8 +898,9 @@ message invalidates that prefix whenever the topic moves, so selection would
 *spend* prefill rather than save it. The 1654 tokens of schemas are prefilled
 once and reused; that is the whole point of stable-first ordering.
 
-§7.2's cap is a rule of thumb. This machine's evidence overrides it. Re-run the
-gate when the tool count grows — the number to watch is recall, not the cap.
+§7.2's cap is a rule of thumb. This machine's evidence overrides it — twice
+now, at 15 tools and at 23. Re-run the gate when the count grows again; the
+number to watch is recall, not the cap.
 
 ## Acrylic was on, and painted over (2026-08-09)
 "I asked for glass everywhere and I can't see it" was correct.

@@ -12,11 +12,16 @@ Two questions, and selection has to win both to be worth building:
   1. Does offering fewer tools make the model choose better?
   2. Would a selector keep the right tool?
 
-It loses both today. Offering all 15 scored 16/17 on `qwen2.5:7b`; a reduced
-set scored 9/17, because a correct tool that was filtered out cannot be chosen
-— filtering converts right answers into wrong ones. And an embedding selector
-tops out at 14/15 recall, missing `find` for "the quotation I sent the banquet
-hall", where it ranks the semantic-search tool **dead last of fifteen** for a
+It loses both, and lost again when the registry grew from 15 tools to 23:
+
+    15 tools   all 16/17    filtered 9/17
+    23 tools   all 21/24    filtered 9/24
+
+A correct tool that was filtered out cannot be chosen, so filtering converts
+right answers into wrong ones — and it gets *worse* as the registry grows,
+because there are more right answers to throw away. An embedding selector tops
+out at 14/15 recall (21/22 at 23 tools), missing `find` for "the quotation I
+sent the banquet hall", where it ranks the semantic-search tool **last** for a
 semantic-search query.
 
 There is a third reason not to, which needs no measurement. Tool schemas sit in
