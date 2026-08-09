@@ -50,9 +50,9 @@
     "semantic_hash": "854b38759e7a8b4b82306ae2d9a3a833"
   },
   "pyproject.toml": {
-    "mtime": 1786125524.461501,
-    "ast_hash": "b04d54a34af64cfc21b92293a30ee6e8",
-    "semantic_hash": "b04d54a34af64cfc21b92293a30ee6e8"
+    "mtime": 1786293309.2040226,
+    "ast_hash": "8e2aa57e609bfc5ce9470ab79405edfe",
+    "semantic_hash": ""
   },
   "scripts/eval_quality.py": {
     "mtime": 1786019423.4716034,
@@ -125,9 +125,9 @@
     "semantic_hash": ""
   },
   "sidecar/core/conversation.py": {
-    "mtime": 1786125663.9152575,
-    "ast_hash": "f2fa19b805df7cc0ae2cfdd6d59715b3",
-    "semantic_hash": "f2fa19b805df7cc0ae2cfdd6d59715b3"
+    "mtime": 1786294686.7238543,
+    "ast_hash": "dc82e390e23643260ca26d2f2b04f428",
+    "semantic_hash": ""
   },
   "sidecar/core/listener.py": {
     "mtime": 1786126928.7319026,
@@ -135,8 +135,8 @@
     "semantic_hash": "ffb9798e026692ae1c2fa9da449172d9"
   },
   "sidecar/core/router.py": {
-    "mtime": 1786215786.0959659,
-    "ast_hash": "8dea9266788b09d313f14097548340d8",
+    "mtime": 1786292629.7866929,
+    "ast_hash": "7f69f394750c681b990235efc9a021fb",
     "semantic_hash": ""
   },
   "sidecar/handshake.py": {
@@ -330,9 +330,9 @@
     "semantic_hash": "947120e91832650bcbb46174518bb918"
   },
   "sidecar/tests/test_conversation.py": {
-    "mtime": 1786065893.311769,
-    "ast_hash": "e6da7e295176bc7dd3ec6cbd3d43cdf3",
-    "semantic_hash": "e6da7e295176bc7dd3ec6cbd3d43cdf3"
+    "mtime": 1786294800.701904,
+    "ast_hash": "ea86c47e1a1f16ec238fcfe6efbb1636",
+    "semantic_hash": ""
   },
   "sidecar/tests/test_db.py": {
     "mtime": 1785981075.8853128,
@@ -365,13 +365,13 @@
     "semantic_hash": "a91e9cd733baa8f711f621da33f4789e"
   },
   "sidecar/tests/test_permissions.py": {
-    "mtime": 1786127201.3686695,
-    "ast_hash": "0aa19d79ac0102673ff5ccb6d60bc226",
-    "semantic_hash": "0aa19d79ac0102673ff5ccb6d60bc226"
+    "mtime": 1786294649.0766356,
+    "ast_hash": "278bad1db3931e99bb7ad26c6ee6c28b",
+    "semantic_hash": ""
   },
   "sidecar/tests/test_router.py": {
-    "mtime": 1786214513.4304488,
-    "ast_hash": "65977f2f816a0f5137a54ea319eea66b",
+    "mtime": 1786292651.2603426,
+    "ast_hash": "12248680d1e73ff1a6fce8799dab1ded",
     "semantic_hash": ""
   },
   "sidecar/tests/test_rpc.py": {
@@ -385,8 +385,8 @@
     "semantic_hash": "0a900c6a9e0624f3ad21d3965c10e1b5"
   },
   "sidecar/tests/test_tools.py": {
-    "mtime": 1786214107.4362998,
-    "ast_hash": "b696c767c2d576deac4b703408f6a44a",
+    "mtime": 1786293249.3847852,
+    "ast_hash": "38456757e0bbc3c205e538593a42d463",
     "semantic_hash": ""
   },
   "sidecar/tests/test_tts.py": {
@@ -395,13 +395,13 @@
     "semantic_hash": "001e047379f6d36c22ed77fc6c59df70"
   },
   "sidecar/tools/__init__.py": {
-    "mtime": 1786103578.969023,
-    "ast_hash": "21ff3632b3a3d9d7b71e355b6f1af81c",
-    "semantic_hash": "21ff3632b3a3d9d7b71e355b6f1af81c"
+    "mtime": 1786292461.1020484,
+    "ast_hash": "d6a9a370ad92a44926b00b629308560f",
+    "semantic_hash": ""
   },
   "sidecar/tools/apps.py": {
-    "mtime": 1786213930.817289,
-    "ast_hash": "f71143dc65da59b973a114763ef69b6a",
+    "mtime": 1786291932.2307415,
+    "ast_hash": "01933cfac094fc33873186629be0de2c",
     "semantic_hash": ""
   },
   "sidecar/tools/files.py": {
@@ -420,14 +420,14 @@
     "semantic_hash": "ca813a3faa371b40498095665afaa1a4"
   },
   "sidecar/tools/registry.py": {
-    "mtime": 1786064943.882666,
-    "ast_hash": "f2a535ccce37a3add2d6a60300e9f78a",
-    "semantic_hash": "f2a535ccce37a3add2d6a60300e9f78a"
+    "mtime": 1786292381.0798197,
+    "ast_hash": "aa04f46947e83f4e780aa54806c1cbb9",
+    "semantic_hash": ""
   },
   "sidecar/tools/system.py": {
-    "mtime": 1786064896.4150126,
-    "ast_hash": "719d93aaaaa6990e61edf69699f4012d",
-    "semantic_hash": "719d93aaaaa6990e61edf69699f4012d"
+    "mtime": 1786292121.5050392,
+    "ast_hash": "098dc26db795dd661d00c77e9e19b4bd",
+    "semantic_hash": ""
   },
   "src/App.tsx": {
     "mtime": 1786215674.499945,
@@ -460,14 +460,14 @@
     "semantic_hash": "5482015cbe13027debfccc342f50e7d8"
   },
   "src/components/ConversationView.test.tsx": {
-    "mtime": 1786026857.657068,
-    "ast_hash": "46dea3e7be58a0199930ef6c6323c8a1",
-    "semantic_hash": "46dea3e7be58a0199930ef6c6323c8a1"
+    "mtime": 1786293138.456112,
+    "ast_hash": "94a4b555cfe42a966185d5df6e9147af",
+    "semantic_hash": ""
   },
   "src/components/ConversationView.tsx": {
-    "mtime": 1786027299.682345,
-    "ast_hash": "99ddd3daea74b1bd3a6c35cde63f23e3",
-    "semantic_hash": "99ddd3daea74b1bd3a6c35cde63f23e3"
+    "mtime": 1786293065.280431,
+    "ast_hash": "ad8b506a3f3a9a0d9bf39a7992329133",
+    "semantic_hash": ""
   },
   "src/components/EmptyState.test.tsx": {
     "mtime": 1786026880.5925472,
@@ -545,9 +545,9 @@
     "semantic_hash": "ade43de750f2f31d4a07808d3ddb4be0"
   },
   "src/hooks/useConversation.ts": {
-    "mtime": 1786040790.321296,
-    "ast_hash": "aa941a1aa6b4c041b0a0abcdeb387163",
-    "semantic_hash": "aa941a1aa6b4c041b0a0abcdeb387163"
+    "mtime": 1786292908.005111,
+    "ast_hash": "20d35e770aea6489f1c245da286a6b26",
+    "semantic_hash": ""
   },
   "src/hooks/useHandsFree.ts": {
     "mtime": 1786046867.96731,
@@ -660,8 +660,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1786216640.1531148,
-    "ast_hash": "d5b5888cc9bc4492cdfd65ad300fb8a1",
+    "mtime": 1786295815.5741904,
+    "ast_hash": "acf79927a28f66ce5e9522242b14b5ad",
     "semantic_hash": ""
   },
   "README.md": {
@@ -690,8 +690,8 @@
     "semantic_hash": "1b54b24f7899721c3978265cb65e7938"
   },
   "scripts/gate_tool_selection.py": {
-    "mtime": 1786216554.8255289,
-    "ast_hash": "c984d4c910fcbc11fa29a10ad6027ef3",
+    "mtime": 1786295231.9894264,
+    "ast_hash": "628e9aee960e336bccb8d1e5cd03d6c5",
     "semantic_hash": ""
   },
   "scripts/measure_models.py": {
@@ -747,6 +747,21 @@
   "src/components/WindowControls.tsx": {
     "mtime": 1786211101.3805628,
     "ast_hash": "0d630242cc1a02ffc1cf5f55f0b7f1af",
+    "semantic_hash": ""
+  },
+  "scripts/gate_delete.py": {
+    "mtime": 1786295167.708853,
+    "ast_hash": "95761cb5575bfe3dbead54f9be9d8d21",
+    "semantic_hash": ""
+  },
+  "sidecar/tools/clipboard.py": {
+    "mtime": 1786292427.2862456,
+    "ast_hash": "0eeea42688a04f6368f4a427f3ac2d18",
+    "semantic_hash": ""
+  },
+  "src/components/ToolCallCard.tsx": {
+    "mtime": 1786292962.065469,
+    "ast_hash": "b0db802aaa4856ca58dc2c6cd6253cde",
     "semantic_hash": ""
   }
 }

@@ -101,9 +101,9 @@ nothing structural moved. Safe to run when unsure.
   `doc_final_v3.txt`, whose name contains none of those words.
 
 ## Files, and trusted folders (2026-08-07)
-Fifteen tools. `read_file`, `list_folder` (T0), `create_folder` (T1),
-`write_file`, `rename_file`, `move_file` (T2), `delete_file`, `delete_folder`
-(T3).
+Fifteen tools at the time; twenty-five now — see the Phase 3 completion below.
+`read_file`, `list_folder` (T0), `create_folder` (T1), `write_file`,
+`rename_file`, `move_file` (T2), `delete_file`, `delete_folder` (T3).
 
 - **A trusted folder is trusted completely**, deletion included, and **nothing
   is trusted until it is added**. Recursive.
@@ -138,6 +138,8 @@ Phase 3 built and exercised against real models. Phase 4 built: name search,
 find-and-open, and the semantic index. Ten tools registered.
 Shell reworked 2026-08-08: sidebar rail, window controls, glass on every
 surface, and a catalog that discovers models rather than listing them by hand.
+**Phase 3 closed out 2026-08-09**: the seven missing tools, ToolCallCard, and
+the delete acceptance gate run for the first time.
 Relevance-based tool selection is **closed, measured, and not being built** —
 filtering made tool choice worse (16/17 -> 9/17). See its section above.
 Remaining: `organize_folder` + undo; focus_window/close_app; ToolCallCard;
@@ -789,6 +791,74 @@ routable. `by_class` is untouched, so the hand-pick-only property still holds.
 
 **The Gemini free tier is quota-exhausted** — 429 on a one-word call to
 flash-lite. Not a bug here; the whole Gemini half of the battery could not run.
+
+## Phase 3 finished — the rest of the tools, and a flag that never worked (2026-08-09)
+Twenty-five tools. Added: `focus_window`, `close_app` (T1/T2), `list_processes`
+(T0), `kill_process` (T2), `set_wifi` (T2), `run_powershell` (T1),
+`read_clipboard` (T0), `write_clipboard` (T1).
+
+- **`pywinauto` is still not a dependency and does not need to be.**
+  requirements.txt deferred it twice for `focus_window`/`close_app`
+  specifically; `pywin32` does both. `WM_CLOSE` is also the *better* close — it
+  is what the X button sends, so the app prompts about unsaved work instead of
+  being destroyed.
+- **The foreground lock is real**: Windows refuses `SetForegroundWindow` from a
+  background process, which the sidecar always is. `AttachThreadInput` for the
+  duration of the call gets through it. **And the success check has to poll** —
+  reading `GetForegroundWindow` immediately after returned the *old* window and
+  reported failure for a raise that had plainly worked.
+- **`run_powershell`'s allowlist is the security boundary, not its tier.** The
+  first token must be one of fifteen `Get-` cmdlets, and any of
+  ``|;&><$`(){}[]#'"`` or a newline refuses the whole string — so no
+  `Get-Process | Stop-Process`. Fifteen escape attempts are a parametrised test
+  and none get through. Refuse rather than sanitise; sanitising is where these
+  go wrong.
+- **`kill_process` refuses `lsass`, `csrss`, `services`… below the tier
+  system.** Being allowed to ask is not the same as it being sane to permit —
+  killing `lsass` bluescreens the machine.
+- **`read_clipboard` is `local_only`, a new field on `Tool`.** `_PRIVATE`
+  decides from the user's *words*, before the tool runs: "what did I just copy"
+  did not match it, routed to a cloud provider, and that provider would have
+  been handed the clipboard on the continuation. So the swap to the local model
+  happens **after** the call, in `_continuation_model`, because the
+  continuation is where the result enters a prompt. Mutation-checked both ways.
+- **`ToolCallCard` finally consumes `tool.call`/`tool.result`**, which the
+  sidecar had broadcast since Phase 3 with nothing listening. A turn that
+  opened an app looked identical to one that talked about opening it — which is
+  also how "Opened Calculator" followed by "I cannot run programs" survived a
+  whole phase.
+
+**`allow_danger_tools` was dead code end to end.** It let `PermissionEngine`
+*execute* a DANGER tool, but `_tool_schemas()` always asked `schemas()` for the
+`CONFIRM` ceiling, so the model was never told `delete_file` existed and
+nothing could ever request one. Asked to delete a real file with the flag on,
+she answered *"I cannot delete files with my current tools"* — true of what she
+had been given. The ceiling now follows the flag.
+
+### The acceptance gate, run for the first time
+    ARIA_ALLOW_DANGER_TOOLS=true npm run dev
+    python scripts/gate_delete.py
+
+| | file | `tool_log` |
+|---|---|---|
+| **Deny** | still there | `approved=0 by=None ok=0 error=denied` |
+| **Approve** | gone | `approved=1 by=user ok=1 2ms` |
+
+It had never been run before today. `test_permissions.py` proved the *logic*;
+`tool_log` held zero denied rows and no tier-3 call had ever executed.
+
+**Known, not fixed:** a confirmation answered by one client leaves any other
+connected client showing a stale dialog — there is no "resolved" broadcast.
+With one window it does not bite.
+
+**Screenshots: use `PrintWindow` with `PW_RENDERFULLCONTENT` (2)**, not
+`CopyFromScreen`. A fullscreen game overrides even a topmost window, and screen
+capture then photographs the game. `PrintWindow` asks the window to redraw
+itself into your DC and ignores what is on top of it.
+
+**`test_indexer.py::test_it_does_not_run_while_she_is_answering` is flaky under
+load** and always has been: it waits for CPU below `BUSY_CPU_PERCENT` (60) and
+this machine idles at 48–60% with the app running. Not a regression.
 
 ## Closed: relevance-based tool selection is NOT worth building (2026-08-09)
     python scripts/gate_tool_selection.py
