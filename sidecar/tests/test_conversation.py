@@ -663,6 +663,10 @@ class OpenEngine:
     def __init__(self, summary: str = "9 windows open") -> None:
         self.ran: list[tuple[str, dict]] = []
         self.summary = summary
+        # The real engine has this, and `_tool_schemas` reads it to decide
+        # whether the model is told DANGER tools exist. A double missing a
+        # field the production code depends on is a test that stops testing.
+        self.allow_danger = False
 
     async def run(self, name, arguments, ctx, *, rationale=""):
         from sidecar.tools.registry import ToolResult
@@ -766,3 +770,36 @@ async def test_no_engine_means_the_model_is_never_told_tools_exist(
     await _drain(svc)
 
     assert provider.offered[0] == []
+
+
+# ── a local_only tool moves the continuation off the cloud ────────────
+# `_PRIVATE` in the router decides from the user's words, *before* the tool
+# runs. This is the guarantee that does not depend on guessing the phrasing:
+# whatever model asked for the clipboard, the model that is handed its
+# contents is the local one.
+
+
+def test_a_local_only_tool_forces_the_continuation_local() -> None:
+    from sidecar.providers import catalog
+
+    service = ConversationService.__new__(ConversationService)
+    service._model = catalog.PREFERRED_LOCAL  # noqa: SLF001
+
+    cloud = catalog.require("gpt-5.4-nano")
+    assert not cloud.local
+
+    chosen = service._continuation_model("read_clipboard", cloud)  # noqa: SLF001
+    assert chosen.local, "the clipboard's contents would have gone to a cloud model"
+    assert chosen.id == catalog.PREFERRED_LOCAL
+
+
+def test_an_ordinary_tool_leaves_the_model_alone() -> None:
+    """The control. Forcing every continuation local would throw away the
+    cloud model mid-turn for `open_app`, which has nothing to protect."""
+    from sidecar.providers import catalog
+
+    service = ConversationService.__new__(ConversationService)
+    service._model = catalog.PREFERRED_LOCAL  # noqa: SLF001
+
+    cloud = catalog.require("gpt-5.4-nano")
+    assert service._continuation_model("open_app", cloud) is cloud  # noqa: SLF001

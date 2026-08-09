@@ -444,3 +444,44 @@ async def test_a_tool_naming_no_path_is_never_trusted(tmp_path: Path) -> None:
 
     assert not result.ok
     assert bus.confirms()
+
+
+# ── allow_danger_tools has to reach the model, not just the engine ────
+# The autouse fixture above swaps the real tools for these fakes, so this
+# exercises the mechanism rather than whichever tools happen to exist today.
+# `obliterate` is the DANGER one; `peek` is harmless.
+
+
+def test_danger_tools_are_hidden_from_the_model_by_default() -> None:
+    """§7.2: "off by default" means the model is not told they exist, which is
+    stronger than asking it not to use them."""
+    offered = {s["function"]["name"] for s in registry.schemas()}
+    assert "obliterate" not in offered
+    assert "peek" in offered
+
+
+def test_raising_the_ceiling_offers_them() -> None:
+    offered = {s["function"]["name"] for s in registry.schemas(tier_max=Tier.DANGER)}
+    assert "obliterate" in offered
+
+
+def test_the_service_follows_the_flag() -> None:
+    """The half that was missing. `_tool_schemas` always asked for the CONFIRM
+    ceiling, so the engine would execute a DANGER tool after a typed
+    confirmation that nothing could ever trigger — asked to delete a real file
+    with `allow_danger_tools` on, she answered "I cannot delete files with my
+    current tools", which was true of what she had been given."""
+    from sidecar.core.conversation import ConversationService
+
+    service = ConversationService.__new__(ConversationService)
+
+    class _Engine:
+        allow_danger = False
+
+    service._permissions = _Engine()  # type: ignore[assignment]  # noqa: SLF001
+    names = {s["function"]["name"] for s in service._tool_schemas() or []}  # noqa: SLF001
+    assert "obliterate" not in names
+
+    _Engine.allow_danger = True
+    names = {s["function"]["name"] for s in service._tool_schemas() or []}  # noqa: SLF001
+    assert "obliterate" in names, "the flag never reached the model"

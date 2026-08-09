@@ -85,6 +85,15 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     fn: ToolFn
+    #: This tool's result must not reach a cloud model. The tier says whether
+    #: she may run it; this says where the *answer* is allowed to go, which is
+    #: a different question — reading the clipboard is harmless, and sending
+    #: what it contained to someone else's server is not.
+    #:
+    #: `core/conversation.py` moves the continuation pass onto the local model
+    #: when a tool declares this. That has to happen after the call rather than
+    #: before it, because the continuation is where the result enters a prompt.
+    local_only: bool = False
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -182,7 +191,9 @@ def build_parameters(fn: ToolFn) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
-def tool(*, name: str, tier: Tier, description: str) -> Callable[[ToolFn], ToolFn]:
+def tool(
+    *, name: str, tier: Tier, description: str, local_only: bool = False
+) -> Callable[[ToolFn], ToolFn]:
     """Register a coroutine as a tool.
 
     The function is returned unchanged, so it stays directly callable and a
@@ -200,6 +211,7 @@ def tool(*, name: str, tier: Tier, description: str) -> Callable[[ToolFn], ToolF
             description=description,
             parameters=build_parameters(fn),
             fn=fn,
+            local_only=local_only,
         )
         return fn
 

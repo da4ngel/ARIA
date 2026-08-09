@@ -11,8 +11,9 @@ for files while every test still passed.
 """
 
 from sidecar.tools import apps as apps
+from sidecar.tools import clipboard as clipboard
 from sidecar.tools import files as files
 from sidecar.tools import finder as finder
 from sidecar.tools import system as system
 
-__all__ = ["apps", "files", "finder", "system"]
+__all__ = ["apps", "clipboard", "files", "finder", "system"]

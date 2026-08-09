@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import StrEnum
@@ -125,6 +126,173 @@ async def list_windows(ctx: ToolContext) -> ToolResult:
         summary += f"; and {more} more"
 
     return ToolResult(ok=True, data=titles, summary=summary, display={"windows": windows})
+
+
+# ── acting on a window ───────────────────────────────────────────────
+# §9 Phase 3 names `focus_window` and `close_app` and suggests pywinauto for
+# them. It is not needed: `_visible_windows` already hands back the window
+# handle, and pywin32 — a dependency since Phase 3 — does both. That is one
+# fewer dependency tree to survive PyInstaller (§2.3), and requirements.txt has
+# deferred pywinauto twice for exactly these two tools.
+
+
+#: How long to let a raise land before calling it a failure. The switch is
+#: asynchronous; ~500ms total is generous and still well inside a turn.
+WINDOW_SETTLE_TRIES = 10
+WINDOW_SETTLE_STEP_S = 0.05
+
+
+def _matching_window(name: str) -> dict[str, Any] | None:
+    """The open window whose title best answers `name`.
+
+    Reuses the app matcher against titles: "which of these is the user talking
+    about" is the same problem whether the strings are Start-menu entries or
+    window captions, and it already handles typos, hyphens and number words.
+    """
+    windows = _visible_windows()
+    if not windows:
+        return None
+    scored = [(score(name, w["title"]), w) for w in windows]
+    scored = [(s, w) for s, w in scored if s >= MATCH_FLOOR]
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: (-pair[0], len(pair[1]["title"])))
+    return scored[0][1]
+
+
+def _bring_to_front(handle: int) -> bool:
+    """Raise a window, working around the foreground lock.
+
+    **Windows refuses `SetForegroundWindow` from a process that does not own
+    the foreground**, and the sidecar never does — it is a background service.
+    The documented way through is to attach this thread's input queue to the
+    foreground window's for the duration of the call, which makes the two count
+    as one for the purposes of that rule.
+
+    Returns whether the window actually ended up in front, checked rather than
+    assumed: a focus that silently does nothing, reported as success, is the
+    same class of bug as the barge-in that was never wired up.
+    """
+    import win32con
+    import win32gui
+    import win32process
+
+    if win32gui.IsIconic(handle):
+        win32gui.ShowWindow(handle, win32con.SW_RESTORE)
+
+    foreground = win32gui.GetForegroundWindow()
+    ours = win32process.GetWindowThreadProcessId(foreground)[0] if foreground else 0
+    theirs = win32process.GetWindowThreadProcessId(handle)[0]
+
+    attached = False
+    if ours and theirs and ours != theirs:
+        attached = bool(win32process.AttachThreadInput(ours, theirs, True))
+    try:
+        with contextlib.suppress(Exception):
+            win32gui.SetForegroundWindow(handle)
+        with contextlib.suppress(Exception):
+            win32gui.BringWindowToTop(handle)
+    finally:
+        if attached:
+            with contextlib.suppress(Exception):
+                win32process.AttachThreadInput(ours, theirs, False)
+
+    # Poll, do not read once. Measured: reading `GetForegroundWindow` straight
+    # after the call returned the *old* window and reported a failure for a
+    # raise that had plainly worked — the switch is asynchronous, and telling
+    # the user to click the taskbar for a window already in front of them is
+    # worse than saying nothing.
+    for _ in range(WINDOW_SETTLE_TRIES):
+        if win32gui.GetForegroundWindow() == handle:
+            return True
+        time.sleep(WINDOW_SETTLE_STEP_S)
+    return False
+
+
+@tool(
+    name="focus_window",
+    tier=Tier.SAFE,
+    description=(
+        "Bring an already-open window to the front. Use when the user asks to "
+        "switch to, go to, show or focus something that is already running — "
+        "not to start it, which is open_app."
+    ),
+)
+async def focus_window(ctx: ToolContext, name: str) -> ToolResult:
+    """Bring an open window to the front.
+
+    Args:
+        name: Part of the window's title, e.g. "chrome", "notepad"
+    """
+    wanted = name.strip()
+    if not wanted:
+        return ToolResult(ok=False, summary="Tell me which window.", error="empty")
+
+    window = await asyncio.to_thread(_matching_window, wanted)
+    if window is None:
+        return ToolResult(
+            ok=False,
+            summary=f"Nothing open matches {wanted!r}. Say 'open {wanted}' to start it.",
+            error="not_found",
+        )
+
+    raised = await asyncio.to_thread(_bring_to_front, int(window["handle"]))
+    title = str(window["title"])
+    if not raised:
+        # Says what happened rather than claiming a success it cannot see.
+        return ToolResult(
+            ok=False,
+            summary=f"Windows would not let me raise {title}. Click it in the taskbar.",
+            error="foreground_denied",
+        )
+
+    log.info("tool.focused_window", title=title)
+    return ToolResult(ok=True, data={"title": title}, summary=f"Brought {title} to the front.")
+
+
+@tool(
+    name="close_app",
+    tier=Tier.CONFIRM,
+    description=(
+        "Close an open window. Use when the user asks to close, quit or exit "
+        "something that is running."
+    ),
+)
+async def close_app(ctx: ToolContext, name: str) -> ToolResult:
+    """Close an open window.
+
+    Args:
+        name: Part of the window's title, e.g. "notepad", "spotify"
+    """
+    import win32con
+    import win32gui
+
+    wanted = name.strip()
+    if not wanted:
+        return ToolResult(ok=False, summary="Tell me which window to close.", error="empty")
+
+    window = await asyncio.to_thread(_matching_window, wanted)
+    if window is None:
+        return ToolResult(
+            ok=False, summary=f"Nothing open matches {wanted!r}.", error="not_found"
+        )
+
+    handle = int(window["handle"])
+    title = str(window["title"])
+    # `WM_CLOSE` is the message the X button sends, so the app gets to prompt
+    # about unsaved work. Terminating the process instead would discard it.
+    await asyncio.to_thread(win32gui.PostMessage, handle, win32con.WM_CLOSE, 0, 0)
+    await asyncio.sleep(0.4)
+    still_open = await asyncio.to_thread(win32gui.IsWindow, handle)
+
+    log.info("tool.closed_app", title=title, gone=not still_open)
+    if still_open:
+        return ToolResult(
+            ok=True,
+            data={"title": title, "closed": False},
+            summary=f"Asked {title} to close — it is probably asking about unsaved work.",
+        )
+    return ToolResult(ok=True, data={"title": title, "closed": True}, summary=f"Closed {title}.")
 
 
 # ── matching ─────────────────────────────────────────────────────────

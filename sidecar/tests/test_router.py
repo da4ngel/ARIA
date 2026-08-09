@@ -348,3 +348,20 @@ def test_a_spoken_turn_still_stays_local() -> None:
     router = Router(HealthTracker(), RoutingBias.QUALITY)
     decision = router.choose("write me a python script", available=ALL_MODELS, spoken=True)
     assert decision.model.local
+
+
+# ── the clipboard must not leave the machine ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "what is on my clipboard",
+        "what did i just copy",
+        "summarise what i copied",
+        "paste what i copied earlier",
+    ],
+)
+def test_clipboard_questions_stay_on_this_machine(message: str) -> None:
+    router = Router(HealthTracker(), RoutingBias.QUALITY)
+    assert router.choose(message, available=ALL_MODELS).model.local, message

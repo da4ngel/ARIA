@@ -43,7 +43,7 @@ from sidecar.providers.tts import TextToSpeech, split_for_speech
 from sidecar.rpc.events import AssistantState, Event, EventBus
 from sidecar.tools import registry
 from sidecar.tools.permissions import PermissionEngine
-from sidecar.tools.registry import ToolContext
+from sidecar.tools.registry import Tier, ToolContext
 
 log = structlog.get_logger(__name__)
 
@@ -583,10 +583,22 @@ class ConversationService:
 
         None rather than an empty list when there is no permission engine:
         some Ollama builds refuse a request carrying an empty `tools` array.
+
+        **The ceiling follows `allow_danger_tools`.** It did not, and the flag
+        was therefore dead: the engine would happily execute a DANGER tool
+        after a typed confirmation, but `schemas()` never told the model such a
+        tool existed, so nothing could ever ask for one. Asked to delete a real
+        file with the flag on, she answered "I cannot delete files with my
+        current tools" — correctly, from what she had been given.
+
+        Off, the behaviour is unchanged and is the one §7.2 wants: the model is
+        not told those tools exist at all, which is stronger than asking it not
+        to use them.
         """
         if self._permissions is None:
             return None
-        return registry.schemas() or None
+        ceiling = Tier.DANGER if self._permissions.allow_danger else Tier.CONFIRM
+        return registry.schemas(tier_max=ceiling) or None
 
     async def _use_one_tool(
         self,
@@ -663,8 +675,39 @@ class ConversationService:
         ]
         await self._bus.set_state(AssistantState.THINKING)
         return await self._stream_one(
-            turn_id, info, followup, collected, started, offer_tools=False
+            turn_id,
+            self._continuation_model(call.name, info),
+            followup,
+            collected,
+            started,
+            offer_tools=False,
         )
+
+    def _continuation_model(self, tool_name: str, info: ModelInfo) -> ModelInfo:
+        """Which model gets to see the tool's result.
+
+        `router._PRIVATE` already keeps a turn local when the *message* names
+        something private, but it decides before the tool has run, from the
+        user's words. "what did I just copy" does not match it, would route to
+        a cloud provider, and that provider would then be handed the clipboard
+        on this pass — which is the pass where the result actually enters a
+        prompt. So the decision belongs here, after the call, not there.
+        """
+        tool = registry.get(tool_name)
+        if tool is None or not tool.local_only or info.local:
+            return info
+
+        # `self._model` is the local default this service was started with,
+        # already checked against what Ollama has pulled.
+        local = catalog.get(self._model) or catalog.default_local()
+        log.info(
+            "turn.forced_local",
+            tool=tool_name,
+            was=info.id,
+            now=local.id,
+            why="tool result must not leave the machine",
+        )
+        return local
 
     async def _free_vram_for(self, info: ModelInfo) -> None:
         """Evict the previous local model before loading a different one.

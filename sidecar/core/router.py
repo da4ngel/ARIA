@@ -97,7 +97,13 @@ _SEQUENCED = re.compile(r"\b(and then|after that|then\b.*\bthen\b|first.*then)",
 # Content that must never leave the machine (§9.7 stage 2, §11).
 _PRIVATE = re.compile(
     r"\b(my file|my document|this file|clipboard|screenshot|my screen|"
-    r"what am i looking at|my password|my email|my calendar)\b",
+    r"what am i looking at|my password|my email|my calendar|"
+    # "what did I just copy" names the clipboard without using the word, and
+    # it is how people actually ask. Belt and braces: `read_clipboard` is
+    # marked `local_only`, so a turn that reaches it finishes locally whatever
+    # this pattern decided — but staying local from the start is better than
+    # switching models mid-turn.
+    r"just cop(y|ied)|what i cop(y|ied)|i cop(y|ied)|copied earlier)\b",
     re.IGNORECASE,
 )
 

@@ -11,6 +11,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Markdown } from '@/components/Markdown'
+import { ToolCallCard } from '@/components/ToolCallCard'
 import type { Turn } from '@/hooks/useConversation'
 import type { AssistantState } from '@/types/bridge'
 
@@ -50,16 +51,26 @@ function UserTurn({ turn }: { turn: Turn }): JSX.Element {
 }
 
 function AssistantTurn({ turn, state }: { turn: Turn; state: AssistantState }): JSX.Element {
-  const thinking = turn.streaming && !turn.content
+  const tools = turn.toolCalls ?? []
+  const waiting = turn.streaming && !turn.content
+  // Something has to occupy the gap between send and first token, or the window
+  // looks broken for the ~400ms it takes — but a tool card already says she is
+  // busy, and "Thinking…" stacked on top of it says it twice.
+  const placeholder = waiting && tools.length === 0
+
   return (
     <div className="group flex flex-col gap-1">
-      {thinking ? (
-        // Something has to occupy the gap between send and first token, or the
-        // window looks broken for the ~400ms it takes.
+      {/* Above the reply, because that is the order it happened in: she acts,
+          then tells you about it. */}
+      {tools.map((call) => (
+        <ToolCallCard key={call.id} call={call} />
+      ))}
+
+      {placeholder ? (
         <p className="text-small text-aria-faint">
           {state === 'thinking' ? 'Thinking…' : 'Working…'}
         </p>
-      ) : (
+      ) : waiting ? null : (
         <div className="text-body">
           <Markdown text={turn.content} />
           {turn.streaming && (

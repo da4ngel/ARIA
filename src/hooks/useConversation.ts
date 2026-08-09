@@ -24,6 +24,24 @@ export interface Turn {
   routeReason?: string
   /** Set when a provider failed and another one answered instead. */
   note?: string
+  /** What she did during this turn, in the order she did it. The sidecar has
+   *  broadcast `tool.call`/`tool.result` since Phase 3 and nothing consumed
+   *  them, so a turn that opened an app looked identical to one that talked
+   *  about opening it. */
+  toolCalls?: ToolCall[]
+}
+
+export interface ToolCall {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  /** `running` until the result arrives — which includes the whole time a
+   *  tier-2 call is waiting on the confirmation dialog. */
+  state: 'running' | 'ok' | 'failed'
+  summary?: string
+  display?: Record<string, unknown> | null
+  startedAt: number
+  durationMs?: number
 }
 
 interface TurnCompletePayload {
@@ -100,6 +118,56 @@ export function useConversation(connected: boolean): UseConversation {
         const { turn_id: turnId, text } = event.params as { turn_id: string; text: string }
         if (turnId !== activeTurnId.current) return
         setTurns((prev) => appendToStreaming(prev, text))
+        return
+      }
+
+      // She is doing something. Attached to the streaming turn so the card
+      // sits with the answer it belongs to rather than floating at the end.
+      if (event.method === 'tool.call') {
+        const { turn_id: turnId, call_id: callId, tool, args } = event.params as {
+          turn_id: string
+          call_id: string
+          tool: string
+          args: Record<string, unknown>
+        }
+        if (turnId !== activeTurnId.current) return
+        setTurns((prev) =>
+          withStreaming(prev, (turn) => ({
+            ...turn,
+            toolCalls: [
+              ...(turn.toolCalls ?? []),
+              { id: callId, tool, args, state: 'running', startedAt: Date.now() },
+            ],
+          })),
+        )
+        return
+      }
+
+      if (event.method === 'tool.result') {
+        const { turn_id: turnId, call_id: callId, ok, summary, display } = event.params as {
+          turn_id: string
+          call_id: string
+          ok: boolean
+          summary: string
+          display: Record<string, unknown> | null
+        }
+        if (turnId !== activeTurnId.current) return
+        setTurns((prev) =>
+          withStreaming(prev, (turn) => ({
+            ...turn,
+            toolCalls: (turn.toolCalls ?? []).map((call) =>
+              call.id === callId
+                ? {
+                    ...call,
+                    state: ok ? ('ok' as const) : ('failed' as const),
+                    summary,
+                    display,
+                    durationMs: Date.now() - call.startedAt,
+                  }
+                : call,
+            ),
+          })),
+        )
         return
       }
 
@@ -207,20 +275,21 @@ export function useConversation(connected: boolean): UseConversation {
 
 // ── reducers ──────────────────────────────────────────────────────────
 
-function appendToStreaming(turns: Turn[], text: string): Turn[] {
+/** Replace the turn currently streaming, or return the list untouched. */
+function withStreaming(turns: Turn[], change: (turn: Turn) => Turn): Turn[] {
   const index = turns.findIndex((t) => t.streaming)
   if (index === -1) return turns
   const next = [...turns]
-  next[index] = { ...next[index], content: next[index].content + text }
+  next[index] = change(next[index])
   return next
 }
 
+function appendToStreaming(turns: Turn[], text: string): Turn[] {
+  return withStreaming(turns, (turn) => ({ ...turn, content: turn.content + text }))
+}
+
 function clearStreaming(turns: Turn[]): Turn[] {
-  const index = turns.findIndex((t) => t.streaming)
-  if (index === -1) return turns
-  const next = [...turns]
-  next[index] = { ...next[index], content: '' }
-  return next
+  return withStreaming(turns, (turn) => ({ ...turn, content: '' }))
 }
 
 function finalise(turns: Turn[], payload: TurnCompletePayload): Turn[] {

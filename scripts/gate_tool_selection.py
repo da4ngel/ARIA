@@ -64,6 +64,14 @@ PROBES: list[tuple[str, str | None]] = [
     ("which windows are open", "list_windows"),
     ("which files mention the banquet hall", "search_content"),
     ("open my cv", "open_file"),
+    # Phase 3's remaining tools, added when the registry went from 17 to 25.
+    ("switch to chrome", "focus_window"),
+    ("close spotify", "close_app"),
+    ("what is using all my memory", "list_processes"),
+    ("force quit notepad", "kill_process"),
+    ("turn wifi off", "set_wifi"),
+    ("what is on my clipboard", "read_clipboard"),
+    ("copy that to my clipboard", "write_clipboard"),
     # The control. Selection must not make her reach for a tool she does not
     # need, which is the failure mode a smaller list encourages.
     ("what is the capital of Australia", None),
