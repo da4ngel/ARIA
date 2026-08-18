@@ -11,6 +11,9 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
+import type { PermissionMode } from '@/hooks/usePermissionMode'
+import { MODE_COPY, MODE_OPTIONS } from '@/hooks/usePermissionMode'
+
 import { Panel } from '@/components/Panel'
 
 interface ToolSummary {
@@ -27,16 +30,25 @@ const TIER_STYLE = [
   'text-aria-bad',
 ]
 
-export function ToolsPanel({ onClose }: { onClose: () => void }): JSX.Element {
+export function ToolsPanel({
+  onClose,
+  mode,
+  setMode,
+}: {
+  onClose: () => void
+  mode: PermissionMode
+  setMode: (next: PermissionMode) => Promise<void>
+}): JSX.Element {
   const [tools, setTools] = useState<ToolSummary[]>([])
   const [trusted, setTrusted] = useState<string[]>([])
   const [draft, setDraft] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [trustingAll, setTrustingAll] = useState(false)
 
   const load = useCallback(async () => {
     try {
       const [list, trust] = await Promise.all([
-        window.aria.call<{ tools: ToolSummary[] }>('tools.list', {}),
+        window.aria.call<{ tools: ToolSummary[]; mode?: PermissionMode }>('tools.list', {}),
         window.aria.call<{ paths: string[] }>('tools.trusted', {}),
       ])
       setTools(list.tools)
@@ -69,10 +81,62 @@ export function ToolsPanel({ onClose }: { onClose: () => void }): JSX.Element {
     void replace([...trusted, value])
   }, [draft, trusted, replace])
 
+  const trustAllDrives = useCallback(async () => {
+    setError(null)
+    setTrustingAll(true)
+    try {
+      const result = await window.aria.call<{ paths: string[] }>('tools.trust_all_drives', {})
+      setTrusted(result.paths)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setTrustingAll(false)
+    }
+  }, [])
+
   return (
     <Panel title="Tools" onClose={onClose}>
       <section>
-        <h3 className="text-tiny font-semibold text-aria-text">Trusted folders</h3>
+        <h3 className="text-tiny font-semibold text-aria-text">Permission mode</h3>
+        <div className="mt-2 flex gap-1 rounded-lg bg-aria-sunk p-1">
+          {MODE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => void setMode(option.value)}
+              className={`interactive flex-1 rounded px-2 py-1 text-micro transition-colors ${
+                mode === option.value
+                  ? option.value === 'full_access'
+                    ? 'bg-aria-bad/90 text-white'
+                    : 'bg-aria-accent/90 text-aria-void'
+                  : 'text-aria-muted hover:text-aria-text'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <p
+          className={`mt-1.5 text-micro leading-relaxed ${
+            mode === 'full_access' ? 'text-aria-bad' : 'text-aria-faint'
+          }`}
+        >
+          {MODE_COPY[mode]}
+        </p>
+      </section>
+
+      <section className="mt-5">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-tiny font-semibold text-aria-text">Trusted folders</h3>
+          <button
+            type="button"
+            disabled={trustingAll}
+            onClick={() => void trustAllDrives()}
+            className="interactive shrink-0 text-micro text-aria-muted hover:text-aria-text disabled:opacity-40"
+          >
+            {trustingAll ? 'Trusting every drive…' : 'Trust this entire computer'}
+          </button>
+        </div>
         <p className="mt-1 text-micro leading-relaxed text-aria-muted">
           Inside these she writes, moves and deletes without asking — including everything nested
           inside them. Everywhere else she still asks. A folder that reaches outside, like moving a

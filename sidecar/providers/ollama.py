@@ -258,5 +258,7 @@ class OllamaProvider:
     def _unreachable_message(self, exc: httpx.HTTPError) -> str:
         return (
             f"Cannot reach Ollama at {self._base_url} ({type(exc).__name__}: {exc}). "
-            f"Start it with 'ollama serve', or check that nothing else holds port 11434."
+            f"ARIA tries to start it on its own (see providers/ollama_supervisor.py), "
+            f"so this usually means it is not installed — get it from "
+            f"https://ollama.com/download — or that something else holds port 11434."
         )

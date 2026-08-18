@@ -80,6 +80,21 @@ export function OverlayApp(): JSX.Element {
           setReply('')
         }, LINGER_MS)
       }
+
+      if (event.method === 'proactive') {
+        // No preceding question — `Caption` already renders `reply` alone
+        // when `asked` is empty, so this reuses the exact same component
+        // rather than a second caption style for the one case that has no
+        // question in it.
+        setMisheard('')
+        clearLinger()
+        setAsked('')
+        setReply(String(event.params.text ?? ''))
+        linger.current = window.setTimeout(() => {
+          setAsked('')
+          setReply('')
+        }, LINGER_MS)
+      }
     })
 
     return () => {

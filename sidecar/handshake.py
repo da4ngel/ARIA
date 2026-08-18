@@ -42,9 +42,22 @@ def write_handshake(path: Path, token: str) -> None:
     log.info("handshake.written", path=str(path))
 
 
-def clear_handshake(path: Path) -> None:
-    """Remove the token file on clean shutdown so no stale token survives."""
+def clear_handshake(path: Path, token: str = "") -> None:
+    """Remove the token file on clean shutdown so no stale token survives.
+
+    **Only if it is ours.** A second sidecar that cannot bind the port still
+    runs its whole startup and then its whole shutdown, and the unconditional
+    unlink meant that failed process deleted the *running* one's handshake on
+    the way out. The running sidecar keeps serving and every gate script
+    immediately dies with `FileNotFoundError: data\\.handshake` — an error about
+    the process that worked, caused by the one that did not.
+
+    Passing no token keeps the old behaviour for callers that have none.
+    """
     try:
+        if token and path.exists() and path.read_text(encoding="utf-8").strip() != token:
+            log.info("handshake.kept", path=str(path), reason="written by another process")
+            return
         path.unlink(missing_ok=True)
     except OSError as exc:  # pragma: no cover — best effort on shutdown
         log.warning("handshake.clear_failed", path=str(path), error=str(exc))

@@ -30,9 +30,17 @@ from sidecar.handshake import (
 )
 from sidecar.logging_setup import configure_logging
 from sidecar.memory.db import Database
+from sidecar.memory.episodic import EpisodicMemory
 from sidecar.memory.indexer import Indexer
 from sidecar.memory.messages import ConversationStore
+from sidecar.memory.reflection import Reflector
+from sidecar.memory.retrieval import MemoryServices, Retriever
+from sidecar.memory.routing_log import RoutingLog
+from sidecar.memory.scheduler import MemoryScheduler
+from sidecar.memory.semantic import SemanticMemory
 from sidecar.memory.settings_store import (
+    ONLINE_MODE,
+    PERMISSION_MODE,
     ROUTING_BIAS,
     SELECTED_MODEL,
     TRUSTED_PATHS,
@@ -40,15 +48,21 @@ from sidecar.memory.settings_store import (
     SettingsStore,
 )
 from sidecar.memory.tool_log import ToolJournal
+from sidecar.persona import focus
+from sidecar.persona import proactivity as proactivity_module
 from sidecar.providers import catalog
 from sidecar.providers.availability import AvailabilityService
 from sidecar.providers.base import LLMProvider, ProviderError
 from sidecar.providers.connectivity import connectivity
+from sidecar.providers.embeddings import MODEL as EMBEDDING_MODEL
 from sidecar.providers.embeddings import OllamaEmbeddings
 from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
+from sidecar.providers.ollama_supervisor import OllamaSupervisor
 from sidecar.providers.openai import OpenAIProvider
+from sidecar.providers.search import WebSearch
+from sidecar.providers.search import available as search_backend
 from sidecar.providers.stt import TranscriptionUnavailable, WhisperSTT
 from sidecar.providers.tts import KokoroTTS, SpeechUnavailable
 from sidecar.providers.vad import SileroVAD
@@ -58,7 +72,7 @@ from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
 from sidecar.tools import finder
 from sidecar.tools.files import known_folder
-from sidecar.tools.permissions import PermissionEngine
+from sidecar.tools.permissions import PermissionEngine, PermissionMode
 
 log = structlog.get_logger(__name__)
 
@@ -93,7 +107,9 @@ def _startup(settings: Settings) -> None:
 
 
 def _shutdown(settings: Settings) -> None:
-    clear_handshake(settings.handshake_path)
+    # Our token, so a sidecar that failed to bind cannot delete the running
+    # one's handshake on its way out.
+    clear_handshake(settings.handshake_path, _AUTH_TOKEN)
     if runtime.db is not None:
         runtime.db.close()
         runtime.reset()
@@ -131,11 +147,60 @@ async def _start_conversation(settings: Settings) -> None:
 
     runtime.provider = ollama
     runtime.providers = providers
-    runtime.local_models = await _discover_local_models(ollama)
 
     availability = AvailabilityService(tracker)
-    availability.set_local_models(runtime.local_models)
     runtime.availability = availability
+
+    async def _local_models_arrived(models: list[str]) -> bool:
+        """Ollama is reachable again — re-arm everything that reads from it.
+
+        `local_models` is what the picker greys out against and what the
+        router checks before choosing a local model, and it used to be
+        written exactly once, at startup. Starting Ollama afterwards left it
+        empty, so local models stayed dead until ARIA itself was restarted —
+        which is what Eyaas kept hitting.
+        """
+        runtime.local_models = models
+        runtime.ollama_ready = True
+        availability.set_local_models(models)
+        log.info("ollama.models", count=len(models), models=models)
+
+        # A daemon that has just been (re)started holds no model at all, so
+        # the next turn would pay the 8-15s cold start §12 exists to keep the
+        # user away from. Warming here is safe against rule 2 for exactly
+        # that reason — there is nothing resident to sit beside.
+        local_id = runtime.local_model
+        if not (settings.warm_on_startup and local_id and local_id in models):
+            return True
+        try:
+            took_ms = await ollama.warm(local_id)
+        except ProviderError as exc:
+            # Measured on a cold start: Ollama serves `/api/tags` well before
+            # it can serve `/api/chat`, so a warm fired the moment it looks
+            # reachable can come back 500. Reporting False asks the
+            # supervisor to try again next tick rather than leaving the model
+            # cold for the user's first turn.
+            log.warning("model.warm_failed", model=local_id, error=str(exc))
+            return False
+        log.info("model.warm", model=local_id, took_ms=round(took_ms, 1))
+        return True
+
+    supervisor = OllamaSupervisor(
+        ollama,
+        autostart=settings.ollama_autostart,
+        start_timeout_s=settings.ollama_start_timeout_s,
+        on_ready=_local_models_arrived,
+    )
+    runtime.ollama_supervisor = supervisor
+    # **Before discovery, not after.** A cold start with Ollama not running
+    # is the case this exists for: probe, start it, wait for it, and only
+    # then ask what is pulled. Never fatal — `ensure_running` returns False
+    # and the sidecar comes up with cloud models and an honest health report.
+    await supervisor.ensure_running()
+
+    runtime.local_models = await _discover_local_models(ollama)
+    availability.set_local_models(runtime.local_models)
+    supervisor.start()
 
     # Refreshes on a timer so a turn never waits on a network round-trip to
     # answer "are you online" — §9.7 asks for exactly this caching.
@@ -172,10 +237,44 @@ async def _start_conversation(settings: Settings) -> None:
         with contextlib.suppress(ValueError, TypeError):
             runtime.permissions.set_trusted(_json.loads(str(stored_trusted)))
 
+    # Defaults to AUTO (the field's own default) when unset — a fresh
+    # install must not launch into FULL_ACCESS just because the key is
+    # missing. Unlike TRUSTED_PATHS this is stored single-encoded, the same
+    # plain `get`/`set` shape ONLINE_MODE already uses below.
+    stored_mode = await settings_store.get(PERMISSION_MODE)
+    if stored_mode:
+        with contextlib.suppress(ValueError):
+            runtime.permissions.set_mode(PermissionMode(str(stored_mode)))
+
+    # Off unless it has been switched on before. The query leaves this
+    # machine, so the default is the user's decision, not an inherited one.
+    stored_online = await settings_store.get(ONLINE_MODE)
+    runtime.online_mode = (
+        bool(stored_online) if stored_online is not None else settings.online_mode
+    )
+    runtime.search = WebSearch()
+    log.info(
+        "online.ready",
+        enabled=runtime.online_mode,
+        backend=search_backend(),
+    )
+
     runtime.tts = _build_tts(settings)
     runtime.stt = _build_stt(settings)
+
+    # Built before the conversation, because the conversation takes it. Longer
+    # keep-alive than the indexer's: a 752ms cold start does not fit inside
+    # §9's 80ms retrieval budget, so the model stays resident.
+    runtime.embeddings = OllamaEmbeddings(settings.ollama_url, keep_alive="30m")
+    spawn(_probe_embeddings(), "embeddings.probe")
+
+    store = ConversationStore(runtime.require_db())
+    # §9.7's labelled dataset. Written after each reply, never on the path.
+    runtime.routing_log = RoutingLog(runtime.require_db())
+    memory = _build_memory(settings, store, ollama, local_default.id)
+
     runtime.conversation = ConversationService(
-        store=ConversationStore(runtime.require_db()),
+        store=store,
         provider=ollama,
         bus=bus,
         model=local_default.id,
@@ -188,13 +287,20 @@ async def _start_conversation(settings: Settings) -> None:
         usable_models=availability.usable,
         permissions=runtime.permissions,
         tts=runtime.tts,
+        memory=memory,
+        routing_log=runtime.routing_log,
+        db=runtime.require_db(),
     )
     log.info(
         "conversation.ready",
         local_default=local_default.id,
         selected=selected,
         bias=str(bias),
+        memory=memory is not None,
     )
+
+    _start_memory_scheduler(settings, settings_store, providers, availability)
+    _start_proactivity_scheduler(settings, ollama, local_default.id)
 
     await _build_listener(settings, settings_store)
     _build_indexer(settings)
@@ -340,6 +446,152 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
     log.info("listener.ready", mode=str(mode), enabled=listener.enabled)
 
 
+async def _probe_embeddings() -> None:
+    """Ask once whether `nomic-embed-text` is pulled. Never blocks startup.
+
+    A False here is not a failure: memory falls back to word matching, and the
+    log says what to run. Chat is unaffected either way — nothing on the turn
+    path ever waits on this.
+    """
+    if runtime.embeddings is None:
+        return
+    ready = await runtime.embeddings.available()
+    runtime.embeddings_ready = ready
+    if ready:
+        log.info("embeddings.ready", model=EMBEDDING_MODEL)
+    else:
+        log.warning(
+            "embeddings.unavailable",
+            model=EMBEDDING_MODEL,
+            fix=f"Run: ollama pull {EMBEDDING_MODEL} — until then memory "
+            "falls back to word matching and file search by meaning is off.",
+        )
+
+
+def _build_memory(
+    settings: Settings,
+    store: ConversationStore,
+    provider: LLMProvider,
+    model: str,
+) -> MemoryServices | None:
+    """Facts, episodes and retrieval, as one handle for the conversation."""
+    if not settings.memory_enabled:
+        log.info("memory.disabled")
+        return None
+
+    db = runtime.require_db()
+    semantic = SemanticMemory(db, runtime.embeddings)
+    episodic = EpisodicMemory(
+        db,
+        runtime.embeddings,
+        store,
+        provider,
+        model,
+        num_ctx=settings.num_ctx,
+        is_busy=lambda: bool(runtime.conversation and runtime.conversation.busy),
+    )
+    retriever = Retriever(
+        semantic,
+        episodic,
+        runtime.embeddings,
+        deadline_s=settings.memory_retrieval_deadline_ms / 1000.0,
+    )
+    runtime.memory = MemoryServices(
+        semantic=semantic, episodic=episodic, retriever=retriever, store=store
+    )
+    return runtime.memory
+
+
+def _start_memory_scheduler(
+    settings: Settings,
+    settings_store: SettingsStore,
+    providers: dict[str, LLMProvider],
+    availability: AvailabilityService,
+) -> None:
+    """Idle sweeps always; the nightly §8.3 pass only if it is wanted."""
+    memory = runtime.memory
+    if memory is None:
+        return
+
+    runtime.reflector = Reflector(
+        runtime.require_db(),
+        memory.semantic,
+        memory.episodic,
+        settings_store,
+        providers,
+        usable=availability.usable(),
+        local_models=runtime.local_models,
+    )
+
+    if not settings.memory_reflection_enabled:
+        log.info("reflection.disabled")
+        return
+
+    reflector = runtime.reflector
+    scheduler = MemoryScheduler(
+        on_sweep=lambda: memory.episodic.close_idle_sessions(
+            idle_minutes=settings.memory_idle_close_minutes
+        ),
+        on_reflect=reflector.run,
+        last_reflection=reflector.last_run,
+        unreflected=reflector.unreflected_count,
+        is_busy=lambda: bool(runtime.conversation and runtime.conversation.busy),
+        hour=settings.memory_reflection_hour,
+    )
+    runtime.memory_scheduler = scheduler
+    scheduler.start()
+
+
+def _start_proactivity_scheduler(
+    settings: Settings, local_provider: LLMProvider, local_model: str
+) -> None:
+    """Unprompted messages (Phase 8). Off entirely when the switch is off —
+    the same "no tool at all" shape `allow_danger_tools` and online mode
+    already use, not a scheduler that starts and immediately declines to
+    do anything.
+    """
+    if not settings.proactivity_enabled:
+        log.info("proactivity.disabled")
+        return
+    if runtime.conversation is None:
+        return
+
+    conversation = runtime.conversation
+    db = runtime.require_db()
+    store = ConversationStore(db)
+
+    async def find_candidates() -> list[proactivity_module.Candidate]:
+        return await proactivity_module.default_candidates(db, store)
+
+    async def self_check(candidate: proactivity_module.Candidate) -> bool:
+        return await proactivity_module.default_self_check(local_provider, local_model, candidate)
+
+    async def deliver(candidate: proactivity_module.Candidate) -> None:
+        await conversation.send_proactive(
+            candidate.text,
+            urgency=candidate.urgency,
+            trigger=candidate.trigger,
+            procedure_name=candidate.ref,
+        )
+
+    def is_actively_working() -> bool:
+        # Two different "busy" signals, composed here rather than baked into
+        # `focus.py`: whether the *user* is at the keyboard (Win32) and
+        # whether *she* is mid-reply. Interrupting either is the wrong kind
+        # of proactive.
+        return focus.is_actively_working() or conversation.busy
+
+    scheduler = proactivity_module.ProactivityScheduler(
+        store=store,
+        find_candidates=find_candidates,
+        self_check=self_check,
+        deliver=deliver,
+        is_actively_working=is_actively_working,
+    )
+    runtime.proactivity_scheduler = scheduler
+    scheduler.start()
+
+
 def _build_indexer(settings: Settings) -> None:
     """Start reading documents in the background, if that is wanted.
 
@@ -355,7 +607,9 @@ def _build_indexer(settings: Settings) -> None:
     if not roots:
         return
 
-    embeddings = OllamaEmbeddings(settings.ollama_url)
+    # Shared with memory retrieval rather than a second instance: one Ollama
+    # connection pool and one lock, so the two never contend independently.
+    embeddings = runtime.embeddings or OllamaEmbeddings(settings.ollama_url)
     indexer = Indexer(
         runtime.require_db(),
         embeddings,
@@ -389,6 +643,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await connectivity.stop()
+        if runtime.ollama_supervisor is not None:
+            await runtime.ollama_supervisor.stop()
+        if runtime.memory_scheduler is not None:
+            await runtime.memory_scheduler.stop()
+        if runtime.proactivity_scheduler is not None:
+            await runtime.proactivity_scheduler.stop()
+        if runtime.embeddings is not None:
+            await runtime.embeddings.aclose()
+        if runtime.search is not None:
+            await runtime.search.aclose()
         if runtime.tts is not None:
             await runtime.tts.aclose()
         if runtime.stt is not None:

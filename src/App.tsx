@@ -25,6 +25,8 @@ import { ModelPicker } from '@/components/ModelPicker'
 import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
 import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
+import { MemoryPanel } from '@/components/MemoryPanel'
+import { PermissionModeChip } from '@/components/PermissionModeChip'
 import { ToolsPanel } from '@/components/ToolsPanel'
 import { VoicePanel } from '@/components/VoicePanel'
 import { WindowControls } from '@/components/WindowControls'
@@ -32,6 +34,7 @@ import { useAudio } from '@/hooks/useAudio'
 import { useConfirm } from '@/hooks/useConfirm'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
+import { usePermissionMode } from '@/hooks/usePermissionMode'
 import { useHandsFree } from '@/hooks/useHandsFree'
 import { usePublishVoiceLevel } from '@/hooks/usePublishVoiceLevel'
 import { useWakeChime } from '@/hooks/useWakeChime'
@@ -49,9 +52,13 @@ type Overlay = Section | 'shortcuts' | null
 export default function App(): JSX.Element {
   const { status, assistantState, lastLog, restartBrain } = useRpc()
   const connected = status === 'connected'
-  const { turns, busy, send, cancel, newChat, openSession, sessionId, lastFirstTokenMs } =
+  const { turns, busy, send, cancel, newChat, openSession, rate, sessionId, lastFirstTokenMs } =
     useConversation(connected)
   const models = useModels(connected)
+  // Lifted so the header chip, the Tools panel and Settings all read one
+  // value. Three independent fetches could disagree, and a selector that
+  // disagrees with what is actually enforced is worse than none.
+  const permissions = usePermissionMode(connected)
   // The sidecar's agent loop is suspended while one of these is open.
   const confirm = useConfirm()
   const audio = useAudio()
@@ -214,6 +221,11 @@ export default function App(): JSX.Element {
                 disabled={!connected}
                 onToggle={handsFree.toggle}
               />
+              <PermissionModeChip
+                mode={permissions.mode}
+                disabled={!connected}
+                onOpen={() => setOverlay('tools')}
+              />
               <ModelPicker models={models} />
               <WindowControls expanded={expanded} onToggleExpanded={toggleExpanded} />
             </div>
@@ -244,7 +256,7 @@ export default function App(): JSX.Element {
           </AnimatePresence>
 
           {started ? (
-            <ConversationView turns={turns} state={orbState} />
+            <ConversationView turns={turns} state={orbState} onRate={rate} />
           ) : (
             <EmptyState state={orbState} connected={connected} onPick={send} level={orbLevel} />
           )}
@@ -310,12 +322,22 @@ export default function App(): JSX.Element {
             {overlay === 'voice' && (
               <VoicePanel key="voice" handsFree={handsFree} onClose={() => setOverlay(null)} />
             )}
-            {overlay === 'tools' && <ToolsPanel key="tools" onClose={() => setOverlay(null)} />}
+            {overlay === 'tools' && (
+              <ToolsPanel
+                key="tools"
+                onClose={() => setOverlay(null)}
+                mode={permissions.mode}
+                setMode={permissions.setMode}
+              />
+            )}
+            {overlay === 'memory' && <MemoryPanel key="memory" onClose={() => setOverlay(null)} />}
             {overlay === 'settings' && (
               <SettingsPanel
                 key="settings"
                 onClose={() => setOverlay(null)}
                 onKeysChanged={models.refresh}
+                mode={permissions.mode}
+                setMode={permissions.setMode}
               />
             )}
             {overlay === 'shortcuts' && (

@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import StrEnum
@@ -293,6 +295,470 @@ async def close_app(ctx: ToolContext, name: str) -> ToolResult:
             summary=f"Asked {title} to close — it is probably asking about unsaved work.",
         )
     return ToolResult(ok=True, data={"title": title, "closed": True}, summary=f"Closed {title}.")
+
+
+# ── typing ───────────────────────────────────────────────────────────
+# The gap that prompted this: asked to "write hi in notepad", she opened
+# Notepad fine (`open_app`) and then had nothing that could put the text in
+# it — `write_file` writes to disk, `browser_fill` only reaches a browser
+# tab's DOM. Neither is "type a keystroke into whatever has focus", and
+# nothing existed that was. This is that tool.
+#
+# `SendInput` with `KEYEVENTF_UNICODE`, not `pywinauto` — the project's own
+# precedent for `focus_window`/`close_app`: plain pywin32/ctypes already
+# does the job, and `pywinauto` was pinned by BUILD_SPEC but never actually
+# needed. `KEYEVENTF_UNICODE` sends the character itself rather than a
+# virtual-key code, so it works for anything typeable regardless of the
+# active keyboard layout — no `VkKeyScan` lookup, no layout-dependent
+# failures.
+#
+# **CONFIRM tier, and no attempt at a password-field refusal.**
+# `browser_fill`'s refusal works because it can inspect the DOM; a native
+# window offers no equivalent — UIA is exactly the pywinauto dependency this
+# avoids, and a heuristic over a window title would be a guess dressed as a
+# safeguard. The honest answer to "what if this types into a password
+# field" is the CONFIRM dialog itself: a human reads what is about to be
+# typed and into which window, before it happens.
+
+INPUT_KEYBOARD = 1
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_KEYUP = 0x0002
+VK_RETURN = 0x0D
+#: For the paste path's Ctrl+V. Nothing else in this module sends a
+#: virtual-key code with a modifier held.
+VK_CONTROL = 0x11
+VK_V = 0x56
+#: Between keys, not for realism — an app that redraws on each keystroke
+#: (a terminal, a slow web form loaded in an Electron shell) can drop input
+#: sent with no gap at all. Small enough that "typed into Notepad" still
+#: feels instant.
+KEY_DELAY_S = 0.008
+
+
+def _key_sender() -> Callable[..., None]:
+    """Build the one-keystroke `SendInput` wrapper.
+
+    A factory rather than module-level structs so `ctypes` is still touched
+    inside a call — and shared rather than nested, because two callers now
+    need it: `_send_unicode_text` types a character at a time, and
+    `_send_chord` sends Ctrl+V for the paste path.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    # An unsigned integer sized to match a pointer, per the real Win32
+    # header — not a `POINTER(c_ulong)`. Passing an actual pointer type
+    # here was the first version's bug (see below); this is the type
+    # `dwExtraInfo` is actually declared as.
+    ulong_ptr = wintypes.WPARAM
+
+    class _KeyBdInput(ctypes.Structure):
+        _fields_ = (
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ulong_ptr),
+        )
+
+    class _MouseInput(ctypes.Structure):
+        _fields_ = (
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ulong_ptr),
+        )
+
+    # **The bug that shipped first, caught only by a live check no mock could
+    # have caught**: a union with only `ki` sizes `INPUT` at 32 bytes. The
+    # real Win32 `INPUT` union is sized to its largest member — `MOUSEINPUT`,
+    # 40 bytes total with `type` — even when only the keyboard variant is
+    # ever used. `SendInput` validates the `cbSize` argument against that
+    # real size and rejects anything smaller with `ERROR_INVALID_PARAMETER`
+    # (87), which every unit test here mocks straight past. `mi` is unused
+    # and exists only to make the union — and so `ctypes.sizeof(_Input)` —
+    # the right width.
+    class _InputUnion(ctypes.Union):
+        _fields_ = (("mi", _MouseInput), ("ki", _KeyBdInput))
+
+    class _Input(ctypes.Structure):
+        _fields_ = (("type", wintypes.DWORD), ("ii", _InputUnion))
+
+    def _send_one(*, vk: int = 0, scan: int = 0, flags: int = 0) -> None:
+        inp = _Input(type=INPUT_KEYBOARD, ii=_InputUnion(ki=_KeyBdInput(vk, scan, flags, 0, 0)))
+        # `pointer()`, not the lighter `byref()`: this is a handful of calls
+        # per keystroke, not a hot loop, and a real pointer object is what
+        # lets a test inspect `.contents` without touching a real DLL.
+        sent = user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(_Input))
+        if sent != 1:
+            raise OSError(
+                f"SendInput rejected the keystroke (GetLastError={ctypes.GetLastError()})."
+            )
+        time.sleep(KEY_DELAY_S)
+
+    return _send_one
+
+
+def _send_chord(modifier: int, key: int) -> None:
+    """One modified keypress — modifier down, key down, key up, modifier up.
+
+    Only Ctrl+V uses this today. Every other keystroke in this module goes
+    out as `KEYEVENTF_UNICODE` with no virtual-key code at all, which is why
+    nothing here had a modifier path before: pasting is the first thing that
+    needs one.
+    """
+    send = _key_sender()
+    send(vk=modifier, flags=0)
+    send(vk=key, flags=0)
+    send(vk=key, flags=KEYEVENTF_KEYUP)
+    send(vk=modifier, flags=KEYEVENTF_KEYUP)
+
+
+def _send_unicode_text(text: str, *, target_hwnd: int | None = None) -> int:
+    """Type `text` into whatever window currently has keyboard focus.
+
+    Returns the number of characters actually sent — `len(text)` only when
+    every one of them landed.
+
+    A literal '\\n' becomes a real Enter keypress — `KEYEVENTF_UNICODE`
+    delivers the character itself, and most apps do not treat U+000A as a
+    line break the way an actual Enter is.
+
+    **Stops the instant `target_hwnd` loses focus, mid-character rather
+    than mid-string.** The real incident this guards against: a long essay
+    approved for Notepad, the user switches to ARIA's own chat window
+    partway through, and the remaining keystrokes — including an Enter from
+    the essay's own paragraph breaks — landed in the chat composer instead,
+    which submits on Enter. The CONFIRM dialog approves *this text into
+    this window*; it does not approve continuing to type it into whatever
+    the user looks at next. Checked before every character rather than
+    every line: `GetForegroundWindow` is a cheap call next to the 8ms
+    already spent per keystroke, and the whole point is to leak as few
+    characters as possible once focus moves.
+
+    Anything long is pasted instead (`_paste_text`), so in practice this now
+    carries short text only — the guard stays because "short" is a
+    threshold, not a guarantee, and a slow machine can still straddle it.
+    """
+    import win32gui
+
+    send_one = _key_sender()
+
+    def _focus_moved() -> bool:
+        return target_hwnd is not None and win32gui.GetForegroundWindow() != target_hwnd
+
+    # One loop over the real text, not split-then-loop: '\n' is handled
+    # inline so every unit of `text` — a character or a paragraph break —
+    # costs exactly one focus check and one `typed` increment, and the
+    # returned count lines up with `text` index-for-index.
+    typed = 0
+    for char in text:
+        if _focus_moved():
+            return typed
+        if char == "\n":
+            send_one(vk=VK_RETURN, flags=0)
+            send_one(vk=VK_RETURN, flags=KEYEVENTF_KEYUP)
+        else:
+            code = ord(char)
+            send_one(scan=code, flags=KEYEVENTF_UNICODE)
+            send_one(scan=code, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+        typed += 1
+    return typed
+
+
+#: Above this, the text is pasted in one keystroke instead of typed. The
+#: threshold is about duration, not length: typing costs ~16ms a character
+#: (two `_send_one` calls, each sleeping `KEY_DELAY_S`), so 200 characters is
+#: about three seconds — the longest a send should be able to straddle a
+#: user's attention. An essay at that rate is **32 seconds**, and that is the
+#: window the real incident happened inside.
+PASTE_THRESHOLD_CHARS = 200
+#: Between Ctrl+V and putting the user's own clipboard back. Restoring
+#: immediately is a race against the app's own paste handler, which reads the
+#: clipboard asynchronously after the keystroke arrives.
+PASTE_SETTLE_S = 0.15
+#: How long an approved target window stays claimable. The same shape and
+#: nearly the same number as `screen.CAPTURE_TTL_S` (150s), and for the same
+#: reason: it has to outlive `CONFIRM_TIMEOUT_S` (120s) so a slow approval
+#: still finds its stash, and expire soon after so it cannot be picked up by
+#: an unrelated later call.
+TYPE_TARGET_TTL_S = 150.0
+
+#: Approved window per pending call, keyed by the text itself.
+#:
+#: **This is the whole fix.** `type_text` used to read `GetForegroundWindow()`
+#: at execution time, which is *after* the confirmation dialog — so the window
+#: it typed into was whichever one the user happened to be looking at when
+#: they clicked Allow, not the one they were told about. The recorded
+#: incident: an essay approved for Notepad, the user switched to VS Code
+#: mid-send, the per-character guard correctly stopped at 412 of 2000 and
+#: reported `focus_lost` — and then the model, handed that failure, simply
+#: called `type_text` again with the remaining text, which re-read the
+#: foreground window, found VS Code, and typed the rest there.
+#:
+#: Same guarantee `organize_folder` and `capture_screen` already make in
+#: their own words — the plan you approve is the plan that runs — applied to
+#: the window rather than to a file list or a frame.
+_TYPE_TARGETS: dict[str, tuple[int, str, float]] = {}
+
+
+def _target_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def clear_type_targets() -> None:
+    """Drop every stashed window. For tests, mirroring `screen.clear_captures`."""
+    _TYPE_TARGETS.clear()
+
+
+def _is_arias_own_window(title: str) -> bool:
+    """Whether this is ARIA's own window rather than something to type into.
+
+    She cannot type into herself, and the attempt is not harmless: the
+    composer submits on Enter, so an essay aimed at ARIA's chat sends a
+    paragraph per line. Half of the original incident was exactly this shape
+    — text meant for Notepad arriving in a chat box.
+
+    Matched on the title because the sidecar has no reliable handle on which
+    process the renderer is: it is a sibling child of Electron, not a parent
+    or a child of this one.
+    """
+    return title.strip().casefold() in _ARIA_WINDOW_TITLES
+
+
+#: Window titles that are ARIA herself. Kept as a set rather than a substring
+#: test so a document *named* "Aria" is still a legitimate target.
+_ARIA_WINDOW_TITLES = frozenset({"aria"})
+
+
+async def preview_type_text(text: str, **_kwargs: object) -> dict[str, Any] | None:
+    """Claim the window that is focused *now*, and describe the send.
+
+    Runs before the confirmation dialog (`PermissionEngine._ask`), so "now"
+    is the moment the user is about to be asked — which is the last moment
+    the answer is still the one they mean. The claim is consumed by
+    `type_text` itself.
+
+    Also the reason the dialog stops rendering a wall of raw argument text:
+    an essay in the fallback `<dl>` is what made the confirmation grow past
+    the window and put Escape — which denies — out of reach.
+    """
+    import win32gui
+
+    handle = await asyncio.to_thread(win32gui.GetForegroundWindow)
+    if not handle:
+        return None
+    title = str(await asyncio.to_thread(win32gui.GetWindowText, handle))
+    _TYPE_TARGETS[_target_key(text)] = (handle, title, time.monotonic())
+    return {
+        "kind": "type_target",
+        "window": title or "(untitled window)",
+        "chars": len(text),
+        "method": "paste" if len(text) > PASTE_THRESHOLD_CHARS else "keystrokes",
+        "excerpt": text[:600],
+        "truncated": len(text) > 600,
+        "is_aria": _is_arias_own_window(title),
+    }
+
+
+def _take_target(text: str) -> tuple[int, str] | None:
+    """The window approved for this exact text, once. Pop, not read."""
+    claimed = _TYPE_TARGETS.pop(_target_key(text), None)
+    if claimed is None:
+        return None
+    handle, title, at = claimed
+    if time.monotonic() - at > TYPE_TARGET_TTL_S:
+        return None
+    return handle, title
+
+
+def _paste_text(text: str, *, target_hwnd: int) -> bool:
+    """Put `text` on the clipboard, send one Ctrl+V, then put the clipboard
+    back. Returns whether the keystroke was sent.
+
+    **One keystroke instead of thousands is the point.** A 2000-character
+    essay typed a character at a time takes 32 seconds, and every one of
+    those seconds is a chance for the user to alt-tab into a window that
+    never agreed to receive an essay. A paste lands in one event; there is no
+    "partway through" to be interrupted.
+
+    The cost is the clipboard, which belongs to the user — so it is saved and
+    restored around the send.
+    """
+    import win32gui
+
+    from sidecar.tools import clipboard
+
+    previous = clipboard.read_text()
+    clipboard.write_text(text)
+    try:
+        # Last gate. Between the claim and here sits the confirmation dialog
+        # and `_bring_to_front`; if any of that ended somewhere else, send
+        # nothing at all rather than one Ctrl+V into the wrong window.
+        if win32gui.GetForegroundWindow() != target_hwnd:
+            return False
+        _send_chord(VK_CONTROL, VK_V)
+        # Let the app actually read the clipboard before it is taken away.
+        time.sleep(PASTE_SETTLE_S)
+    finally:
+        # `None` means the clipboard held something that is not text — an
+        # image, a file list. Writing "" back would destroy it, which is a
+        # worse outcome than leaving the pasted text there, and there is no
+        # way to reconstruct it from here.
+        if previous is not None:
+            clipboard.write_text(previous)
+    return True
+
+
+@tool(
+    name="type_text",
+    tier=Tier.CONFIRM,
+    description=(
+        "Type text into whatever window currently has keyboard focus — a "
+        "native app like Notepad, Word, or a terminal, not a browser tab "
+        "(use browser_fill for that). Call open_app or focus_window first "
+        "so the right window is focused, then this."
+    ),
+    preview=preview_type_text,
+)
+async def type_text(ctx: ToolContext, text: str) -> ToolResult:
+    """Send keystrokes to the focused window.
+
+    Args:
+        text: What to type, e.g. "hi" or a multi-line note. "\\n" sends Enter.
+    """
+    import win32gui
+
+    if not text:
+        return ToolResult(ok=False, summary="There was nothing to type.", error="empty")
+
+    claimed = _take_target(text)
+    if claimed is None:
+        # Nothing was claimed, so fall back to reading the foreground window
+        # now. Not a corner case: `_preview` runs *inside* `_ask`, after its
+        # "always allow" early return, and never runs at all under
+        # FULL_ACCESS or when a test calls the tool directly. The same
+        # fallback `organize_folder` and `capture_screen` both carry.
+        handle = await asyncio.to_thread(win32gui.GetForegroundWindow)
+        title = (
+            str(await asyncio.to_thread(win32gui.GetWindowText, handle)) if handle else ""
+        )
+    else:
+        handle, title = claimed
+
+    if not handle:
+        return ToolResult(
+            ok=False,
+            summary="No window has focus, so there is nowhere to type this.",
+            error="no_focus",
+        )
+
+    if _is_arias_own_window(title):
+        return ToolResult(
+            ok=False,
+            summary=(
+                "That would type into my own window, not into an app. Open or "
+                "focus the app you want the text in, then ask again."
+            ),
+            error="aria_window",
+        )
+
+    if not await asyncio.to_thread(win32gui.IsWindow, handle):
+        return ToolResult(
+            ok=False,
+            summary=(
+                f"{title or 'That window'} has closed since this was approved, "
+                f"so there was nowhere to type. Open it again and ask me to retry."
+            ),
+            error="window_gone",
+        )
+
+    # **Re-focus, never re-read.** The window is the one that was approved;
+    # if it is not in front any more, bring it forward rather than typing
+    # into whatever replaced it. `_bring_to_front` already solves the
+    # foreground lock and polls to confirm the switch actually happened.
+    if not await asyncio.to_thread(_bring_to_front, handle):
+        return ToolResult(
+            ok=False,
+            summary=(
+                f"I could not bring {title or 'that window'} to the front, so I "
+                f"typed nothing rather than risk sending it somewhere else. "
+                f"Click that window and ask me again."
+            ),
+            error="foreground_denied",
+        )
+
+    if len(text) > PASTE_THRESHOLD_CHARS:
+        try:
+            pasted = await asyncio.to_thread(_paste_text, text, target_hwnd=handle)
+        except OSError as exc:
+            log.warning("tool.type_text_failed", window=title or "(untitled)", error=str(exc))
+            return ToolResult(
+                ok=False,
+                summary=f"Windows would not accept that keystroke: {exc}",
+                error="send_input_failed",
+            )
+        if not pasted:
+            return ToolResult(
+                ok=False,
+                summary=(
+                    f"{title or 'That window'} lost focus before I could paste, so "
+                    f"nothing was sent. Nothing landed anywhere else."
+                ),
+                error="focus_lost",
+            )
+        log.info("tool.typed_text", window=title or "(untitled)", chars=len(text), via="paste")
+        return ToolResult(
+            ok=True,
+            data={"window": title, "chars": len(text), "via": "paste"},
+            summary=f"Put {len(text)} characters into {title or 'the focused window'}.",
+        )
+
+    try:
+        typed = await asyncio.to_thread(_send_unicode_text, text, target_hwnd=handle)
+    except OSError as exc:
+        log.warning("tool.type_text_failed", window=title or "(untitled)", error=str(exc))
+        return ToolResult(
+            ok=False,
+            summary=f"Windows would not accept that keystroke: {exc}",
+            error="send_input_failed",
+        )
+
+    if typed < len(text):
+        # Short text only now — anything long is pasted in one event and
+        # cannot be interrupted partway. **The summary deliberately does not
+        # suggest trying again.** The old wording ended "Check what actually
+        # landed before trying again", and the model did exactly that: it
+        # re-called `type_text` with the remainder, which re-read the
+        # foreground window and typed into the window the user had switched
+        # to. The window claim above is the structural fix; this is the
+        # second layer, because a tool result is an instruction to a model.
+        log.warning(
+            "tool.typed_text_interrupted",
+            window=title or "(untitled)",
+            typed=typed,
+            requested=len(text),
+        )
+        return ToolResult(
+            ok=False,
+            data={"window": title, "chars_typed": typed, "chars_requested": len(text)},
+            summary=(
+                f"Only {typed} of {len(text)} characters reached "
+                f"{title or 'the window'} before it lost focus. Do not re-send "
+                f"this — tell the user what landed and let them say what to do."
+            ),
+            error="focus_lost",
+        )
+
+    log.info("tool.typed_text", window=title or "(untitled)", chars=len(text), via="keystrokes")
+    return ToolResult(
+        ok=True,
+        data={"window": title, "chars": len(text), "via": "keystrokes"},
+        summary=f"Typed into {title or 'the focused window'}.",
+    )
 
 
 # ── matching ─────────────────────────────────────────────────────────

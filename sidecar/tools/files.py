@@ -39,6 +39,23 @@ _FORBIDDEN_ROOTS = (
 )
 
 
+def _scan_changed() -> None:
+    """Tell the finder its cached directory scan is out of date.
+
+    Imported here rather than at module scope on purpose: `tools/finder.py`
+    imports `known_folder` from this module, so a top-level import back the
+    other way is a cycle. One deferred import inside one function is the
+    smaller cost, and it is the only edge between the two.
+
+    Every tool below that creates, moves, renames or removes something calls
+    this after the filesystem has actually changed — never before, and never
+    on a refusal, so a call that did nothing does not throw away a good scan.
+    """
+    from sidecar.tools.finder import invalidate_scan
+
+    invalidate_scan()
+
+
 def _refuse(path: Path) -> str | None:
     """Why this path must not be touched, or None if it may be."""
     try:
@@ -96,6 +113,7 @@ async def move_file(ctx: ToolContext, source: str, destination: str) -> ToolResu
 
     await asyncio.to_thread(shutil.move, str(src), str(dst))
     log.info("tool.moved", source=str(src), destination=str(dst))
+    _scan_changed()
     return ToolResult(
         ok=True,
         data={"source": str(src), "destination": str(dst)},
@@ -137,6 +155,7 @@ async def delete_file(ctx: ToolContext, path: str) -> ToolResult:
     size = (await asyncio.to_thread(target.stat)).st_size
     await asyncio.to_thread(target.unlink)
     log.info("tool.deleted", path=str(target), bytes=size)
+    _scan_changed()
     return ToolResult(
         ok=True,
         data={"path": str(target), "bytes": size},
@@ -380,6 +399,7 @@ async def create_folder(ctx: ToolContext, path: str) -> ToolResult:
 
     await asyncio.to_thread(lambda: target.mkdir(parents=True, exist_ok=True))
     log.info("tool.created_folder", path=str(target))
+    _scan_changed()
     return ToolResult(ok=True, data={"path": str(target)}, summary=f"Created {target}.")
 
 
@@ -412,6 +432,7 @@ async def write_file(ctx: ToolContext, path: str, content: str = "") -> ToolResu
         return ToolResult(ok=False, summary=f"Could not write {target}: {exc}", error=str(exc))
 
     log.info("tool.wrote_file", path=str(target), bytes=len(content), replaced=existed)
+    _scan_changed()
     verb = "Replaced" if existed else "Created"
     return ToolResult(
         ok=True,
@@ -460,6 +481,7 @@ async def rename_file(ctx: ToolContext, path: str, new_name: str) -> ToolResult:
 
     await asyncio.to_thread(target.rename, destination)
     log.info("tool.renamed", was=str(target), now=str(destination))
+    _scan_changed()
     return ToolResult(
         ok=True,
         data={"was": str(target), "now": str(destination)},
@@ -500,6 +522,7 @@ async def delete_folder(ctx: ToolContext, path: str) -> ToolResult:
     count = len(await asyncio.to_thread(lambda: list(target.rglob("*"))))
     await asyncio.to_thread(shutil.rmtree, target)
     log.info("tool.deleted_folder", path=str(target), entries=count)
+    _scan_changed()
     return ToolResult(
         ok=True,
         data={"path": str(target), "entries": count},

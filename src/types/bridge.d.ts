@@ -85,6 +85,74 @@ export interface SessionSummary {
   last_activity: string
 }
 
+/** One thing she has learned, as `memory.list` returns it (BUILD_SPEC §7.3). */
+export interface MemoryFact {
+  id: number
+  subject: string
+  predicate: string
+  object: string
+  confidence: number
+  evidence_count: number
+  /** You asserted it. Reflection may not overwrite it — only you may. */
+  user_locked: boolean
+  source_episode: number | null
+  created_at: string
+  updated_at: string
+  /** Set when a newer fact replaced this one. Kept as an audit trail. */
+  superseded_by: number | null
+}
+
+/** One past conversation, compressed. */
+export interface MemoryEpisode {
+  id: number
+  session_id: string | null
+  summary: string
+  started_at: string
+  ended_at: string
+  salience: number
+  access_count: number
+  last_accessed: string | null
+}
+
+/** `memory.stats` — the retrieval latency §9 Phase 5's gate is measured on. */
+export interface RetrievalStats {
+  count: number
+  p50_ms: number
+  p90_ms: number
+  max_ms: number
+  embed_count: number
+  embed_p50_ms: number
+  embed_p90_ms: number
+  degraded: number
+  /** Turns that skipped retrieval entirely — the mechanism, not a shortfall. */
+  empty: number
+}
+
+export interface MemoryStats {
+  facts: number
+  episodes: number
+  retrieval: RetrievalStats
+  last_reflection: string | null
+  reflecting: boolean
+  /** null until probed; false means word matching, not failure. */
+  embeddings_ready: boolean | null
+}
+
+/** What one §8.3 reflection pass did. */
+export interface ReflectionReport {
+  model: string
+  local: boolean
+  window_hours: number
+  messages_read: number
+  inserted: number
+  reinforced: number
+  superseded: number
+  blocked_by_pin: number
+  pruned: number
+  took_ms: number
+  error: string | null
+}
+
 /** `settings.keys` — presence and last four characters only, never a value. */
 export interface CredentialStatus {
   key: 'openai_api_key' | 'gemini_api_key'

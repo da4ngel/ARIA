@@ -34,12 +34,18 @@ READ_SUMMARY_CHARS = 1500
 WRITE_MAX_CHARS = 100_000
 
 
-def _read() -> str | None:
+def read_text() -> str | None:
     """The clipboard's text, or None when it holds something else.
 
     An image, a file list or a rich-text-only payload are all `None` rather
     than an error — "there is no text on the clipboard" is the true answer and
     a more useful one than a traceback.
+
+    Public because `tools/apps.py` borrows it: `type_text` pastes long text
+    rather than typing it, and has to put back whatever was on the clipboard
+    afterwards. Reaching across modules into a `_name` is the kind of thing
+    ruff's SLF rules exist to stop, and the honest fix is to admit this is
+    part of the module's surface.
     """
     import win32clipboard
     import win32con
@@ -55,7 +61,9 @@ def _read() -> str | None:
         win32clipboard.CloseClipboard()
 
 
-def _write(text: str) -> None:
+def write_text(text: str) -> None:
+    """Replace the clipboard's contents. Public for the same reason as
+    `read_text` above."""
     import win32clipboard
     import win32con
 
@@ -80,7 +88,7 @@ def _write(text: str) -> None:
 async def read_clipboard(ctx: ToolContext) -> ToolResult:
     """Read the clipboard's text."""
     try:
-        text = await asyncio.to_thread(_read)
+        text = await asyncio.to_thread(read_text)
     except OSError as exc:
         # Another program had it open. Worth saying plainly — it is transient
         # and trying again usually works.
@@ -136,7 +144,7 @@ async def write_clipboard(ctx: ToolContext, text: str) -> ToolResult:
         )
 
     try:
-        await asyncio.to_thread(_write, text)
+        await asyncio.to_thread(write_text, text)
     except OSError as exc:
         return ToolResult(
             ok=False,

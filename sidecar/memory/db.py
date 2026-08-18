@@ -24,7 +24,7 @@ log = structlog.get_logger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 MIGRATIONS_DIR = Path(__file__).parent
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 T = TypeVar("T")
 
@@ -73,6 +73,12 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version == 3:
         _apply_sql(conn, MIGRATIONS_DIR / "schema_004.sql", target_version=4)
         version = 4
+    if version == 4:
+        _apply_sql(conn, MIGRATIONS_DIR / "schema_005.sql", target_version=5)
+        version = 5
+    if version == 5:
+        _apply_sql(conn, MIGRATIONS_DIR / "schema_006.sql", target_version=6)
+        version = 6
 
     log.info("db.migrated", from_version=started_at, to_version=version)
     return version

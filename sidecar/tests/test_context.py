@@ -5,12 +5,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from sidecar.core.context import (
+    PERSONA_PROMPTS,
+    PERSONA_PROMPTS_ONLINE,
+    PERSONA_PROMPTS_WITH_TOOLS,
+    RETRIEVED_MAX_TOKENS,
     MachineContext,
     PersonaLevel,
     assemble,
     estimate_tokens,
+    fit_to_budget,
     machine_context,
     overhead_tokens,
+    retrieved_block,
+    stable_prefix,
     volatile_prefix,
 )
 from sidecar.providers.base import ChatMessage, Role
@@ -154,3 +161,196 @@ def test_summary_and_machine_context_can_coexist() -> None:
     assert len(messages) == 2
     assert "rain" in messages[0].content
     assert "Right now it is" in messages[1].content
+
+
+# ── retrieved memory (Phase 5) ────────────────────────────────────────
+
+
+def test_nothing_retrieved_renders_nothing() -> None:
+    """A turn about something she has no memory of must leave the prompt
+    byte-identical to a build with no memory at all."""
+    assert retrieved_block([], []) is None
+
+
+def test_facts_and_episodes_render_distinctly() -> None:
+    rendered = retrieved_block(["user works on pricing"], ["They settled on £2,400."])
+    assert rendered is not None
+    assert "- user works on pricing" in rendered
+    assert "Earlier: They settled on £2,400." in rendered
+
+
+def test_the_block_is_capped() -> None:
+    rendered = retrieved_block([f"fact number {i} " + "x" * 200 for i in range(20)], [])
+    assert rendered is not None
+    assert estimate_tokens(rendered) <= RETRIEVED_MAX_TOKENS
+
+
+def test_episodes_are_dropped_before_facts() -> None:
+    """A fact is a standing truth; an episode is one conversation."""
+    rendered = retrieved_block(["a short fact"], ["y" * 4000], max_tokens=30)
+    assert rendered is not None
+    assert "a short fact" in rendered
+    assert "Earlier:" not in rendered
+
+
+def test_one_oversized_fact_is_truncated_rather_than_dropped() -> None:
+    """A clipped fact beats silence — the cap is a prefill guard, not a
+    correctness one."""
+    rendered = retrieved_block(["z" * 4000], [], max_tokens=30)
+    assert rendered is not None
+    assert "z" in rendered
+
+
+def test_memory_never_touches_the_stable_prefix() -> None:
+    """The KV-cache bargain, asserted directly.
+
+    CLAUDE.md's measured rule: an unchanged prefix costs ~480ms/1000 tokens
+    once instead of every turn. If retrieval ever leaked into `stable_prefix`,
+    every topic change would re-prefill the identity block and the tool
+    schemas — about a second a turn, invisibly.
+    """
+    for level in PersonaLevel:
+        for has_tools in (False, True):
+            assert stable_prefix(level, has_tools=has_tools) == stable_prefix(
+                level, has_tools=has_tools
+            )
+
+    baseline = "".join(m.content for m in stable_prefix())
+    assembled = assemble(
+        [ChatMessage(role=Role.USER, content="hi")],
+        machine=full(),
+        retrieved=retrieved_block(["user works on Sillara pricing"], []),
+    )
+    assert assembled[0].content == baseline
+    assert "Sillara" not in assembled[0].content
+
+
+def test_retrieved_memory_sits_after_the_clock() -> None:
+    """§8.2's order: temporal, then facts. Memory sits nearest the turns
+    because that is what it is about."""
+    messages = volatile_prefix(None, full(), retrieved_block(["user likes tea"], []))
+    assert len(messages) == 2
+    assert "Right now it is" in messages[0].content
+    assert "user likes tea" in messages[1].content
+
+
+def test_overhead_counts_the_retrieved_block() -> None:
+    """Uncounted, a roll-up could 'succeed' and still overflow the context —
+    the same failure the machine block was fixed for."""
+    rendered = retrieved_block(["user works on Sillara pricing before 10am"], [])
+    assert overhead_tokens(None, PersonaLevel.FULL, full(), retrieved=rendered) > (
+        overhead_tokens(None, PersonaLevel.FULL, full())
+    )
+
+
+def test_fit_to_budget_reserves_room_for_the_tool_schemas() -> None:
+    """It used to omit them, so it trimmed against a budget ~1650 tokens too
+    generous. Phase 5 threads `has_tools` through rather than adding a second
+    under-count beside it."""
+    turns = [ChatMessage(role=Role.USER, content="x" * 400) for _ in range(8)]
+    # Derived from the real overhead rather than hard-coded, so that editing the
+    # persona changes what this measures and not whether it measures anything.
+    # At a fixed 700 it silently became "both trim to nothing", which passes for
+    # the wrong reason right up until it fails for one.
+    cap = overhead_tokens(None, PersonaLevel.FULL, None, has_tools=False) + 500
+    without = fit_to_budget(turns, summary=None, hard_cap_tokens=cap, has_tools=False)
+    with_tools = fit_to_budget(turns, summary=None, hard_cap_tokens=cap, has_tools=True)
+
+    assert without, "the no-tools case must keep some turns or this proves nothing"
+    assert len(with_tools) < len(without)
+
+
+def test_fit_to_budget_reserves_room_for_memory() -> None:
+    turns = [ChatMessage(role=Role.USER, content="x" * 400) for _ in range(8)]
+    rendered = retrieved_block([f"a remembered fact number {i}" for i in range(5)], [])
+    without = fit_to_budget(turns, summary=None, hard_cap_tokens=700)
+    with_memory = fit_to_budget(
+        turns, summary=None, hard_cap_tokens=700, retrieved=rendered
+    )
+    assert len(with_memory) <= len(without)
+
+
+# ── she has a memory, and the prompt has to say so ────────────────────
+
+
+def test_the_prompt_never_claims_she_remembers_nothing() -> None:
+    """The sentence that made her deny a conversation she had just had.
+
+    "You know nothing about Eyaas beyond this conversation" was written in
+    Phase 1, when it was true, and survived Phase 5 giving her episodes, facts
+    and retrieval. Asked whether they had discussed jobs, she answered "I don't
+    have any record of conversations outside this chat" — compliance, not a
+    retrieval miss.
+    """
+    for prompts in (PERSONA_PROMPTS, PERSONA_PROMPTS_WITH_TOOLS):
+        for prompt in prompts.values():
+            assert "know nothing about Eyaas" not in prompt
+            assert "You remember earlier conversations" in prompt
+
+
+def test_with_tools_she_is_told_to_look_before_denying() -> None:
+    """`recall` is a tool, so the instruction to search only makes sense when
+    tools are offered — and when they are not, she must not be told to call
+    something that does not exist."""
+    with_tools = PERSONA_PROMPTS_WITH_TOOLS[PersonaLevel.FULL]
+    without = PERSONA_PROMPTS[PersonaLevel.FULL]
+
+    assert "`recall`" in with_tools
+    assert "recall" not in without
+
+
+def test_both_levels_still_forbid_inventing_a_memory() -> None:
+    """The anti-invention force is what took the 7B from 57% fabrication to
+    27%. Making her memory-aware must not cost it."""
+    for prompts in (PERSONA_PROMPTS, PERSONA_PROMPTS_WITH_TOOLS):
+        for prompt in prompts.values():
+            assert "Never invent" in prompt
+
+
+def test_the_warm_voice_carries_no_emoji_or_filler_opener() -> None:
+    """`universal_failures` fails *every* probe in *every* category on either
+    of these, so a persona containing one would fail 100+ probes at once."""
+    for prompts in (PERSONA_PROMPTS, PERSONA_PROMPTS_WITH_TOOLS):
+        for prompt in prompts.values():
+            assert "No emoji" in prompt or "no emoji" in prompt
+            assert "filler openers" in prompt
+
+
+def test_warmth_did_not_displace_the_capacity_to_disagree() -> None:
+    """BUILD_SPEC §8.1's boundary, and the thing that keeps her from being a
+    mirror: an agent tuned purely to please stops reading as anybody."""
+    full = PERSONA_PROMPTS_WITH_TOOLS[PersonaLevel.FULL]
+    assert "bad idea" in full
+    assert "Agreeing with everything is not warmth" in full
+
+
+def test_she_is_pointed_at_type_text_for_a_native_app() -> None:
+    """Real failure, live: asked to "write hi in notepad", she opened it fine
+    (`open_app`) then tried `browser_fill` on it (only reaches a browser tab)
+    and then `write_file` to a guessed path. `type_text` was built for
+    exactly this and the prompt has to say so — the first draft of this fix
+    told her no tool could do it at all, written *before* `type_text`
+    existed, and never updated once it did. She then told Eyaas she still
+    could not type into Notepad — the "Calculator... I cannot run programs"
+    failure, reproduced by this file's own edit in the same session it
+    documents that failure in. Assert the *positive* claim, not just that
+    "Notepad" appears — a stale negative claim would still contain it."""
+    for prompts in (PERSONA_PROMPTS_WITH_TOOLS, PERSONA_PROMPTS_ONLINE):
+        for prompt in prompts.values():
+            assert "type_text" in prompt
+            assert "Notepad" in prompt
+            # The old, now-false claim must not survive beside the new tool.
+            assert "nothing can type into it" not in prompt
+
+
+def test_she_is_told_to_use_relative_paths_not_a_guessed_account_name() -> None:
+    """The other half of the same failure: `write_file` was called with
+    `C:/Users/Eyaas/Downloads/hi.txt` — his display name, not his real
+    Windows account folder (`Dark_Angel`), guessed because nothing told her
+    the difference. `write_file`'s own docstring already gives a relative
+    example; this is the same guidance stated as an instruction, not just an
+    example a model under pressure can drift past."""
+    for prompts in (PERSONA_PROMPTS_WITH_TOOLS, PERSONA_PROMPTS_ONLINE):
+        for prompt in prompts.values():
+            assert "relative path" in prompt
+            assert "guessed absolute" in prompt

@@ -57,8 +57,16 @@ def _facts() -> dict[str, Any]:
 
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage("C:\\")
+    # Volume belongs here because `set_volume` used to be the only way to learn
+    # it, and `set_volume` is a write. A model asked to "turn it up" had nowhere
+    # to read the current level from and had to guess one.
+    try:
+        volume: int | None = _read_volume()
+    except Exception:  # noqa: BLE001 — a machine with no audio device is normal
+        volume = None
     return {
         "os": f"{platform.system()} {platform.release()}",
+        "volume_percent": volume,
         "cpu_percent": psutil.cpu_percent(interval=0.1),
         "cpu_cores": psutil.cpu_count(logical=False),
         "ram_used_gb": round((memory.total - memory.available) / 1e9, 1),
@@ -87,42 +95,65 @@ async def get_system_info(ctx: ToolContext) -> ToolResult:
     battery = (
         f", battery {facts['battery_percent']}%" if facts["battery_percent"] is not None else ""
     )
+    volume = (
+        f", volume {facts['volume_percent']}%"
+        if facts["volume_percent"] is not None
+        else ""
+    )
     summary = (
         f"CPU {facts['cpu_percent']}%, "
         f"RAM {facts['ram_used_gb']}/{facts['ram_total_gb']}GB, "
-        f"disk {facts['disk_free_gb']}GB free of {facts['disk_total_gb']}GB{battery}."
+        f"disk {facts['disk_free_gb']}GB free of {facts['disk_total_gb']}GB"
+        f"{battery}{volume}."
     )
     return ToolResult(ok=True, data=facts, summary=summary, display=facts)
+
+
+#: How far "up" and "down" move. Ten is too little to hear across a room and
+#: twenty-five overshoots; this is one comfortable press of a volume key.
+VOLUME_STEP = 15
+
+_DIRECTIONS = {
+    "up": VOLUME_STEP,
+    "louder": VOLUME_STEP,
+    "increase": VOLUME_STEP,
+    "raise": VOLUME_STEP,
+    "down": -VOLUME_STEP,
+    "quieter": -VOLUME_STEP,
+    "lower": -VOLUME_STEP,
+    "decrease": -VOLUME_STEP,
+    "reduce": -VOLUME_STEP,
+}
 
 
 @tool(
     name="set_volume",
     tier=Tier.SAFE,
     description=(
-        "Set the system output volume to a percentage from 0 to 100. Use when "
-        "asked to turn the volume up or down, mute, or set it to a level."
+        "Change the system output volume. Give `percent` for an exact level "
+        "(0-100), or `direction` for a relative change: 'up', 'down', 'mute' "
+        "or 'unmute'. Use direction when the user says 'louder', 'turn it "
+        "down', 'increase the volume' — anything without a number in it."
     ),
 )
-async def set_volume(ctx: ToolContext, percent: int) -> ToolResult:
-    """Set the system volume.
+async def set_volume(
+    ctx: ToolContext, percent: int | None = None, direction: str | None = None
+) -> ToolResult:
+    """Set or nudge the system volume.
 
     Args:
-        percent: Volume from 0 (muted) to 100 (loudest)
+        percent: An exact level, 0 (silent) to 100 (loudest). Omit for a
+            relative change.
+        direction: "up", "down", "mute" or "unmute". Omit when giving a percent.
     """
-    try:
-        asked = int(percent)
-    except (TypeError, ValueError):
-        # The model sometimes sends "thirty" or "30%" rather than a number.
-        return ToolResult(
-            ok=False,
-            summary=f"{percent!r} is not a volume. Give me a number from 0 to 100.",
-            error="type",
-        )
-
-    wanted = max(0, min(100, asked))
+    # **"Increase the volume" used to be impossible to answer.** `percent` was
+    # required and absolute, nothing exposed the current level, and the
+    # description invited exactly the relative phrasing the schema refused — so
+    # the model had to invent a number blind. The cloud models guessed a
+    # plausible 70 and looked right; qwen2.5:7b sent "up" and failed. It was
+    # read as a routing problem for a week. It was this.
     try:
         was = await asyncio.to_thread(_read_volume)
-        await asyncio.to_thread(_write_volume, wanted)
     except Exception as exc:  # noqa: BLE001 — no audio device is a normal state
         return ToolResult(
             ok=False,
@@ -130,13 +161,84 @@ async def set_volume(ctx: ToolContext, percent: int) -> ToolResult:
             error=str(exc),
         )
 
-    log.info("tool.volume", was=was, now=wanted)
-    clamped = " (clamped to the 0-100 range)" if wanted != asked else ""
+    wanted, failure = _target(was, percent, direction)
+    if failure is not None:
+        return failure
+
+    try:
+        await asyncio.to_thread(_write_volume, wanted)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(
+            ok=False,
+            summary="I could not reach the audio device to change the volume.",
+            error=str(exc),
+        )
+
+    log.info("tool.volume", was=was, now=wanted, direction=direction)
+    if wanted == was:
+        edge = "already at 100%" if wanted == 100 else "already silent"
+        return ToolResult(
+            ok=True, data={"was": was, "now": wanted}, summary=f"Volume {edge}."
+        )
     return ToolResult(
         ok=True,
         data={"was": was, "now": wanted},
-        summary=f"Volume {was}% to {wanted}%{clamped}.",
+        summary=f"Volume {was}% to {wanted}%.",
     )
+
+
+def _target(
+    was: int, percent: int | None, direction: str | None
+) -> tuple[int, ToolResult | None]:
+    """Resolve the requested volume against the current one."""
+    if direction is not None:
+        word = str(direction).strip().lower().lstrip("+")
+        if word in {"mute", "silent", "off"}:
+            return (0, None)
+        if word in {"unmute", "on"}:
+            # Unmuting from silence has to land somewhere audible; restoring the
+            # pre-mute level would need state this tool does not keep.
+            return (max(was, 30), None)
+        if word in _DIRECTIONS:
+            return (max(0, min(100, was + _DIRECTIONS[word])), None)
+        return (
+            was,
+            ToolResult(
+                ok=False,
+                summary=(
+                    f"I don't know what volume {direction!r} means. "
+                    "Use 'up', 'down', 'mute' or 'unmute', or give a number."
+                ),
+                error="direction",
+            ),
+        )
+
+    if percent is None:
+        return (
+            was,
+            ToolResult(
+                ok=False,
+                summary=(
+                    f"Volume is {was}%. Tell me a level from 0 to 100, "
+                    "or say up or down."
+                ),
+                error="no_target",
+            ),
+        )
+
+    try:
+        # The model sometimes sends "thirty" or "30%" rather than a number.
+        asked = int(str(percent).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return (
+            was,
+            ToolResult(
+                ok=False,
+                summary=f"{percent!r} is not a volume. Give me a number from 0 to 100.",
+                error="type",
+            ),
+        )
+    return (max(0, min(100, asked)), None)
 
 
 # ── processes ────────────────────────────────────────────────────────

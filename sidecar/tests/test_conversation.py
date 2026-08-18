@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from sidecar.core import context as ctx
-from sidecar.core.conversation import ConversationService
+from sidecar.core.conversation import ConversationService, _parse_yes_no
 from sidecar.core.router import Router, RoutingBias
+from sidecar.memory import procedures
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
 from sidecar.providers import catalog
@@ -25,6 +27,7 @@ from sidecar.providers.base import (
 )
 from sidecar.providers.health import HealthTracker
 from sidecar.rpc.events import AssistantState, Event, EventBus
+from sidecar.tools.permissions import PermissionMode
 
 
 class FakeProvider:
@@ -657,21 +660,72 @@ class ToolCallingProvider(FakeProvider):
         yield StreamDelta(done=True)
 
 
+class ScriptedToolProvider(FakeProvider):
+    """One entry per pass: a list of `ToolCall`s to ask for, or `None` to
+    answer in text with `reply`. `ToolCallingProvider` can only ever request
+    *one* shape of thing (its constructor's calls, once) and always answers
+    text from the second pass on — too fixed to exercise genuine multi-step
+    chaining, a repeated call, or a model that never stops asking.
+    """
+
+    def __init__(
+        self, script: list[list[ToolCall] | None], reply: str = "Done."
+    ) -> None:
+        super().__init__(chunks=[reply])
+        self._script = script
+        self.passes = 0
+        self.offered: list[list[str]] = []
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str,
+        options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamDelta]:
+        self.calls.append(messages)
+        self.offered.append([t["function"]["name"] for t in (tools or [])])
+        # Once the script runs out, repeat its last entry — the exhaustion
+        # test relies on this to keep asking forever without growing a
+        # script MAX_STEPS long.
+        step = self._script[min(self.passes, len(self._script) - 1)]
+        self.passes += 1
+        if step is not None:
+            yield StreamDelta(tool_calls=step, done=True)
+            return
+        for chunk in self.chunks:
+            yield StreamDelta(text=chunk)
+        yield StreamDelta(done=True)
+
+
 class OpenEngine:
     """A permission engine that always allows, recording what it ran."""
 
     def __init__(self, summary: str = "9 windows open") -> None:
         self.ran: list[tuple[str, dict]] = []
         self.summary = summary
+        # One entry per call, in order — whether *that* call arrived with
+        # §11's escalation set, not just the most recent one.
+        self.escalated: list[bool] = []
         # The real engine has this, and `_tool_schemas` reads it to decide
         # whether the model is told DANGER tools exist. A double missing a
         # field the production code depends on is a test that stops testing.
         self.allow_danger = False
+        # Same reasoning, same fix, the day `_tool_schemas` learned to read
+        # `mode` too (permission modes, 2026-08-14).
+        self.mode = PermissionMode.AUTO
+        # Tools this engine should report as having failed — a denied
+        # confirmation, a refusal, an error. Set per test; empty by default.
+        self.fails: frozenset[str] = frozenset()
 
-    async def run(self, name, arguments, ctx, *, rationale=""):
+    async def run(self, name, arguments, ctx, *, rationale="", force_confirm=False):
         from sidecar.tools.registry import ToolResult
 
         self.ran.append((name, arguments))
+        self.escalated.append(force_confirm)
+        if name in self.fails:
+            return ToolResult(ok=False, summary=f"{name} did not run.", error="denied")
         return ToolResult(ok=True, summary=self.summary, display={"big": "payload"})
 
 
@@ -718,10 +772,15 @@ async def test_only_the_summary_reaches_the_model(database: Database, make_servi
     assert all("payload" not in m.content for m in second_pass)
 
 
-async def test_the_continuation_is_not_offered_tools_again(
+async def test_the_continuation_is_offered_tools_again_for_chaining(
     database: Database, make_service
 ) -> None:
-    """Otherwise a model loops: use a tool, see the tools, use one again."""
+    """Phase 6: a continuation *can* call another tool — that's the whole
+    point of the agent loop. `ToolCallingProvider` only ever asks for a tool
+    on its very first pass and answers in text from its second pass on, so
+    this just proves the option was there: offering tools again is what makes
+    a second, sequential call possible at all, even though this particular
+    provider stub doesn't take it."""
     provider = ToolCallingProvider([ToolCall(id="c1", name="list_windows", arguments={})])
     svc, _bus = tool_service(database, make_service, provider, OpenEngine())
 
@@ -729,14 +788,16 @@ async def test_the_continuation_is_not_offered_tools_again(
     await _drain(svc)
 
     assert provider.offered[0], "the first pass offers tools"
-    assert provider.offered[1] == [], "the second must not"
+    assert provider.offered[1], "so does the continuation — chaining needs this"
 
 
-async def test_extra_tool_calls_are_dropped_and_declared(
+async def test_extra_tool_calls_in_one_response_are_dropped_and_declared(
     database: Database, make_service
 ) -> None:
-    """One tool per turn until Phase 6. Executing an unreviewed plan is worse
-    than doing less than asked."""
+    """A model asking for several tools *in the same response* still only
+    runs the first — executing an unreviewed plan is worse than doing less
+    than asked. That's a different question from chaining across steps,
+    which the agent loop now allows one call at a time."""
     provider = ToolCallingProvider(
         [
             ToolCall(id="c1", name="list_windows", arguments={}),
@@ -772,6 +833,249 @@ async def test_no_engine_means_the_model_is_never_told_tools_exist(
     assert provider.offered[0] == []
 
 
+# ── the agent loop chains steps (Phase 6) ──────────────────────────────
+
+
+async def test_a_second_step_can_call_a_different_tool(
+    database: Database, make_service
+) -> None:
+    """The whole point of Phase 6: find, then open, then answer — three
+    passes, two different tools, one turn."""
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="find", arguments={"query": "cv"})],
+            [ToolCall(id="c2", name="open_file", arguments={"path": "cv.docx"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("find my cv and open it")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["find", "open_file"]
+    assert bus.of(Event.TURN_COMPLETE)[0]["full_text"] == "Done."
+    calls = bus.of(Event.TOOL_CALL)
+    assert [c["step"] for c in calls] == [0, 1], "each step is numbered, not repeated"
+
+
+async def test_a_turn_never_ends_with_an_empty_reply(
+    database: Database, make_service
+) -> None:
+    """The observed half of `gate_agent.py`'s open line: the model runs a
+    tool, then finishes its next pass with no text at all. `_finish` would
+    store and broadcast an empty `full_text`, which from the outside is
+    indistinguishable from a hung app.
+
+    The tool's own summary stands in — framed as a report of what ran, not
+    dressed up as something she said.
+    """
+    provider = ScriptedToolProvider(
+        [[ToolCall(id="c1", name="find", arguments={"query": "cv"})], None],
+        reply="",
+    )
+    engine = OpenEngine(summary="Found 1: cv.pdf (by name).")
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("find my cv")
+    await _drain(svc)
+
+    full_text = bus.of(Event.TURN_COMPLETE)[0]["full_text"]
+    assert full_text.strip(), "a turn that says nothing is the one outcome never allowed"
+    assert "find" in full_text, "it names the tool that did run"
+    assert "cv.pdf" in full_text, "and carries what that tool actually found"
+
+
+async def test_an_empty_reply_with_no_tool_still_says_something(
+    database: Database, make_service
+) -> None:
+    """No tool ran either, so there is nothing to report but the silence —
+    a provider returning an empty completion (GPT-5 spending its whole
+    `max_tokens` on reasoning is the recorded case)."""
+    provider = ScriptedToolProvider([None], reply="")
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("hello")
+    await _drain(svc)
+
+    full_text = bus.of(Event.TURN_COMPLETE)[0]["full_text"]
+    assert full_text.strip()
+    assert "empty" in full_text.lower()
+
+
+async def test_a_real_reply_is_never_replaced_by_the_fallback(
+    database: Database, make_service
+) -> None:
+    """The guard fires on silence only. A model that answered — however
+    briefly — keeps its own words."""
+    provider = ScriptedToolProvider(
+        [[ToolCall(id="c1", name="find", arguments={"query": "cv"})], None],
+        reply="It's in Downloads.",
+    )
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("find my cv")
+    await _drain(svc)
+
+    assert bus.of(Event.TURN_COMPLETE)[0]["full_text"] == "It's in Downloads."
+
+
+async def test_the_same_call_twice_aborts_as_loop_detection(
+    database: Database, make_service
+) -> None:
+    """Asking for the exact same tool with the exact same arguments twice in
+    one turn means stuck, not progress — stop rather than repeat it."""
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="list_windows", arguments={})],
+            [ToolCall(id="c2", name="list_windows", arguments={})],
+        ]
+    )
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("what is open")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["list_windows"], "the repeat never ran"
+    full_text = bus.of(Event.TURN_COMPLETE)[0]["full_text"]
+    assert "list_windows" in full_text, "the model is told why it stopped"
+
+
+async def test_a_tool_that_never_stops_asking_hits_the_step_budget(
+    database: Database, make_service
+) -> None:
+    """A model that just keeps asking for something new must still end the
+    turn — a bounded loop, not an unbounded one."""
+    from sidecar.core.agent import MAX_STEPS
+
+    # `MAX_STEPS` tool-requesting passes, then one more with no tools
+    # offered — a real model, offered nothing, answers in text; the trailing
+    # `None` is what that looks like here.
+    script: list[list[ToolCall] | None] = [
+        [ToolCall(id=f"c{i}", name="open_app", arguments={"name": f"app{i}"})]
+        for i in range(MAX_STEPS)
+    ]
+    script.append(None)
+    provider = ScriptedToolProvider(script)
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("open a lot of things")
+    await _drain(svc)
+
+    assert len(engine.ran) == MAX_STEPS, "exactly the budget, not more"
+    complete = bus.of(Event.TURN_COMPLETE)[0]
+    assert complete["note"] and str(MAX_STEPS) in complete["note"]
+    assert complete["full_text"] == "Done.", "the final pass still gets to answer in text"
+
+
+async def test_the_step_after_an_untrusted_source_tool_is_escalated(
+    database: Database, make_service
+) -> None:
+    """§11: a call right after reading something from outside the machine is
+    forced through confirmation, regardless of that tool's own tier —
+    `open_app` is SAFE and would otherwise run silently."""
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="research", arguments={"query": "x"})],
+            [ToolCall(id="c2", name="open_app", arguments={"name": "notepad"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("look that up and open notepad")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["research", "open_app"]
+    assert engine.escalated == [False, True], "only the step after research is escalated"
+
+
+async def test_a_denied_untrusted_read_does_not_escalate_the_next_step(
+    database: Database, make_service
+) -> None:
+    """§11 escalates the step after *reading* untrusted content. A `research`
+    that was denied at its own dialog, or that errored, read nothing — so
+    there is no untrusted content in the context for the next step to be
+    protected from, and asking about it is pure friction.
+
+    Observed live, and it compounds: one `research` whose confirmation timed
+    out (120s, resolving to DENIED) made the *next* `research` escalate too,
+    which also timed out, and the turn spent four minutes asking about pages
+    nobody ever fetched.
+    """
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="research", arguments={"query": "x"})],
+            [ToolCall(id="c2", name="open_app", arguments={"name": "notepad"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    engine.fails = frozenset({"research"})
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("look that up and open notepad")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["research", "open_app"]
+    assert engine.escalated == [False, False], "nothing was read, so nothing to escalate for"
+
+
+async def test_one_web_read_after_another_does_not_escalate(
+    database: Database, make_service
+) -> None:
+    """Decided with Eyaas (2026-08-18): §11 guards against untrusted content
+    reaching a tool that *does* something. A second `research` does nothing
+    to this machine and is already gated by the online-mode switch.
+
+    Measured before this: one "what is the latest Python" turn raised three
+    confirmation dialogs for a read-only T1 tool, which is exactly the
+    friction that trains a person to approve without reading.
+    """
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="research", arguments={"query": "python"})],
+            [ToolCall(id="c2", name="research", arguments={"query": "python 3.14"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("what is the latest python")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["research", "research"]
+    assert engine.escalated == [False, False], "a second read is not the action §11 guards"
+
+
+async def test_a_tool_that_acts_after_a_web_read_still_escalates(
+    database: Database, make_service
+) -> None:
+    """The half that did not move, asserted beside the half that did — the
+    narrowing is about *reads*, and nothing else."""
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="research", arguments={"query": "x"})],
+            [ToolCall(id="c2", name="write_file", arguments={"path": "notes.txt"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, _bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("look that up and write it down")
+    await _drain(svc)
+
+    assert engine.escalated == [False, True]
+
+
 # ── a local_only tool moves the continuation off the cloud ────────────
 # `_PRIVATE` in the router decides from the user's words, *before* the tool
 # runs. This is the guarantee that does not depend on guessing the phrasing:
@@ -803,3 +1107,310 @@ def test_an_ordinary_tool_leaves_the_model_alone() -> None:
 
     cloud = catalog.require("gpt-5.4-nano")
     assert service._continuation_model("open_app", cloud) is cloud  # noqa: SLF001
+
+
+# ── proactivity (Phase 8) ───────────────────────────────────────────
+
+
+def _proactivity_service(
+    database: Database, make_service, **kwargs: object
+) -> tuple[ConversationService, RecordingBus]:
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(),
+        bus=bus,
+        model="test-model",
+        **kwargs,
+    )
+    return svc, bus
+
+
+async def test_send_proactive_persists_as_a_flagged_message(
+    database: Database, make_service
+) -> None:
+    svc, _bus = _proactivity_service(database, make_service)
+    await svc.send("hello")
+    await _drain(svc)
+
+    message_id = await svc.send_proactive(
+        "Still working on Sillara pricing?", trigger="idle_intent"
+    )
+
+    assert message_id is not None
+    history = await svc.history(None)
+    proactive_rows = [m for m in history.messages if m.proactive]
+    assert len(proactive_rows) == 1
+    assert proactive_rows[0].content == "Still working on Sillara pricing?"
+    assert proactive_rows[0].role == Role.ASSISTANT
+
+
+async def test_send_proactive_broadcasts_the_event(database: Database, make_service) -> None:
+    svc, bus = _proactivity_service(database, make_service)
+    await svc.send("hello")
+    await _drain(svc)
+
+    await svc.send_proactive("Ready when you are.", urgency="low", trigger="scheduled")
+
+    events = bus.of(Event.PROACTIVE)
+    assert len(events) == 1
+    assert events[0]["text"] == "Ready when you are."
+    assert events[0]["urgency"] == "low"
+
+
+async def test_send_proactive_creates_a_session_if_none_exists(
+    database: Database, make_service
+) -> None:
+    """A proactive message needs somewhere to live even before the user has
+    ever said anything — the trigger can fire on a machine that was just
+    started."""
+    svc, _bus = _proactivity_service(database, make_service)
+
+    message_id = await svc.send_proactive("Good morning.")
+
+    assert message_id is not None
+    history = await svc.history(None)
+    assert len(history.messages) == 1
+    assert history.messages[0].proactive
+
+
+async def test_send_proactive_is_rateable_through_the_existing_mechanism(
+    database: Database, make_service
+) -> None:
+    """The whole point of writing a `routing_log` row for it: the *existing*
+    `turn.rate` thumbs mechanism must work on a proactive message with no
+    new code path."""
+    from sidecar.memory.routing_log import RoutingLog
+
+    provider = FakeProvider()
+    bus = RecordingBus()
+    routing_log = RoutingLog(database)
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+        routing_log=routing_log,
+    )
+
+    message_id = await svc.send_proactive("Checking in.", trigger="scheduled")
+    assert message_id is not None
+    for _ in range(20):
+        row = await database.run(
+            lambda c: c.execute(
+                "SELECT stage FROM routing_log WHERE message_id = ?", (message_id,)
+            ).fetchone()
+        )
+        if row is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert row is not None and row["stage"] == "proactive"
+
+    await routing_log.rate(message_id, 1)
+    assert await routing_log.rating_for(message_id) == 1
+
+
+# ── procedure offer replies (Phase 8 Part 2) ─────────────────────────
+# "Offer once, wait for a yes" needs something to recognise the yes.
+# `_resolve_procedure_reply` is the other half of `send_proactive`'s
+# `procedure_name` — these prove a plain yes/no resolves it without ever
+# reaching the model.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("yes", True),
+        ("Yes.", True),
+        ("yeah", True),
+        ("sure!", True),
+        ("go ahead", True),
+        ("sounds good", True),
+        ("no", False),
+        ("no thanks", False),
+        ("nah", False),
+        ("skip it", False),
+        ("not now", False),
+        ("what's the weather like", None),
+        ("yes please remember that I also like tea", None),
+        ("", None),
+    ],
+)
+def test_parse_yes_no(text: str, expected: bool | None) -> None:
+    assert _parse_yes_no(text) is expected
+
+
+def _seed_procedure(conn: sqlite3.Connection, name: str) -> None:
+    conn.execute(
+        "INSERT INTO procedures (name, trigger_phrase, steps, confirmed, created_at) "
+        "VALUES (?, ?, '[{\"tool\": \"find\"}]', 0, datetime('now'))",
+        (name, "organise downloads"),
+    )
+
+
+async def test_a_yes_reply_confirms_the_pending_offer_without_a_model_call(
+    database: Database, make_service
+) -> None:
+    provider = FakeProvider()
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+        db=database,
+    )
+    await database.run(lambda c: _seed_procedure(c, "find -> read_file"))
+
+    await svc.send_proactive("Want me to remember that?", procedure_name="find -> read_file")
+    started = await svc.send("yes")
+
+    assert provider.calls == []  # never reached the model
+    offers = await procedures.pending_offers(database)
+    assert offers == []  # no longer pending — it is confirmed now
+    row = await database.run(
+        lambda c: c.execute(
+            "SELECT confirmed FROM procedures WHERE name = ?", ("find -> read_file",)
+        ).fetchone()
+    )
+    assert row["confirmed"] == 1
+
+    history = await svc.history(started.session_id)
+    assert history.messages[-2].content == "yes"
+    assert history.messages[-1].content == "Got it — I'll remember that."
+    assert bus.of(Event.TURN_COMPLETE)[-1]["turn_id"] == started.turn_id
+
+
+async def test_a_no_reply_discards_the_pending_offer(database: Database, make_service) -> None:
+    svc, _bus = _proactivity_service(database, make_service, db=database)
+    await database.run(lambda c: _seed_procedure(c, "find -> read_file"))
+
+    await svc.send_proactive("Want me to remember that?", procedure_name="find -> read_file")
+    await svc.send("no")
+
+    row = await database.run(
+        lambda c: c.execute(
+            "SELECT * FROM procedures WHERE name = ?", ("find -> read_file",)
+        ).fetchone()
+    )
+    assert row is None  # discarded, not just left unconfirmed
+
+
+async def test_an_unrelated_reply_falls_through_to_a_normal_turn(
+    database: Database, make_service
+) -> None:
+    """A pending offer must never swallow an unrelated message as if it were
+    a decline — the model still answers it normally."""
+    provider = FakeProvider(chunks=["Paris."])
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+        db=database,
+    )
+    await database.run(lambda c: _seed_procedure(c, "find -> read_file"))
+
+    await svc.send_proactive("Want me to remember that?", procedure_name="find -> read_file")
+    await svc.send("what is the capital of France?")
+    await _drain(svc)
+
+    assert len(provider.calls) == 1  # the normal turn reached the model
+    offers = await procedures.pending_offers(database)
+    assert len(offers) == 1  # still pending — an unrelated message is not a decline
+
+
+async def test_the_pending_offer_window_is_one_shot(database: Database, make_service) -> None:
+    """Only the very next `send()` after the offer can resolve it — a second
+    "yes" sent later is an ordinary message, not a second chance to confirm."""
+    provider = FakeProvider(chunks=["Sure."])
+    bus = RecordingBus()
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=provider,
+        bus=bus,
+        model="test-model",
+        db=database,
+    )
+    await database.run(lambda c: _seed_procedure(c, "find -> read_file"))
+
+    await svc.send_proactive("Want me to remember that?", procedure_name="find -> read_file")
+    await svc.send("what is the capital of France?")  # unrelated -> falls through
+    await _drain(svc)
+    await svc.send("yes")  # too late; the window already closed
+    await _drain(svc)
+
+    assert len(provider.calls) == 2  # both turns reached the model
+    row = await database.run(
+        lambda c: c.execute(
+            "SELECT confirmed FROM procedures WHERE name = ?", ("find -> read_file",)
+        ).fetchone()
+    )
+    assert row["confirmed"] == 0  # never got the chance to be confirmed
+
+
+# ── memory (Phase 5) ──────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_deleting_a_conversation_clears_its_episodes_first(
+    database: Database, make_service
+) -> None:
+    """`episodes.session_id` is a foreign key, so the store's delete raises
+    unless the episodes go first.
+
+    Asserted here rather than only against `ConversationStore`, because the
+    ordering lives in `ConversationService` — a test that calls the store
+    directly still passes with the fix removed.
+    """
+    from sidecar.memory.episodic import EpisodicMemory
+    from sidecar.memory.retrieval import MemoryServices, Retriever
+    from sidecar.memory.semantic import SemanticMemory
+
+    store = ConversationStore(database)
+    session = await store.ensure_session("s_mem")
+    for i in range(2):
+        await store.add_message(session, Role.USER, f"question {i}")
+        await store.add_message(session, Role.ASSISTANT, f"answer {i}")
+
+    class EpisodeProvider:
+        async def stream_chat(
+            self, messages: object, **kwargs: object
+        ) -> AsyncIterator[StreamDelta]:
+            yield StreamDelta(text='{"summary": "A chat.", "salience": 0.5}', done=True)
+
+    semantic = SemanticMemory(database, None)
+    episodic = EpisodicMemory(database, None, store, EpisodeProvider(), "test-model")  # type: ignore[arg-type]
+    memory = MemoryServices(
+        semantic=semantic,
+        episodic=episodic,
+        retriever=Retriever(semantic, episodic, None),
+        store=store,
+    )
+    assert await episodic.close_session(session) is not None
+
+    svc = make_service(
+        store=store,
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+        memory=memory,
+    )
+
+    assert await svc.delete_session(session) > 0
+    assert await episodic.list_episodes() == []
+
+
+@pytest.mark.anyio
+async def test_a_turn_without_memory_behaves_exactly_as_before(service) -> None:
+    """Every memory call site is a no-op when `memory` is None — Phase 4's
+    behaviour, so the whole feature can be switched off."""
+    svc, provider, bus = service
+    provider.chunks = ["Can", "berra."]
+
+    started = await svc.send("what is the capital of Australia?")
+    await asyncio.gather(*svc._tasks.values())  # noqa: SLF001
+
+    assert bus.texts() == "Canberra."
+    assert started.session_id

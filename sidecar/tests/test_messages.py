@@ -175,3 +175,60 @@ async def test_delete_unknown_session_is_harmless(store: ConversationStore) -> N
     await make_session(store, "hello")
     assert await store.delete_session("s_nope") == 0
     assert len(await store.list_sessions()) == 1
+
+
+# ── searching past turns (`recall`) ───────────────────────────────────
+
+
+async def test_a_past_conversation_is_findable_with_no_episode_or_fact(
+    store: ConversationStore,
+) -> None:
+    """The exact failure, reproduced at the layer that fixes it.
+
+    He asked one question about data science jobs, opened a new chat, and asked
+    whether they had discussed jobs. There was no episode (the exchange was two
+    messages) and no fact (reflection had not run). The messages were in the
+    table the whole time — nothing had ever looked at them.
+    """
+    old = await make_session(
+        store,
+        "if I'm gonna apply for a data science job, what skills matter most?",
+        "Statistics, SQL, and communicating results.",
+    )
+    current = await make_session(store, "did we have any conversation regarding jobs?")
+
+    hits = await store.search_messages(
+        "did we have any conversation regarding any job kind of things?",
+        exclude_session=current,
+    )
+
+    assert hits, "the question is answerable from raw messages alone"
+    assert hits[0].session_id == old
+    assert "data science job" in hits[0].content
+
+
+async def test_the_current_conversation_is_not_handed_back(
+    store: ConversationStore,
+) -> None:
+    """The model can already see this chat. Returning it as a discovery would
+    make her cite the user's own question back at him as a memory."""
+    current = await make_session(store, "tell me about the banquet hall quotation")
+
+    assert await store.search_messages("banquet hall", exclude_session=current) == []
+    assert await store.search_messages("banquet hall") != []
+
+
+async def test_an_unrelated_conversation_does_not_match(
+    store: ConversationStore,
+) -> None:
+    """Before IDF weighting, a question about jobs returned "Discussed the
+    capitals of countries" — on the strength of the word "discussed"."""
+    await make_session(store, "what is the capital of Australia?", "Canberra.")
+
+    assert await store.search_messages("have we discussed about any jobs?") == []
+
+
+async def test_a_query_of_pure_filler_matches_nothing(store: ConversationStore) -> None:
+    await make_session(store, "the banquet hall quotation was 2400", "Noted.")
+
+    assert await store.search_messages("what about the thing") == []

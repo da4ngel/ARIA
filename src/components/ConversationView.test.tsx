@@ -140,4 +140,85 @@ describe('tool calls', () => {
     )
     expect(screen.getByLabelText('Failed')).toBeDefined()
   })
+
+  // ── step numbering (Phase 6's agent loop) ───────────────────────────
+
+  it('does not number a single-tool turn — there is nothing to count', () => {
+    render(
+      <ConversationView
+        turns={[{ id: 'a', role: 'assistant', content: 'done', toolCalls: [call({ step: 0 })] }]}
+      />,
+    )
+    expect(screen.queryByTitle('Step 1')).toBeNull()
+  })
+
+  it('numbers each step of a real chain, one-indexed for a human to read', () => {
+    render(
+      <ConversationView
+        turns={[
+          {
+            id: 'a',
+            role: 'assistant',
+            content: 'done',
+            toolCalls: [
+              call({ id: 'c1', tool: 'search_files', step: 0 }),
+              call({ id: 'c2', tool: 'read_file', step: 1 }),
+            ],
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByTitle('Step 1')).toBeDefined()
+    expect(screen.getByTitle('Step 2')).toBeDefined()
+  })
+
+  // ── rating (§9.7's labelled dataset) ────────────────────────────────
+
+  const rated = (over: Partial<Turn> = {}): Turn => ({
+    id: 'a1',
+    role: 'assistant',
+    content: 'Volume 40% to 55%.',
+    messageId: 42,
+    ...over,
+  })
+
+  it('offers a thumbs up and down on a finished answer', () => {
+    render(<ConversationView turns={[rated()]} onRate={() => {}} />)
+    expect(screen.getByLabelText('Good answer')).toBeDefined()
+    expect(screen.getByLabelText('Bad answer')).toBeDefined()
+  })
+
+  it('reports which thumb was pressed', () => {
+    const calls: Array<[number, number]> = []
+    render(
+      <ConversationView
+        turns={[rated()]}
+        onRate={(id, rating) => calls.push([id, rating])}
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('Bad answer'))
+    expect(calls).toEqual([[42, -1]])
+  })
+
+  it('shows an existing rating as pressed', () => {
+    render(<ConversationView turns={[rated({ rating: 1 })]} onRate={() => {}} />)
+    expect(screen.getByLabelText('Good answer').getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByLabelText('Bad answer').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('does not offer a rating while the answer is still streaming', () => {
+    render(
+      <ConversationView
+        turns={[rated({ streaming: true })]}
+        onRate={() => {}}
+      />,
+    )
+    expect(screen.queryByLabelText('Good answer')).toBeNull()
+  })
+
+  it('does not offer a rating on a turn with no message row behind it', () => {
+    // A turn that failed before it was persisted has nothing to key a rating on.
+    render(<ConversationView turns={[rated({ messageId: undefined })]} onRate={() => {}} />)
+    expect(screen.queryByLabelText('Good answer')).toBeNull()
+  })
 })

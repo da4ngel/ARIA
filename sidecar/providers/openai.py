@@ -183,6 +183,56 @@ class OpenAIProvider:
                 f"Check your connection, or switch to a local model."
             ) from exc
 
+    async def describe_image(
+        self, image_b64: str, prompt: str, *, model: str = "gpt-4o"
+    ) -> str:
+        """One vision call: an image in, a description out. Not `stream_chat`.
+
+        Deliberately outside the `LLMProvider` Protocol — `sidecar/tools/
+        screen.py` calls this directly, the same shape `research.py` already
+        uses for its own search backend: no local vision model exists on this
+        hardware (rule 2), so there is nothing for `core/router.py` to choose
+        between, and routing a one-shot image description through the general
+        chat pipeline would mean teaching `ChatMessage` an image type for
+        exactly one caller.
+
+        Non-streaming on purpose: a screen description is one paragraph, not
+        something worth token-by-token rendering, and a plain string in, a
+        plain string out keeps this method's shape as simple as the job.
+        """
+        headers = self._headers()
+        body: dict[str, object] = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                        },
+                    ],
+                }
+            ],
+            "max_completion_tokens": 600,
+        }
+        try:
+            response = await self._client.post(
+                "/chat/completions", json=body, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(
+                f"Could not reach OpenAI ({type(exc).__name__}: {exc}) to describe "
+                f"the screen. Check your connection."
+            ) from exc
+        await self._raise_for_json_status(response)
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise ProviderUnavailable("OpenAI returned no description for the image.")
+        return str(choices[0]["message"].get("content") or "").strip()
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -240,15 +290,27 @@ class OpenAIProvider:
         if response.status_code == 200:
             return
         detail = (await response.aread()).decode(errors="replace")[:300]
-        if response.status_code == 429:
-            retry = response.headers.get("retry-after")
+        self._raise_for_detail(response.status_code, detail, response.headers)
+
+    async def _raise_for_json_status(self, response: httpx.Response) -> None:
+        """`_raise_for_stream_status`'s twin for a plain (non-streamed) call —
+        `describe_image` reads the whole body at once, so there is no stream
+        context to `.aread()` from."""
+        if response.status_code == 200:
+            return
+        self._raise_for_detail(response.status_code, response.text[:300], response.headers)
+
+    @staticmethod
+    def _raise_for_detail(status_code: int, detail: str, headers: httpx.Headers) -> None:
+        if status_code == 429:
+            retry = headers.get("retry-after")
             raise ProviderRateLimited(
                 f"OpenAI rate limit or quota reached: {detail}",
                 retry_after_s=float(retry) if retry and retry.isdigit() else None,
             )
-        if response.status_code in (401, 403):
+        if status_code in (401, 403):
             raise ProviderUnavailable(
-                f"OpenAI rejected the API key ({response.status_code}). "
+                f"OpenAI rejected the API key ({status_code}). "
                 f"Re-enter it in Settings. Server said: {detail}"
             )
-        raise ProviderUnavailable(f"OpenAI returned HTTP {response.status_code}: {detail}")
+        raise ProviderUnavailable(f"OpenAI returned HTTP {status_code}: {detail}")

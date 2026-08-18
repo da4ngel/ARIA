@@ -74,6 +74,10 @@ class Event(StrEnum):
     TOOL_RESULT = "tool.result"
     # Blocks the agent loop until `confirm.respond` arrives (§7.1).
     CONFIRM_REQUEST = "confirm.request"
+    # Phase 8: a message with no preceding question. `{text, urgency}` — §7.1's
+    # own payload shape. Rate-limited and self-checked before this ever fires
+    # (`persona/proactivity.py`); the renderer's job is only to show it.
+    PROACTIVE = "proactive"
 
 
 class Sender(Protocol):

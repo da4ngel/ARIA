@@ -78,9 +78,21 @@ async def main() -> int:
             return dict(message["result"])
 
         async def ask_delete(approve: bool) -> None:
-            """Send the turn, answer the confirmation, wait for the turn to end."""
+            """Send the turn, answer the confirmation, wait for the turn to end.
+
+            **Its own session, never the user's.** `chat.send` with no
+            `session_id` continues whatever conversation was most recently
+            active, so a gate's probes — and the real `confirm.request`
+            dialogs they raise — land in whatever Eyaas has open. That
+            happened once already, with `gate_permission_modes.py`. The
+            write-up of that incident said "unlike every other gate script
+            here, all of which call `chat.new` first"; five of them did not,
+            and this was one.
+            """
+            session = (await call("chat.new"))["session_id"]
             started = await call(
-                "chat.send", {"text": f"delete the file {SCRATCH}", "spoken": False}
+                "chat.send",
+                {"text": f"delete the file {SCRATCH}", "session_id": session, "spoken": False}
             )
             turn_id = started["turn_id"]
             request = await asyncio.wait_for(confirmations.get(), timeout=120)

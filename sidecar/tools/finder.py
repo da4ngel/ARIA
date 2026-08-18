@@ -208,6 +208,25 @@ class _Cache:
 _SCAN = _Cache()
 
 
+def invalidate_scan() -> None:
+    """Forget the cached filesystem scan, because it just went stale.
+
+    `_Cache`'s own docstring already names the failure this exists to stop —
+    *"long enough to go stale is long enough to miss a file they just
+    saved"* — but nothing called `clear()` outside the tests, so for 45
+    seconds after ARIA wrote a file she could not find it. That is not a
+    hypothetical: it is the shape of `gate_agent.py`'s find -> read -> answer
+    line, where the model spends its whole step budget hunting for a file the
+    step before it created.
+
+    Called by every tool that changes the filesystem (`tools/files.py`'s
+    `_scan_changed`), never on a read. Costing one extra 163-185ms scan on the
+    next search is the right trade against answering "I could not find
+    anything" about a file that is definitely there.
+    """
+    _SCAN.clear()
+
+
 # Words that carry no information about *which* file. "my cv" and "cv" are one
 # request, and without stripping these the first returned nothing at all.
 _FILLER = frozenset(
@@ -280,8 +299,22 @@ async def find_files(query: str, limit: int = 20) -> tuple[list[FoundFile], str]
 # ── the tools ────────────────────────────────────────────────────────
 
 
-def _describe(item: FoundFile) -> str:
-    """One file, in the words a person would use about it."""
+def _describe(item: FoundFile, *, with_path: bool = False) -> str:
+    """One file, in the words a person would use about it.
+
+    `with_path` puts the full path in as well, and every summary a *model*
+    reads sets it. Only `summary` goes back into the context (§7.2) — `data`
+    and `display` are for the UI — so a search whose summary names files
+    without saying where they are hands the next step nothing to act on. The
+    model's only remaining move is to guess a bare filename, and `read_file`
+    resolves a bare name against the sidecar's own working directory (the
+    repo), so it correctly reports `missing`.
+
+    That is not hypothetical: it is `gate_agent.py`'s find -> read -> answer
+    line failing with `search_files` ok, `open_file` ok, and
+    `read_file {"path": "aria-agent-gate.txt"}` -> `missing`, straight out of
+    `tool_log`. A chain of tools can only chain on what it is told.
+    """
     age_days = (time.time() - item.modified) / 86400
     when = (
         "today"
@@ -292,7 +325,8 @@ def _describe(item: FoundFile) -> str:
         if age_days < 60
         else time.strftime("%b %Y", time.localtime(item.modified))
     )
-    return f"{item.name} ({when})"
+    where = f" at {item.path}" if with_path else ""
+    return f"{item.name} ({when}){where}"
 
 
 def _install_hint(backend: str) -> str:
@@ -339,8 +373,10 @@ async def search_files(ctx: ToolContext, query: str, limit: int = 10) -> ToolRes
             display={"backend": backend, "took_ms": took},
         )
 
-    # One line for the model; the paths go to the UI (§7.2).
-    listed = "; ".join(_describe(f) for f in found[:5])
+    # One line for the model — including each full path, because the next
+    # step in a chain has nothing else to open or read. The richer per-file
+    # detail still goes to the UI in `display` (§7.2).
+    listed = "; ".join(_describe(f, with_path=True) for f in found[:5])
     more = f", and {len(found) - 5} more" if len(found) > 5 else ""
     return ToolResult(
         ok=True,
@@ -483,7 +519,7 @@ async def search_content(ctx: ToolContext, query: str, limit: int = 5) -> ToolRe
             ok=True, data=[], summary=f"Nothing I have read mentions {wanted!r}."
         )
 
-    listed = "; ".join(Path(p).name for p, _ in ordered)
+    listed = "; ".join(f"{Path(p).name} at {p}" for p, _ in ordered)
     return ToolResult(
         ok=True,
         data=[p for p, _ in ordered],
@@ -548,7 +584,9 @@ async def find(ctx: ToolContext, query: str, limit: int = 5) -> ToolResult:
         )
 
     ordered = sorted(ranks.items(), key=lambda kv: -kv[1])[:limit]
-    listed = "; ".join(f"{Path(p).name} (by {'+'.join(sorted(via[p]))})" for p, _ in ordered)
+    listed = "; ".join(
+        f"{Path(p).name} (by {'+'.join(sorted(via[p]))}) at {p}" for p, _ in ordered
+    )
     return ToolResult(
         ok=True,
         data=[p for p, _ in ordered],

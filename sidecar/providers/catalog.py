@@ -68,6 +68,14 @@ class ModelInfo(BaseModel):
     cost: Cost
     best_for: str
     ttft_ms_seed: int | None = None
+    # Fraction of `scripts/gate_tool_selection.py`'s probes this model answers
+    # with the right tool. **`None` means unmeasured, never "average"** — the
+    # router may only prefer a model on evidence, and there was none of this
+    # kind anywhere in the repo until now: the only tool measurement that
+    # existed ran `qwen2.5:7b` alone, and CLAUDE.md's "all five models pick
+    # open_app correctly 6/6" was a manual probe that left no script behind.
+    # Same discipline as `ttft_ms_seed`, `best_for` and `cost`: measured or blank.
+    tool_score: float | None = None
     caveat: str | None = None
     local: bool = False
     context_tokens: int = 8192
@@ -106,6 +114,12 @@ CATALOG: list[ModelInfo] = [
             "best local one at following an exact format."
         ),
         ttft_ms_seed=325,
+        # Mean of 4 runs, `gate_tool_selection.py` at 28 tools / 26 probes
+        # (2026-08-13): 0.88, 0.88, 0.81, 0.85. **Read the spread, not the
+        # mean** — see `UNMEASURED_TOOL_SCORE` in router.py. On one run this
+        # model scored above `gpt-5.4-nano` and that difference did not survive
+        # re-measurement.
+        tool_score=0.86,
         caveat=(
             "Will describe things that do not exist as though they were real — "
             "a made-up npm package, a made-up git flag. Check anything obscure."
@@ -200,6 +214,10 @@ CATALOG: list[ModelInfo] = [
             "fabricated nothing at all across 83 probes."
         ),
         ttft_ms_seed=700,
+        # Mean of 4 runs (2026-08-13): 0.92, 0.88, 0.92, 0.85. A single
+        # earlier run put this at 0.79 and a routing rule was briefly built on
+        # it; the rule is gone and the run was noise.
+        tool_score=0.89,
         context_tokens=32768,
     ),
     ModelInfo(
@@ -214,6 +232,9 @@ CATALOG: list[ModelInfo] = [
             "second to first token."
         ),
         ttft_ms_seed=960,
+        # Mean of 4 runs (2026-08-13): 0.88, 0.88, 0.88, 0.92 — the steadiest
+        # of the three, and still inside every other model's spread.
+        tool_score=0.89,
         context_tokens=32768,
     ),
     ModelInfo(

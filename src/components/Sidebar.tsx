@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Orb } from '@/components/Orb'
 import type { AssistantState } from '@/types/bridge'
 
-export type Section = 'history' | 'voice' | 'tools' | 'settings'
+export type Section = 'history' | 'voice' | 'tools' | 'memory' | 'settings'
 
 const COLLAPSE_KEY = 'aria.sidebar.collapsed'
 
@@ -164,6 +164,14 @@ export function Sidebar({
         disabled={!connected}
         onClick={() => onSelect('tools')}
       />
+      <Item
+        icon={<IconMemory />}
+        label="Memory"
+        collapsed={collapsed}
+        active={active === 'memory'}
+        disabled={!connected}
+        onClick={() => onSelect('memory')}
+      />
 
       {/* The section's own content, in the menu rather than beside it. It
           takes the remaining height, so Settings stays pinned to the bottom. */}
@@ -256,7 +264,7 @@ function Item({
 
 // ── icons ─────────────────────────────────────────────────────────────
 // Drawn rather than imported, matching the hairline weight of the rest of the
-// chrome. Six glyphs is not worth a dependency.
+// chrome. Seven glyphs is not worth a dependency.
 
 const stroke = {
   width: 14,
@@ -282,6 +290,18 @@ function IconHistory(): JSX.Element {
     <svg {...stroke} aria-hidden>
       <circle cx="7" cy="7" r="5.2" />
       <path d="M7 4.2V7l1.9 1.4" />
+    </svg>
+  )
+}
+
+// Nodes joined by edges — what she has learned, not where it is stored.
+function IconMemory(): JSX.Element {
+  return (
+    <svg {...stroke} aria-hidden>
+      <circle cx="3.4" cy="4" r="1.5" />
+      <circle cx="10.6" cy="3.4" r="1.5" />
+      <circle cx="7" cy="10.6" r="1.5" />
+      <path d="M4.6 4.9 6.2 9.2M9.6 4.6 7.8 9.3M4.9 3.8h4.2" />
     </svg>
   )
 }

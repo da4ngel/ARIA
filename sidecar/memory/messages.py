@@ -17,10 +17,18 @@ from datetime import UTC, datetime
 import structlog
 from pydantic import BaseModel
 
+from sidecar.memory import text as words
 from sidecar.memory.db import Database
 from sidecar.providers.base import Role
 
 log = structlog.get_logger(__name__)
+
+#: How far back `search_messages` looks. A few thousand short rows is single
+#: digit milliseconds; the cap exists so the cost stays flat as the database
+#: grows rather than because 2000 is where usefulness stops.
+RECALL_MESSAGE_SCAN = 2000
+#: A single shared word out of a long question is a coincidence, not a memory.
+RECALL_MIN_COVERAGE = 0.35
 
 
 def _now() -> str:
@@ -37,6 +45,10 @@ class StoredMessage(BaseModel):
     route: str | None = None
     latency_ms: int | None = None
     created_at: str
+    # Phase 8: a message with no preceding question (migration 006). False
+    # for every message before this column existed and every ordinary reply
+    # since — `messages.proactive` defaults to 0.
+    proactive: bool = False
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> StoredMessage:
@@ -48,7 +60,19 @@ class StoredMessage(BaseModel):
             route=row["route"],
             latency_ms=row["latency_ms"],
             created_at=row["created_at"],
+            proactive=bool(row["proactive"]) if "proactive" in row.keys() else False,
         )
+
+
+class MessageHit(BaseModel):
+    """One past turn that matched a `recall` query."""
+
+    id: int
+    session_id: str
+    role: Role
+    content: str
+    created_at: str
+    score: float
 
 
 class SessionSummary(BaseModel):
@@ -126,6 +150,7 @@ class ConversationStore:
         route: str | None = None,
         latency_ms: int | None = None,
         tool_calls: list[dict[str, object]] | None = None,
+        proactive: bool = False,
     ) -> int:
         created = _now()
         payload = json.dumps(tool_calls) if tool_calls else None
@@ -134,13 +159,50 @@ class ConversationStore:
             with conn:
                 cursor = conn.execute(
                     "INSERT INTO messages "
-                    "(session_id, role, content, tool_calls, route, latency_ms, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, str(role), content, payload, route, latency_ms, created),
+                    "(session_id, role, content, tool_calls, route, latency_ms, created_at, "
+                    "proactive) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        str(role),
+                        content,
+                        payload,
+                        route,
+                        latency_ms,
+                        created,
+                        int(proactive),
+                    ),
                 )
             return int(cursor.lastrowid or 0)
 
         return await self._db.run(_insert)
+
+    async def count_proactive_since(self, since: str) -> int:
+        """How many proactive messages have gone out, this recently — the
+        rate limiter's own query, not a parallel log. Global, not scoped to
+        one session: the limit is about not overwhelming the person, and
+        someone who opens a new conversation has not thereby earned four
+        more proactive messages. `since` is an ISO-8601 timestamp — inclusive,
+        because a message sent at exactly the start of "today" is part of
+        today, not the moment before it.
+        """
+        row = await self._db.run(
+            lambda c: c.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE proactive = 1 AND created_at >= ?",
+                (since,),
+            ).fetchone()
+        )
+        return int(row["n"]) if row else 0
+
+    async def most_recent_proactive_at(self) -> str | None:
+        """When the last proactive message went out, anywhere, for the
+        90-minute spacing rule."""
+        row = await self._db.run(
+            lambda c: c.execute(
+                "SELECT created_at FROM messages WHERE proactive = 1 "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        )
+        return str(row["created_at"]) if row else None
 
     async def history(self, session_id: str, limit: int = 200) -> list[StoredMessage]:
         """Oldest-first turns for a session."""
@@ -155,6 +217,69 @@ class ConversationStore:
 
         rows = await self._db.run(_select)
         return [StoredMessage.from_row(r) for r in rows]
+
+    async def search_messages(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        scan: int = RECALL_MESSAGE_SCAN,
+        exclude_session: str | None = None,
+    ) -> list[MessageHit]:
+        """Find past turns that mention what `query` is about.
+
+        **This is the layer that makes "have we discussed X?" answerable.** Facts
+        and episodes are both compressions written by a model — a fact only
+        exists if reflection judged it durable, and an episode only exists if the
+        session was closed and summarised. Neither had happened for the
+        conversation Eyaas asked about, and the raw messages were sitting in the
+        table the whole time.
+
+        Bounded rather than complete: the newest `scan` turns, scored by the same
+        IDF-weighted coverage retrieval uses. It runs inside a tool call rather
+        than on the turn path, so it is allowed to be slower than the 80ms
+        budget — and at a few thousand short rows it is single-digit
+        milliseconds anyway.
+
+        `exclude_session` drops the current conversation, which the model can
+        already see and does not need handed back to it as a discovery.
+        """
+        wanted = words.content_words(query)
+        if not wanted:
+            return []
+
+        def _select(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            return conn.execute(
+                """
+                SELECT id, session_id, role, content, created_at FROM messages
+                WHERE role IN ('user', 'assistant')
+                ORDER BY id DESC LIMIT ?
+                """,
+                (scan,),
+            ).fetchall()
+
+        rows = await self._db.run(_select)
+        kept = [r for r in rows if r["session_id"] != exclude_session]
+        if not kept:
+            return []
+
+        bodies = [words.content_words(r["content"]) for r in kept]
+        weights = words.idf(bodies)
+
+        hits = [
+            MessageHit(
+                id=int(row["id"]),
+                session_id=str(row["session_id"]),
+                role=Role(row["role"]),
+                content=row["content"],
+                created_at=row["created_at"],
+                score=coverage,
+            )
+            for row, body in zip(kept, bodies, strict=True)
+            if (coverage := words.coverage(wanted, body, weights)) >= RECALL_MIN_COVERAGE
+        ]
+        hits.sort(key=lambda h: (-h.score, -h.id))
+        return hits[:limit]
 
     async def message_count(self, session_id: str) -> int:
         row = await self._db.run(

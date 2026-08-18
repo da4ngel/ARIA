@@ -15,7 +15,15 @@ import { useState } from 'react'
 
 import type { ToolCall } from '@/hooks/useConversation'
 
-export function ToolCallCard({ call }: { call: ToolCall }): JSX.Element {
+export function ToolCallCard({
+  call,
+  chained = false,
+}: {
+  call: ToolCall
+  /** True once a turn made more than one call — see `ConversationView`. Only
+   *  then does a step number mean anything to look at. */
+  chained?: boolean
+}): JSX.Element {
   const [open, setOpen] = useState(false)
   const args = Object.entries(call.args)
 
@@ -28,6 +36,14 @@ export function ToolCallCard({ call }: { call: ToolCall }): JSX.Element {
         className="interactive flex w-full items-center gap-2 px-2 py-1.5 text-left"
       >
         <StateDot state={call.state} />
+        {chained && call.step !== undefined && (
+          <span
+            className="shrink-0 rounded bg-white/5 px-1 font-mono tabular-nums text-aria-faint"
+            title={`Step ${call.step + 1}`}
+          >
+            {call.step + 1}
+          </span>
+        )}
         <span className="shrink-0 font-mono text-aria-text">{call.tool}</span>
 
         {/* The most useful argument, inline. "open_app chrome" is the whole

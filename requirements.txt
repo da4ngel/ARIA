@@ -92,10 +92,38 @@ pypdf==5.0.*
 python-docx==1.1.*
 openpyxl==3.1.*
 
+# ── Phase 6: capture_screen + cloud vision ────────────────────────
+# mss for the capture itself — the §4 pin, and the right tool for "the whole
+# screen" the way `PrintWindow`+`PW_RENDERFULLCONTENT` (CLAUDE.md's own
+# recipe, elsewhere in this file's history) is the right tool for one window.
+# No compiled extension, correct multi-monitor bounds.
+#
+# Pillow is **not** in §4 and is added deliberately, the one real exception to
+# this project's usual minimal-dependency discipline (rule 3's torch ban, the
+# hand-rolled HTML parser in providers/search.py rather than
+# beautifulsoup4/trafilatura). mss captures raw pixels; it does not resize or
+# encode JPEG, and the confirmation dialog needs a *downscaled* thumbnail, not
+# the full frame, to round-trip quickly over RPC. Writing a resizer and a JPEG
+# encoder by hand is not a reasonable alternative to a well-established,
+# pure-C-extension, no-MSVC-required library that every Windows Python
+# environment already has a wheel for.
+mss==9.0.*
+pillow>=10.4,<11
+
+# ── Phase 7: real browser control ─────────────────────────────────
+# Connects to a Chrome the user already has running, over CDP
+# (`chromium.connect_over_cdp`) — it does not launch or bundle a browser, so
+# `playwright install` (which downloads several hundred megabytes of browser
+# binaries) is deliberately never run here. The pip package alone (~30MB, a
+# small Node-based driver plus Python bindings) is everything `browser.py`
+# needs; the estimate elsewhere in this project's notes assumed the bundled
+# browsers, which this design does not use.
+playwright==1.47.*
+
 # ── Deferred, with the phase that introduces each (BUILD_SPEC §4) ──
 # Phase 1  — (none; Ollama is reached over httpx)
 # Phase 3  — pywinauto==0.6.8 (with focus_window / close_app)
 # Phase 5  — apscheduler==3.10.*
-# Phase 6  — anthropic==0.39.*, mss==9.0.*
-# Phase 7  — playwright==1.47.*
+# Phase 6  — anthropic==0.39.* (NOT adopted — CLAUDE.md's provider strategy is
+#            OpenAI + Gemini only, Anthropic explicitly excluded)
 # Phase 9  — pyinstaller==6.10.*

@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # one model exists to choose between — a registry of one is not a registry,
     # and it would pull in pyyaml outside the phase that needs it.
     ollama_url: str = "http://127.0.0.1:11434"
+    # Start Ollama if it is not already running, rather than reporting local
+    # models as unavailable and leaving the user to work out why. Off is a
+    # real choice — somebody running Ollama on another machine, or keeping it
+    # off deliberately — so it is a setting rather than unconditional.
+    ollama_autostart: bool = True
+    ollama_start_timeout_s: float = 20.0
     local_model: str = "qwen3.5:4b"
     warm_on_startup: bool = True
 
@@ -113,6 +119,41 @@ class Settings(BaseSettings):
     index_files: bool = True
     index_files_per_min: int = 20
 
+    # ── Memory (Phase 5) ─────────────────────────────────────────────
+    # Whether she recalls facts and episodes on a turn at all. Off leaves the
+    # tables alone and the prompt exactly as Phase 4 assembled it.
+    memory_enabled: bool = True
+    # The nightly pass that extracts durable facts (§8.3). Separate from the
+    # switch above because retrieval is free and reflection is a model call —
+    # the test suite turns this off and leaves recall on.
+    memory_reflection_enabled: bool = True
+    # Local-clock hour for that pass. It is a catch-up, not a cron fire: a
+    # machine asleep at 3am reflects on the first tick after it wakes.
+    memory_reflection_hour: int = 3
+    # §9: "on session end (or 30min idle)". There is no session-end event, so
+    # this is what actually closes a conversation into an episode.
+    memory_idle_close_minutes: int = 30
+    # The ceiling on how long a turn will wait for the retrieval embed before
+    # falling back to word matching. §9's gate is 80ms of added latency; this
+    # is what makes that structural rather than hopeful. Set below the
+    # *contended* embed p90, not the idle one — see retrieval.DEFAULT_DEADLINE_S
+    # for both measurements and why the difference decides this number.
+    memory_retrieval_deadline_ms: int = 60
+
+    #: Whether she may reach the web at all (§9 Phase 7). **Off by
+    #: default**, and deliberately: the query leaves this machine, which is
+    #: the user's decision to make rather than a default to inherit. The
+    #: stored setting overrides this at startup.
+    online_mode: bool = False
+
+    # ── Proactivity (Phase 8) ────────────────────────────────────────
+    # On by default, unlike online_mode — this never sends anything off the
+    # machine (even the self-check is the local model), so the risk here is
+    # annoyance, not privacy. Rate-limited and focus-aware regardless
+    # (persona/proactivity.py); this is the switch for turning the whole
+    # thing off, not a tuning knob.
+    proactivity_enabled: bool = True
+
     # Supplied by Electron on spawn. Empty means "generate one" — see handshake.py.
     # Never logged.
     token: str = Field(default="", repr=False)
@@ -139,9 +180,32 @@ class Settings(BaseSettings):
     def handshake_path(self) -> Path:
         return self.data_dir / ".handshake"
 
+    @property
+    def undo_dir(self) -> Path:
+        """Manifests for batch operations (§11: "undo manifests for every one").
+
+        A batch move is the first thing she does that is tedious rather than
+        dangerous to reverse by hand — thirty files scattered into six folders.
+        The tier system can ask before it happens; only a manifest can put it
+        back afterwards.
+        """
+        return self.data_dir / "undo"
+
+    @property
+    def browser_launcher_path(self) -> Path:
+        """A `.bat` that starts the user's real Chrome with CDP on (§9 Phase 7).
+
+        In `data/`, not the Desktop — writing a shortcut somewhere the user
+        did not ask for it to appear is the kind of thing that reads as a
+        virus. `browser.setup` returns this path so the UI can tell the user
+        where it is and offer to open its folder.
+        """
+        return self.data_dir / "start_chrome_debug.bat"
+
     def ensure_dirs(self) -> None:
         """Create the runtime directory tree. Safe to call repeatedly."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.undo_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

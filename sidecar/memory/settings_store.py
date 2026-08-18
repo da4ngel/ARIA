@@ -24,10 +24,16 @@ ROUTING_BIAS = "routing_bias"
 # defaulted on, because an always-open microphone is the user's decision to
 # make once and have remembered — not one to rediscover on every launch.
 WAKE_WORD_ENABLED = "wake_word_enabled"
+ONLINE_MODE = "online_mode"
 # Folders she may act in without asking, as a JSON array. Empty until added by
 # hand: trust here covers deletion, which is too large a thing to assume on
 # someone's behalf.
 TRUSTED_PATHS = "trusted_paths"
+# The global preset over the same confirmation machinery —
+# `sidecar.tools.permissions.PermissionMode` as a plain string. Defaults to
+# "auto" (today's behavior) when unset, same as `TRUSTED_PATHS` defaults to
+# empty rather than needing a migration.
+PERMISSION_MODE = "permission_mode"
 # What the cloud providers last said they offer, as a list of serialised
 # `ModelInfo`. Cached so the picker fills in at startup without a network
 # round-trip, and so it still lists something when the machine is offline.

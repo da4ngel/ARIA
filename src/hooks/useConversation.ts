@@ -29,6 +29,11 @@ export interface Turn {
    *  them, so a turn that opened an app looked identical to one that talked
    *  about opening it. */
   toolCalls?: ToolCall[]
+  /** The `messages` row this answer was written to. Ratings key on it, because
+   *  the renderer never sees `routing_log`. */
+  messageId?: number
+  /** 1, -1, or undefined for un-rated. §9.7's label. */
+  rating?: 1 | -1
 }
 
 export interface ToolCall {
@@ -42,10 +47,15 @@ export interface ToolCall {
   display?: Record<string, unknown> | null
   startedAt: number
   durationMs?: number
+  /** Which step of the agent loop this was (Phase 6), zero-indexed. Undefined
+   *  on events from a sidecar build that predates step numbering — treated
+   *  the same as a single-tool turn, not as an error. */
+  step?: number
 }
 
 interface TurnCompletePayload {
   turn_id: string
+  message_id?: number
   full_text: string
   route?: string
   model?: string
@@ -66,6 +76,8 @@ export interface UseConversation {
   newChat: () => Promise<void>
   /** Load a past conversation and keep talking in it. */
   openSession: (sessionId: string) => Promise<void>
+  /** Thumbs up or down on an answer. The same value again clears it. */
+  rate: (messageId: number, rating: 1 | -1) => Promise<void>
   /** Which conversation is on screen, so the history panel can mark it. */
   sessionId: string | null
   /** First-token latency of the last turn — the Phase 1 gate, visible in the UI. */
@@ -76,7 +88,24 @@ export interface UseConversation {
 function toTurns(messages: StoredMessage[]): Turn[] {
   return messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => ({ id: `m${m.id}`, role: m.role as 'user' | 'assistant', content: m.content }))
+    .map((m) => ({
+      id: `m${m.id}`,
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+      messageId: m.id,
+    }))
+}
+
+/** Reattach saved ratings to reloaded turns.
+ *
+ *  Without this a thumb vanishes the moment the conversation is reopened,
+ *  which reads as "it was not saved" and stops people rating anything. */
+function withRatings(turns: Turn[], ratings: Record<string, number>): Turn[] {
+  if (Object.keys(ratings).length === 0) return turns
+  return turns.map((turn) => {
+    const rating = turn.messageId === undefined ? undefined : ratings[String(turn.messageId)]
+    return rating === 1 || rating === -1 ? { ...turn, rating } : turn
+  })
 }
 
 export function useConversation(connected: boolean): UseConversation {
@@ -101,6 +130,7 @@ export function useConversation(connected: boolean): UseConversation {
         sessionId.current = history.session_id
         setActiveSession(history.session_id)
         setTurns(toTurns(history.messages))
+        if (history.session_id) void loadRatings(history.session_id, setTurns)
       })
       .catch(() => {
         /* the status line already tells the user the brain is down */
@@ -124,11 +154,12 @@ export function useConversation(connected: boolean): UseConversation {
       // She is doing something. Attached to the streaming turn so the card
       // sits with the answer it belongs to rather than floating at the end.
       if (event.method === 'tool.call') {
-        const { turn_id: turnId, call_id: callId, tool, args } = event.params as {
+        const { turn_id: turnId, call_id: callId, tool, args, step } = event.params as {
           turn_id: string
           call_id: string
           tool: string
           args: Record<string, unknown>
+          step?: number
         }
         if (turnId !== activeTurnId.current) return
         setTurns((prev) =>
@@ -136,7 +167,7 @@ export function useConversation(connected: boolean): UseConversation {
             ...turn,
             toolCalls: [
               ...(turn.toolCalls ?? []),
-              { id: callId, tool, args, state: 'running', startedAt: Date.now() },
+              { id: callId, tool, args, state: 'running', startedAt: Date.now(), step },
             ],
           })),
         )
@@ -188,6 +219,29 @@ export function useConversation(connected: boolean): UseConversation {
         setBusy(false)
         setLastFirstTokenMs(payload.first_token_ms ?? null)
         setTurns((prev) => finalise(prev, payload))
+        return
+      }
+
+      // Phase 8: a message with no preceding question. Only appended to
+      // whatever is on screen if it landed in the conversation currently
+      // open — one that happened in a session the user is not looking at
+      // is not something to interrupt this one with.
+      if (event.method === 'proactive') {
+        const payload = event.params as {
+          text: string
+          message_id?: number
+          session_id?: string
+        }
+        if (payload.session_id && payload.session_id !== sessionId.current) return
+        setTurns((prev) => [
+          ...prev,
+          {
+            id: `p${payload.message_id ?? Date.now()}`,
+            role: 'assistant',
+            content: payload.text,
+            messageId: payload.message_id,
+          },
+        ])
       }
     })
   }, [])
@@ -259,6 +313,29 @@ export function useConversation(connected: boolean): UseConversation {
     setBusy(false)
     setLastFirstTokenMs(null)
     setTurns(toTurns(history.messages))
+    void loadRatings(history.session_id ?? id, setTurns)
+  }, [])
+
+  /** Thumbs up or down on one answer (§9.7's label half).
+   *
+   *  Optimistic, and deliberately so: this is a two-state toggle against a
+   *  table nothing else writes, and a thumb that waits for a round-trip before
+   *  it moves feels broken. Pressing the same thumb twice clears it — a rating
+   *  you cannot take back is one people stop giving. */
+  const rate = useCallback(async (messageId: number, rating: 1 | -1) => {
+    let next: 1 | -1 | undefined
+    setTurns((prev) =>
+      prev.map((turn) => {
+        if (turn.messageId !== messageId) return turn
+        next = turn.rating === rating ? undefined : rating
+        return { ...turn, rating: next }
+      }),
+    )
+    try {
+      await window.aria.call('turn.rate', { message_id: messageId, rating: next ?? 0 })
+    } catch {
+      /* The label is a nicety; failing to store one must not disturb the view. */
+    }
   }, [])
 
   return {
@@ -268,8 +345,24 @@ export function useConversation(connected: boolean): UseConversation {
     cancel,
     newChat,
     openSession,
+    rate,
     sessionId: activeSession,
     lastFirstTokenMs,
+  }
+}
+
+async function loadRatings(
+  id: string,
+  setTurns: React.Dispatch<React.SetStateAction<Turn[]>>,
+): Promise<void> {
+  try {
+    const result = await window.aria.call<{ ratings: Record<string, number> }>(
+      'turn.ratings',
+      { session_id: id },
+    )
+    setTurns((prev) => withRatings(prev, result.ratings))
+  } catch {
+    /* Ratings are additive. Missing them must not empty the transcript. */
   }
 }
 
@@ -307,6 +400,7 @@ function finalise(turns: Turn[], payload: TurnCompletePayload): Turn[] {
     modelLabel: payload.model_label,
     routeReason: payload.route_reason,
     note: payload.note ?? undefined,
+    messageId: payload.message_id,
   }
   return next
 }

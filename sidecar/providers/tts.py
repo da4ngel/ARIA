@@ -56,6 +56,14 @@ FIRST_CHUNK_MAX_CHARS = 32
 # After the first, whole sentences: RTF 0.35 means synthesis stays ahead.
 CHUNK_MAX_CHARS = 320
 
+# Phase 8 voice polish: spoken output degrades badly past this many words in
+# one breath (Phase 2 stage 1's own measurement — the 30-word sentence above
+# already sits at nearly 5 seconds of unbroken audio). Applied to *every*
+# chunk `split_for_speech` produces, not just the first — `CHUNK_MAX_CHARS`
+# bounds characters and a clean 60-word sentence can sit well under 320 of
+# them, so the char limit alone never catches this.
+MAX_SPOKEN_WORDS = 20
+
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 # Clause boundaries, used only to get the *first* fragment out early.
 _CLAUSE_END = re.compile(r"(?<=[,;:])\s+")
@@ -80,11 +88,49 @@ class TextToSpeech(Protocol):
 
     async def start(self) -> None: ...
 
-    async def synthesize(self, text: str) -> tuple[bytes, int]:
-        """int16 PCM and its sample rate."""
+    async def synthesize(self, text: str, *, speed: float | None = None) -> tuple[bytes, int]:
+        """int16 PCM and its sample rate.
+
+        `speed` overrides the instance default for this one call — Phase 8's
+        affect-driven nudge (`persona.affect.speech_speed`); omitted, it uses
+        whatever the instance was constructed with.
+        """
         ...
 
     async def aclose(self) -> None: ...
+
+
+def shorten_for_speech(
+    chunk: str, remainder: str, *, max_words: int = MAX_SPOKEN_WORDS
+) -> tuple[str, str]:
+    """Cap one spoken breath at `max_words`, pushing the rest back onto the
+    front of `remainder` rather than dropping it.
+
+    Prefers cutting right after the last clause-ending word within the
+    budget — "..., because it fits the budget" reads as two natural breaths —
+    over a bare word cut, which is the fallback when the sentence has no
+    comma/semicolon/colon to use.
+
+    Public (not `_`-prefixed): `SpeechStream.finish` in `conversation.py`
+    calls this directly on the trailing buffer, which never passes through
+    `split_for_speech` — the tail is flushed as-is once the model stops
+    sending tokens, and without this it would be the one chunk in a turn
+    exempt from the word cap.
+    """
+    words = chunk.split()
+    if len(words) <= max_words:
+        return chunk, remainder
+
+    cut_at = max_words
+    for i in range(max_words - 1, 0, -1):
+        if words[i - 1].rstrip()[-1:] in ",;:":
+            cut_at = i
+            break
+
+    kept = " ".join(words[:cut_at]).strip()
+    rest = " ".join(words[cut_at:]).strip()
+    new_remainder = f"{rest} {remainder}".strip() if rest else remainder
+    return kept, new_remainder
 
 
 def split_for_speech(text: str, *, is_first: bool) -> tuple[str | None, str]:
@@ -93,6 +139,13 @@ def split_for_speech(text: str, *, is_first: bool) -> tuple[str | None, str]:
     `chunk` is None when nothing is ready yet, which is the normal answer while
     tokens are still arriving mid-sentence.
     """
+    chunk, remainder = _split_for_speech_raw(text, is_first=is_first)
+    if chunk is not None:
+        chunk, remainder = shorten_for_speech(chunk, remainder)
+    return chunk, remainder
+
+
+def _split_for_speech_raw(text: str, *, is_first: bool) -> tuple[str | None, str]:
     if not text.strip():
         return None, text
 
@@ -203,16 +256,22 @@ class KokoroTTS:
                 took_ms=round((time.perf_counter() - started) * 1000, 1),
             )
 
-    async def synthesize(self, text: str) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, *, speed: float | None = None) -> tuple[bytes, int]:
         """One chunk of speech as int16 PCM. Runs in a thread — onnxruntime is
         blocking, and holding the event loop would stall the token stream that
-        is still arriving."""
+        is still arriving.
+
+        `speed` overrides `self.speed` for this call only — the instance
+        default is untouched, so a per-turn affect nudge never leaks into the
+        next turn's synthesis.
+        """
         if self._kokoro is None:
             raise SpeechUnavailable("Speech is not started.")
 
+        effective_speed = self.speed if speed is None else speed
         started = time.perf_counter()
         samples, sample_rate = await asyncio.to_thread(
-            self._kokoro.create, text, voice=self.voice, speed=self.speed, lang=self.lang
+            self._kokoro.create, text, voice=self.voice, speed=effective_speed, lang=self.lang
         )
         pcm = await asyncio.to_thread(to_pcm16, samples)
         audio_ms = len(samples) / sample_rate * 1000
@@ -225,6 +284,7 @@ class KokoroTTS:
             # Above 1.0 and synthesis falls behind playback — the queue starves
             # and she stutters. Worth seeing in the log if it ever happens.
             rtf=round(took_ms / audio_ms, 2) if audio_ms else None,
+            speed=effective_speed,
         )
         return pcm, int(sample_rate)
 

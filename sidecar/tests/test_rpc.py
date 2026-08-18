@@ -38,6 +38,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     # Desktop and Downloads of whoever runs the suite — reading their
     # spreadsheets, and taking as long as that takes.
     monkeypatch.setenv("ARIA_INDEX_FILES", "false")
+    # Nor on the nightly reflection, for the same reason: the scheduler works
+    # then sleeps, so starting it inside the fixture fires a real model call on
+    # the first tick. Retrieval stays on — it is free and never leaves the box.
+    monkeypatch.setenv("ARIA_MEMORY_REFLECTION_ENABLED", "false")
     get_settings.cache_clear()
     try:
         # TestClient's context manager is what runs the lifespan.
@@ -97,10 +101,35 @@ def _call(ws, method: str, params: dict | None = None, call_id: int = 1) -> dict
             return message
 
 
+# §7.1's method table, in spec order. The test below picks whichever of these
+# no phase has implemented yet, rather than naming one — this test used to
+# hardcode `memory.forget`, and Phase 5 implementing it turned a passing test
+# into a failing one for no reason connected to what it checks.
+SPEC_METHODS = (
+    "chat.send",
+    "chat.cancel",
+    "audio.chunk",
+    "audio.end",
+    "confirm.respond",
+    "memory.search",
+    "memory.forget",
+    "settings.get",
+    "settings.set",
+    "system.health",
+)
+
+
 def test_unknown_method_returns_32601(client: TestClient) -> None:
-    # A method from §7.1 that no phase has implemented yet.
+    from sidecar.rpc.handlers import method_names
+
+    implemented = method_names()
+    unimplemented = next((m for m in SPEC_METHODS if m not in implemented), None)
+    assert unimplemented is not None, (
+        "Every §7.1 method is implemented — pick a different probe for this test."
+    )
+
     with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
-        response = _call(ws, "memory.forget", {"fact_id": 1})
+        response = _call(ws, unimplemented, {})
     assert response["error"]["code"] == ErrorCode.METHOD_NOT_FOUND
     # Error messages say what to do next (CLAUDE.md style rule).
     assert "Available in this build" in response["error"]["message"]
@@ -207,6 +236,48 @@ def test_history_methods_are_registered(client: TestClient) -> None:
 )
 def test_bearer_parsing(header: str | None, expected: str | None) -> None:
     assert bearer_from_header(header) == expected
+
+
+# ── proactivity (Phase 8) ─────────────────────────────────────────────
+
+
+def test_proactivity_trigger_is_registered(client: TestClient) -> None:
+    """This machine's `client` fixture runs the real lifespan against a real
+    Ollama (the same reason `ARIA_INDEX_FILES=false` exists for the finder),
+    so the scheduler is genuinely running here — the call succeeds rather
+    than refusing. `test_proactivity_trigger_refuses_when_switched_off`
+    covers the off path explicitly, with the flag forced rather than relying
+    on it happening to be off."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        response = _call(ws, "proactivity.trigger", {})
+    assert response.get("error") is None
+    assert response["result"] == {"ok": True}
+
+
+def test_proactivity_trigger_refuses_when_switched_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `client` fixture above leaves `proactivity_enabled` at its
+    default (True) and happens to have a real Ollama to start against on
+    this machine — a separate app instance here forces the flag off, the
+    same explicit-not-incidental style `client`'s own env vars use."""
+    monkeypatch.setenv("ARIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ARIA_TOKEN", TOKEN)
+    monkeypatch.setenv("ARIA_DEV", "true")
+    monkeypatch.setenv("ARIA_WARM_ON_STARTUP", "false")
+    monkeypatch.setenv("ARIA_VOICE_ENABLED", "false")
+    monkeypatch.setenv("ARIA_INDEX_FILES", "false")
+    monkeypatch.setenv("ARIA_MEMORY_REFLECTION_ENABLED", "false")
+    monkeypatch.setenv("ARIA_PROACTIVITY_ENABLED", "false")
+    get_settings.cache_clear()
+    try:
+        with TestClient(sidecar_main.app) as test_client:
+            with test_client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+                response = _call(ws, "proactivity.trigger", {})
+    finally:
+        get_settings.cache_clear()
+    assert response["error"]["code"] == ErrorCode.INTERNAL_ERROR
+    assert "not available" in response["error"]["message"]
 
 
 def test_token_comparison_rejects_empty() -> None:

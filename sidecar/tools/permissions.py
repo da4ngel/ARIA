@@ -30,6 +30,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -45,6 +46,32 @@ CONFIRM_TIMEOUT_S = 120.0
 
 #: Tools above this need a *typed* confirmation, not a click.
 TYPED_CONFIRM_FROM = Tier.DANGER
+
+
+class PermissionMode(StrEnum):
+    """A global preset over the same machinery below — it never adds a new
+    way to decide, it only changes what `is_trusted`/`_ask`/`run` do with
+    the decision they'd already make.
+
+    Confirmed with Eyaas, and the one real departure from rule 5 in this
+    file: FULL_ACCESS skips *everything*, escalations included — the same
+    shape of deliberate, visible exception `allow_danger` already is to
+    "DANGER is hidden by default." What neither mode touches: `Tool.refuse`
+    and `tools/files.py`'s hard refusals. Those were never "asking"
+    mechanisms to begin with — "trust decides whether she asks, never what
+    is allowed," applied to mode exactly as it already applies to a
+    trusted folder.
+    """
+
+    #: Every CONFIRM/DANGER call asks, every time — trusted folders and
+    #: "always allow" are both ignored while this is active, without being
+    #: cleared. Switching back to AUTO restores them exactly as configured.
+    MANUAL = "manual"
+    #: Today's behavior, unchanged. The default.
+    AUTO = "auto"
+    #: Nothing asks — not tier, not an escalation, not DANGER's own
+    #: typed-confirmation requirement. Off by default, chosen deliberately.
+    FULL_ACCESS = "full_access"
 
 
 # ── trusted folders ──────────────────────────────────────────────────
@@ -130,7 +157,10 @@ class PermissionEngine:
         self._journal = journal
         self._timeout_s = timeout_s
         # §7.2: DANGER is off by default. Turning it on is a deliberate act,
-        # not a side effect of a model asking nicely.
+        # not a side effect of a model asking nicely. `mode` can also grant
+        # this — see `run()` — but the field itself stays whatever it was
+        # explicitly set to; FULL_ACCESS overlays it rather than replacing it,
+        # so switching back to AUTO returns to exactly what it was before.
         self.allow_danger = allow_danger
         #: Folders she may act in without asking. Empty until added.
         self.trusted: list[Path] = []
@@ -139,6 +169,13 @@ class PermissionEngine:
         #: Deliberately not persisted: "always allow" said once in a hurry
         #: should not silently outlive the session it was said in.
         self._always: set[str] = set()
+        #: The global preset. Persisted by the caller (settings_store), same
+        #: shape as `trusted` — this class only holds the live value.
+        self.mode: PermissionMode = PermissionMode.AUTO
+
+    def set_mode(self, mode: PermissionMode) -> None:
+        self.mode = mode
+        log.info("tool.permission_mode", mode=str(mode))
 
     def set_trusted(self, paths: list[str]) -> None:
         """Replace the trusted set.
@@ -162,7 +199,14 @@ class PermissionEngine:
         **Every** path: a call that reaches outside, even partly, still asks.
         A call with no paths at all is not trusted by default — trust is about
         places, and a tool that names none is not in one.
+
+        MANUAL mode reads as untrusted regardless of what `self.trusted`
+        actually holds — checked here, not by clearing `self.trusted`
+        itself, so the real configuration survives a round trip through
+        MANUAL unchanged.
         """
+        if self.mode is PermissionMode.MANUAL:
+            return False
         if not self.trusted:
             return False
         targets = paths_in(arguments)
@@ -177,8 +221,26 @@ class PermissionEngine:
         ctx: ToolContext,
         *,
         rationale: str = "",
+        force_confirm: bool = False,
     ) -> ToolResult:
-        """Gate a tool call, run it if allowed, and log it either way."""
+        """Gate a tool call, run it if allowed, and log it either way.
+
+        `force_confirm` is §11's escalation, not a per-tool property: a tool
+        that is normally AUTO or SAFE still asks when `core/agent.py` sets this,
+        because the *reason* it needs asking this time is what the step before
+        it did (read untrusted content), not what this tool is. The tool's own
+        registered tier is untouched — only the effective floor for *this call*
+        moves up to CONFIRM. It never lowers anything: a tool that was already
+        CONFIRM or DANGER is unaffected, and it never grants DANGER access —
+        `allow_danger` below still gates that separately.
+
+        A tool can reach the same CONFIRM floor on its own, via `tool.escalate`
+        — a different *reason* (this call's own arguments or live state, not
+        the previous step) landing on the same mechanism. And a tool can skip
+        the ask entirely via `tool.refuse`, which is checked first and can
+        return a hard "no" before tier, trust, or `allow_danger` are even
+        consulted.
+        """
         call_id = f"tc_{uuid.uuid4().hex[:10]}"
         tool = get(name)
 
@@ -194,10 +256,20 @@ class PermissionEngine:
                 error="unknown_tool",
             )
 
+        # A hard block: no tier, no trust, no dialog. Checked first, and
+        # before `allow_danger` too — a refusal is a refusal at any tier.
+        refusal = await self._refuse(tool, arguments)
+        if refusal is not None:
+            await self._log(call_id, ctx, name, arguments, tool.tier, False, False, refusal, 0)
+            log.warning("tool.refused", tool=name, tier=int(tool.tier), reason=refusal)
+            return ToolResult(ok=False, summary=f"I will not do that: {refusal}.", error="refused")
+
         # `allow_danger` decides whether the tool exists at all; trust only
         # decides whether it asks. A disabled DANGER tool stays disabled inside
-        # a trusted folder.
-        if tool.tier >= TYPED_CONFIRM_FROM and not self.allow_danger:
+        # a trusted folder. FULL_ACCESS grants this the same way it grants
+        # everything else below — deliberately, and visibly in Settings.
+        full_access = self.mode is PermissionMode.FULL_ACCESS
+        if tool.tier >= TYPED_CONFIRM_FROM and not (self.allow_danger or full_access):
             await self._log(
                 call_id, ctx, name, arguments, tool.tier, False, False, "danger disabled", 0
             )
@@ -213,19 +285,45 @@ class PermissionEngine:
 
         approved: bool | None = None
         approved_by: str | None = None
-        if tool.tier >= Tier.CONFIRM:
-            if self.is_trusted(arguments):
-                approved, approved_by = True, "trust"
-                log.info("tool.trusted", tool=name, tier=int(tool.tier))
-            else:
-                approved = await self._ask(tool, arguments, rationale)
-                approved_by = "user" if approved else None
-            if not approved:
-                await self._log(
-                    call_id, ctx, name, arguments, tool.tier, False, False, "denied", 0
-                )
-                log.info("tool.denied", tool=name, tier=int(tool.tier))
-                return ToolResult(ok=False, summary=f"You declined {name}.", error="denied")
+        if full_access:
+            # Skips tier, trust, and escalation together — including the
+            # §11 untrusted-content rule and the checkout/banking hard
+            # escalation. `_refuse` above is the one thing that still ran.
+            approved, approved_by = True, "full_access"
+            log.info("tool.full_access", tool=name, tier=int(tool.tier))
+        else:
+            # Two independent reasons a call might need to ask when its own
+            # tier would not: §11's `force_confirm` (the *previous* step read
+            # untrusted content) and `tool.escalate` (*this* call's own
+            # arguments or live state look like a checkout/banking page).
+            # Either is enough.
+            escalated = force_confirm or await self._escalate(tool, arguments)
+            effective_tier = Tier.CONFIRM if escalated and tool.tier < Tier.CONFIRM else tool.tier
+            if effective_tier >= Tier.CONFIRM:
+                if not escalated and self.is_trusted(arguments):
+                    # A trusted folder is not consent to skip an escalation —
+                    # it is consent to skip asking about *this tool's own*
+                    # risk. The risk an escalation exists for came from
+                    # somewhere else entirely and a trusted-folder exemption
+                    # never heard of it.
+                    approved, approved_by = True, "trust"
+                    log.info("tool.trusted", tool=name, tier=int(tool.tier))
+                else:
+                    approved = await self._ask(
+                        tool,
+                        arguments,
+                        rationale,
+                        escalated=escalated and tool.tier < Tier.CONFIRM,
+                    )
+                    approved_by = "user" if approved else None
+                if not approved:
+                    await self._log(
+                        call_id, ctx, name, arguments, tool.tier, False, False, "denied", 0
+                    )
+                    log.info("tool.denied", tool=name, tier=int(tool.tier))
+                    return ToolResult(
+                        ok=False, summary=f"You declined {name}.", error="denied"
+                    )
 
         started = time.perf_counter()
         try:
@@ -264,10 +362,69 @@ class PermissionEngine:
 
     # ── the round-trip ──────────────────────────────────────────────────
 
-    async def _ask(self, tool: Tool, arguments: dict[str, Any], rationale: str) -> bool:
-        """Suspend until the user answers, or until the timeout denies for them."""
-        if tool.name in self._always:
+    async def _refuse(self, tool: Tool, arguments: dict[str, Any]) -> str | None:
+        """`tool.refuse`, defensively. See its docstring for why a raise here
+        means "no reason found" rather than "found a reason" — the opposite
+        default from `_escalate` below."""
+        if tool.refuse is None:
+            return None
+        try:
+            return await tool.refuse(**arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — see `Tool.refuse`'s docstring
+            log.warning("tool.refuse_check_failed", tool=tool.name, error=str(exc))
+            return None
+
+    async def _escalate(self, tool: Tool, arguments: dict[str, Any]) -> bool:
+        """`tool.escalate`, defensively. Fails closed: see `Tool.escalate`'s
+        docstring for why this is the one hook that escalates on its own
+        failure rather than falling back quietly."""
+        if tool.escalate is None:
+            return False
+        try:
+            return await tool.escalate(**arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — see `Tool.escalate`'s docstring
+            log.warning("tool.escalate_check_failed", tool=tool.name, error=str(exc))
             return True
+
+    async def _preview(self, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        """What the user is about to approve, worked out before it happens.
+
+        Never raises. A preview is detail on top of a confirmation, and losing
+        the confirmation because the detail failed would be exactly backwards —
+        the dialog still appears, showing the raw arguments as it always did.
+        """
+        if tool.preview is None:
+            return None
+        try:
+            return await tool.preview(**arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — detail is not worth the dialog
+            log.warning("tool.preview_failed", tool=tool.name, error=str(exc))
+            return None
+
+    async def _ask(
+        self, tool: Tool, arguments: dict[str, Any], rationale: str, *, escalated: bool = False
+    ) -> bool:
+        """Suspend until the user answers, or until the timeout denies for them."""
+        if not escalated and self.mode is not PermissionMode.MANUAL and tool.name in self._always:
+            # "Always allow" was said about this tool's *ordinary* risk. §11's
+            # escalation is a different risk arriving from a different step,
+            # and a standing yes to "open apps without asking" was never a yes
+            # to "open whatever a webpage just told you to open." MANUAL
+            # ignores it the same way it ignores trust — asked once in a
+            # different mode is not a standing yes for "ask me about
+            # everything right now."
+            return True
+
+        # Before the request, because it *is* the request: §7.2 wants one
+        # confirmation describing a batch, not one per file, and a batch nobody
+        # can see is not something anybody can meaningfully agree to.
+        preview = await self._preview(tool, arguments)
 
         request_id = f"cr_{uuid.uuid4().hex[:10]}"
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -283,9 +440,16 @@ class PermissionEngine:
                 "rationale": rationale,
                 # A click is not enough for something that cannot be undone.
                 "typed": tool.tier >= TYPED_CONFIRM_FROM,
+                "preview": preview,
+                # True only when this call would not normally have asked at
+                # all — §11's escalation, not this tool's own tier. The dialog
+                # needs to say *why* it appeared, or it reads as a bug.
+                "escalated": escalated,
             },
         )
-        log.info("tool.confirm_requested", tool=tool.name, tier=int(tool.tier))
+        log.info(
+            "tool.confirm_requested", tool=tool.name, tier=int(tool.tier), escalated=escalated
+        )
 
         try:
             return await asyncio.wait_for(future, timeout=self._timeout_s)

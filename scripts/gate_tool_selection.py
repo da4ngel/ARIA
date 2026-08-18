@@ -44,9 +44,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import sidecar.tools  # noqa: F401  — importing registers the tools
 from sidecar.core.context import PersonaLevel, stable_prefix
-from sidecar.providers.base import ChatMessage, GenerationOptions, Role
+from sidecar.providers import catalog
+from sidecar.providers.base import (
+    ChatMessage,
+    GenerationOptions,
+    LLMProvider,
+    ProviderError,
+    Role,
+)
 from sidecar.providers.embeddings import OllamaEmbeddings
+from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.ollama import OllamaProvider
+from sidecar.providers.openai import OpenAIProvider
 from sidecar.tools import registry
 
 MODEL = "qwen2.5:7b"
@@ -64,6 +73,14 @@ PROBES: list[tuple[str, str | None]] = [
     ("the quotation i sent the banquet hall", "find"),
     ("make a folder called receipts in documents", "create_folder"),
     ("turn the volume down to 20", "set_volume"),
+    # **The relative form, which was never tested and never worked.** The probe
+    # above hands the model the number, so it passed while "increase the volume"
+    # was impossible to answer: `percent` was required and absolute, nothing
+    # exposed the current level, and the description invited exactly the
+    # phrasing the schema refused. A probe that supplies the hard part of the
+    # question is not measuring the tool.
+    ("increase the volume", "set_volume"),
+    ("turn it up a bit", "set_volume"),
     ("rename scan001.pdf to invoice.pdf", "rename_file"),
     ("move budget.xlsx to documents", "move_file"),
     ("which windows are open", "list_windows"),
@@ -124,28 +141,96 @@ async def measure_recall() -> bool:
     return perfect
 
 
-async def choose_with(provider: OllamaProvider, tools: list[dict]) -> tuple[int, list[str]]:
-    prefix = stable_prefix(PersonaLevel.MINIMAL, has_tools=True)
+async def choose_with(
+    provider: LLMProvider,
+    tools: list[dict],
+    model: str = MODEL,
+    level: PersonaLevel = PersonaLevel.MINIMAL,
+) -> tuple[int, list[str]]:
+    prefix = stable_prefix(level, has_tools=True)
     right = 0
     wrong: list[str] = []
     for text, want in PROBES:
         got: str | None = None
-        async for delta in provider.stream_chat(
-            [*prefix, ChatMessage(role=Role.USER, content=text)],
-            model=MODEL,
-            options=GenerationOptions(max_tokens=600),
-            tools=tools,
-        ):
-            if delta.tool_calls:
-                got = delta.tool_calls[0].name
-                break
-            if delta.done:
-                break
+        try:
+            async for delta in provider.stream_chat(
+                [*prefix, ChatMessage(role=Role.USER, content=text)],
+                model=model,
+                options=GenerationOptions(max_tokens=600),
+                tools=tools,
+            ):
+                if delta.tool_calls:
+                    got = delta.tool_calls[0].name
+                    break
+                if delta.done:
+                    break
+        except ProviderError as exc:
+            # A dead account or an exhausted quota is not a wrong answer, and
+            # recording it as one would put a fabricated `tool_score` in the
+            # catalog. Abandon the model instead.
+            wrong.append(f"provider error: {exc}")
+            return (right, wrong)
         if got == want:
             right += 1
         else:
             wrong.append(f"{text!r} wanted {want} got {got}")
     return right, wrong
+
+
+async def measure_per_model(model_ids: list[str]) -> None:
+    """Score each model's tool choice, for `ModelInfo.tool_score`.
+
+    **There was no such measurement anywhere in this repo**, which is why the
+    router had nothing to consult when it needed to know which model could be
+    trusted with a command. The only tool number that existed was this script's
+    own, on `qwen2.5:7b` alone; CLAUDE.md's "all five models pick `open_app`
+    correctly 6/6" was a manual probe that left no script behind, and so could
+    not be re-run when the registry doubled.
+
+    Full registry every time — never the filtered subset. Selection is closed
+    (see the module docstring); what is being measured here is the model, on the
+    tool list it will actually be given.
+    """
+    everything = registry.schemas()
+    print(f"\nTool choice per model ({len(everything)} tools, {len(PROBES)} probes):")
+    scores: list[tuple[str, float]] = []
+
+    for model_id in model_ids:
+        info = catalog.get(model_id)
+        if info is None:
+            print(f"  {model_id:28} not in the catalog")
+            continue
+        provider = provider_for(info)
+        try:
+            right, wrong = await choose_with(provider, everything, model_id, info.persona)
+        finally:
+            if isinstance(provider, OllamaProvider):
+                # 6GB card, rule 2: the next model cannot load beside this one.
+                await provider.unload(model_id)
+            await provider.aclose()
+
+        errored = [w for w in wrong if w.startswith("provider error")]
+        if errored:
+            print(f"  {model_id:28} unreachable - {errored[0]}")
+            continue
+        score = right / len(PROBES)
+        scores.append((model_id, score))
+        print(f"  {model_id:28} {right:>2}/{len(PROBES)}  tool_score={score:.2f}")
+        for line in wrong:
+            print(f"        {line}")
+
+    if scores:
+        print("\n  Paste into providers/catalog.py — measured, so it may be routed on:")
+        for model_id, score in scores:
+            print(f"    {model_id:28} tool_score={score:.2f},")
+
+
+def provider_for(info: catalog.ModelInfo) -> LLMProvider:
+    if info.provider is catalog.ProviderName.OLLAMA:
+        return OllamaProvider()
+    if info.provider is catalog.ProviderName.OPENAI:
+        return OpenAIProvider()
+    return GeminiProvider()
 
 
 async def measure_choice() -> None:
@@ -178,6 +263,14 @@ async def measure_choice() -> None:
 
 
 async def main() -> None:
+    models = [m for m in sys.argv[1:] if not m.startswith("-")]
+    if models:
+        # `--models a,b` scores each model for `ModelInfo.tool_score`; the
+        # selection question below is settled and does not need re-running to
+        # measure a new model.
+        await measure_per_model([m for spec in models for m in spec.split(",")])
+        return
+
     perfect_recall = await measure_recall()
     await measure_choice()
     print(
@@ -187,6 +280,10 @@ async def main() -> None:
     )
     if perfect_recall:
         print("Recall is now perfect at some size. Worth re-testing choice properly.")
+    print(
+        "\nTo score models for ModelInfo.tool_score instead:\n"
+        "    python scripts/gate_tool_selection.py qwen2.5:7b,gpt-5.4-nano"
+    )
 
 
 if __name__ == "__main__":

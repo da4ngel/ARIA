@@ -46,9 +46,16 @@ class OllamaEmbeddings:
     in the background behind whatever the user is actually doing.
     """
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str = MODEL) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        model: str = MODEL,
+        *,
+        keep_alive: str = "5m",
+    ) -> None:
         self._client = httpx.AsyncClient(base_url=base_url, timeout=_TIMEOUT_S)
         self._model = model
+        self._keep_alive = keep_alive
         self._lock = asyncio.Lock()
 
     async def embed(self, text: str) -> list[float]:
@@ -62,9 +69,16 @@ class OllamaEmbeddings:
                         "prompt": text,
                         # Not optional. See the module docstring.
                         "options": {"num_gpu": 0},
-                        # Let it fall out of memory between bursts rather than
-                        # sitting on 376MB while nobody is indexing.
-                        "keep_alive": "5m",
+                        # How long Ollama holds the model in *system* RAM
+                        # between calls — 376MB, nowhere near the card, so
+                        # rule 2 is untouched either way.
+                        #
+                        # The default suits the indexer, which works in bursts
+                        # and can afford a cold start. Phase 5's retrieval
+                        # cannot: 752ms cold against an 80ms budget, so it is
+                        # constructed with a longer window and the model stays
+                        # resident for the turn that needs it.
+                        "keep_alive": self._keep_alive,
                     },
                 )
                 response.raise_for_status()

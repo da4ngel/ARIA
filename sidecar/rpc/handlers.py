@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, Literal
 
 import structlog
@@ -469,6 +470,7 @@ async def tools_list(_params: dict[str, Any]) -> dict[str, Any]:
     engine = runtime.permissions
     return {
         "allow_danger": bool(engine and engine.allow_danger),
+        "mode": str(engine.mode) if engine is not None else "auto",
         "tools": [
             {
                 "name": t.name,
@@ -507,6 +509,78 @@ async def tools_trusted(params: dict[str, Any]) -> dict[str, Any]:
             await runtime.settings.set(TRUSTED_PATHS, json.dumps(cleaned))
 
     return {"paths": [str(p) for p in engine.trusted]}
+
+
+def _enumerate_drives() -> list[str]:
+    """Every fixed drive letter Windows reports, as root paths ("C:\\").
+
+    `GetLogicalDriveStrings` returns one null-terminated block
+    (`"C:\\\\\\x00D:\\\\\\x00\\x00"`) rather than a list — that's the real
+    Win32 wire format, not a parsing quirk introduced here.
+    """
+    import win32api
+
+    raw = win32api.GetLogicalDriveStrings()
+    return [d for d in raw.split("\x00") if d]
+
+
+@method("tools.trust_all_drives")
+async def tools_trust_all_drives(_params: dict[str, Any]) -> dict[str, Any]:
+    """Trust every drive letter on the machine, in one call.
+
+    The direct answer to "give her access to my whole computer" without
+    adding each drive to `tools.trusted` by hand — reuses that method's own
+    replace-and-persist path; this is only where the list of paths comes
+    from. Available regardless of `permissions.mode`: FULL_ACCESS makes it
+    moot while active, but MANUAL and AUTO both still read `trusted`.
+    """
+    import json
+
+    from sidecar.memory.settings_store import TRUSTED_PATHS
+    from sidecar.state import runtime
+
+    engine = runtime.permissions
+    if engine is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "Tools are not available in this session.")
+
+    drives = _enumerate_drives()
+    engine.set_trusted(drives)
+    if runtime.settings is not None:
+        await runtime.settings.set(TRUSTED_PATHS, json.dumps(drives))
+
+    return {"paths": [str(p) for p in engine.trusted]}
+
+
+@method("permissions.mode")
+async def permissions_mode(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or replace the global permission mode (manual / auto / full_access).
+
+    Same read-or-replace shape as `tools.trusted`: omit `mode` to read the
+    current one, pass it to switch. `PermissionMode`'s own docstring names
+    exactly what each value changes.
+    """
+    from sidecar.memory.settings_store import PERMISSION_MODE
+    from sidecar.state import runtime
+    from sidecar.tools.permissions import PermissionMode
+
+    engine = runtime.permissions
+    if engine is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "Tools are not available in this session.")
+
+    requested = params.get("mode")
+    if requested is not None:
+        try:
+            mode = PermissionMode(str(requested))
+        except ValueError:
+            raise RpcMethodError(
+                ErrorCode.INVALID_PARAMS,
+                f"mode must be one of: {', '.join(m.value for m in PermissionMode)}.",
+            ) from None
+        engine.set_mode(mode)
+        if runtime.settings is not None:
+            await runtime.settings.set(PERMISSION_MODE, mode.value)
+
+    return {"mode": str(engine.mode)}
 
 
 @method("voice.interrupt")
@@ -636,6 +710,409 @@ async def chat_history(params: dict[str, Any]) -> dict[str, Any]:
         int(limit) if isinstance(limit, int) else 200,
     )
     return history.model_dump(mode="json")
+
+
+@method("settings.online")
+async def settings_online(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set online mode (§9 Phase 7).
+
+    One method for both, the house pattern (`voice.listen`, `models.bias`):
+    pass `enabled` to change it, pass nothing to read it, and either way get
+    the current state back.
+
+    Reports `backend` and `key_present` too, because "on" is not the same as
+    "working" — the switch can be on with no search key stored, and a UI that
+    cannot tell those apart makes the user debug it by asking her a question
+    and reading the refusal.
+    """
+    from sidecar.memory.settings_store import ONLINE_MODE
+    from sidecar.providers.search import available as search_backend
+    from sidecar.state import runtime
+
+    requested = params.get("enabled")
+    if isinstance(requested, bool):
+        runtime.online_mode = requested
+        if runtime.settings is not None:
+            await runtime.settings.set(ONLINE_MODE, requested)
+        log.info("online.changed", enabled=requested)
+
+    backend = search_backend()
+    return {
+        "enabled": runtime.online_mode,
+        "backend": backend,
+        "key_present": backend is not None,
+    }
+
+
+#: Chromium-based browsers CDP works with, and where each keeps its real
+#: profile. **Chrome is not a safe default** — on this project's own
+#: reference machine the default browser is Brave (CLAUDE.md, Phase 3:
+#: "'browser' opens the default handler... the default is Brave"), and
+#: writing a launcher that starts a *different* browser than the one the
+#: user actually uses starts it with an empty, logged-out profile, which
+#: defeats the entire point of connecting over CDP rather than launching a
+#: fresh Playwright-bundled one. Detected via the same `UserChoice` registry
+#: lookup `tools/apps.py` already uses for `open_app`'s "browser" category,
+#: not assumed.
+_KNOWN_BROWSERS: dict[str, str] = {
+    "chrome.exe": r"Google\Chrome\User Data",
+    "brave.exe": r"BraveSoftware\Brave-Browser\User Data",
+    "msedge.exe": r"Microsoft\Edge\User Data",
+}
+
+
+def _default_browser() -> tuple[str, str] | None:
+    """(exe path, profile dir) for the user's actual default browser."""
+    import os
+
+    from sidecar.tools.apps import Launch, default_app
+
+    entry = default_app("browser")
+    if entry is None or entry.launch is not Launch.EXECUTABLE:
+        return None
+    exe_name = os.path.basename(entry.target).lower()
+    profile_suffix = _KNOWN_BROWSERS.get(exe_name)
+    if profile_suffix is None:
+        return None
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    return entry.target, os.path.join(local_app_data, profile_suffix)
+
+
+@method("browser.setup")
+async def browser_setup(params: dict[str, Any]) -> dict[str, Any]:
+    """Write the CDP-debug launcher for the user's real browser, and report
+    reachability (§9 Phase 7).
+
+    `settings.online`'s shape: pass `write: true` to (re)write the launcher,
+    omit it to just check status. **Never connects through `tools/browser.py`
+    to check reachability** — that would open the long-lived connection the
+    tools hold for the rest of the session just to answer a status query.
+    Chrome's own CDP endpoint (which any Chromium browser exposes under the
+    same path) answers a plain HTTP GET, which is what this probes instead.
+    """
+    from sidecar.config import get_settings
+
+    settings = get_settings()
+    detected = _default_browser()
+    if params.get("write"):
+        _write_browser_launcher(settings.browser_launcher_path, detected)
+        log.info(
+            "browser.launcher_written",
+            path=str(settings.browser_launcher_path),
+            browser=detected[0] if detected else "chrome (fallback — could not detect yours)",
+        )
+
+    return {
+        "cdp_reachable": await _cdp_reachable(),
+        "launcher_path": str(settings.browser_launcher_path),
+        "launcher_exists": settings.browser_launcher_path.exists(),
+        "detected_browser": detected[0] if detected else None,
+    }
+
+
+def _write_browser_launcher(path: Path, detected: tuple[str, str] | None) -> None:
+    """A `.bat`, not a `.lnk` — no COM dependency, and a plain text file the
+    user can open and read before ever running it.
+
+    The full exe path is used when detection succeeds, rather than relying
+    on `start "" chrome.exe` resolving through PATH/App Paths — that only
+    works when the detected browser genuinely *is* Chrome, and the whole
+    reason this function exists is that it might not be. Falls back to
+    Chrome's own name and profile path only when detection fails entirely
+    (no default browser set, or it isn't a known Chromium browser) — a
+    guess the user can still edit, not silence.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if detected is not None:
+        exe, profile = detected
+    else:
+        exe, profile = "chrome.exe", r"%LocalAppData%\Google\Chrome\User Data"
+    script = (
+        "@echo off\r\n"
+        "REM Written by ARIA (browser.setup). Starts your real browser profile\r\n"
+        "REM with remote debugging on, so the browser_* tools can attach to it.\r\n"
+        f'start "" "{exe}" --remote-debugging-port=9222 --user-data-dir="{profile}"\r\n'
+    )
+    path.write_text(script, encoding="utf-8")
+
+
+async def _cdp_reachable() -> bool:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            response = await client.get("http://localhost:9222/json/version")
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
+@method("turn.rate")
+async def turn_rate(params: dict[str, Any]) -> dict[str, Any]:
+    """Thumbs up or down on one answer (§9.7).
+
+    §9.7's upgrade path is a labelled dataset, not a bigger model: *"log every
+    routing decision with the provider, the resulting turn's latency and a user
+    thumbs-up/down. After a few weeks you'll have a labelled dataset to tune the
+    rules against."* This is the label half; `routing_log` is the rest.
+
+    `rating: 0` clears it — pressing the same thumb twice means "never mind",
+    and a rating you cannot take back is one people stop giving.
+    """
+    from sidecar.state import runtime
+
+    log_ = runtime.routing_log
+    if log_ is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Ratings are not available in this session. Restart the sidecar.",
+        )
+
+    message_id = params.get("message_id")
+    if not isinstance(message_id, int):
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            "turn.rate needs the message_id of the answer being rated.",
+        )
+
+    rating = params.get("rating")
+    if not isinstance(rating, int) or rating not in (-1, 0, 1):
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            "rating must be 1 (good), -1 (bad) or 0 (clear it).",
+        )
+
+    changed = (
+        await log_.clear_rating(message_id)
+        if rating == 0
+        else await log_.rate(message_id, rating)
+    )
+    return {"message_id": message_id, "rating": rating or None, "recorded": changed}
+
+
+@method("turn.ratings")
+async def turn_ratings(params: dict[str, Any]) -> dict[str, Any]:
+    """Every rating in one conversation, so reopening it shows them again."""
+    from sidecar.state import runtime
+
+    log_ = runtime.routing_log
+    session_id = params.get("session_id")
+    if log_ is None or not isinstance(session_id, str):
+        return {"ratings": {}}
+    ratings = await log_.ratings_for_session(session_id)
+    return {"ratings": {str(k): v for k, v in ratings.items()}}
+
+
+@method("models.verdicts")
+async def models_verdicts(_params: dict[str, Any]) -> dict[str, Any]:
+    """How each model has actually been received here.
+
+    The read side of the dataset. Reported rather than acted on: with a handful
+    of ratings this is anecdote, and `ModelVerdict.approval` returns None until
+    there are enough to be worth reading. Routing still moves on the measured
+    `tool_score`, not on this.
+    """
+    from sidecar.state import runtime
+
+    log_ = runtime.routing_log
+    if log_ is None:
+        return {"verdicts": []}
+    verdicts = await log_.verdicts()
+    return {
+        "verdicts": [
+            {**v.model_dump(mode="json"), "approval": v.approval} for v in verdicts
+        ]
+    }
+
+
+# ── memory (Phase 5) ──────────────────────────────────────────────────
+
+
+def _require_memory() -> Any:
+    """The memory services, or a message saying how to turn them on."""
+    from sidecar.state import runtime
+
+    if runtime.memory is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Memory is switched off in this session. Set ARIA_MEMORY_ENABLED=true "
+            "and restart the sidecar.",
+        )
+    return runtime.memory
+
+
+@method("memory.list")
+async def memory_list(params: dict[str, Any]) -> dict[str, Any]:
+    """Everything she has learned, for MemoryPanel.
+
+    Superseded facts are excluded by default but askable for: the panel offers
+    them as an audit trail, because "why does she think that" is only
+    answerable if you can see what it replaced.
+    """
+    from sidecar.state import runtime
+
+    memory = _require_memory()
+    limit = params.get("limit", 200)
+    include = bool(params.get("include_superseded", False))
+
+    facts = await memory.semantic.list_facts(
+        include_superseded=include, limit=int(limit) if isinstance(limit, int) else 200
+    )
+    episodes = await memory.episodic.list_episodes(limit=50)
+    return {
+        "facts": [f.model_dump(mode="json") for f in facts],
+        "episodes": [e.model_dump(mode="json") for e in episodes],
+        "embeddings_ready": runtime.embeddings_ready,
+    }
+
+
+@method("memory.search")
+async def memory_search(params: dict[str, Any]) -> dict[str, Any]:
+    """§7.1: search what she remembers. The same path a turn uses."""
+    memory = _require_memory()
+
+    query = params.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "query must be a non-empty string.")
+
+    found = await memory.retriever.retrieve(query)
+    return {
+        "facts": [
+            {"fact": f.fact.model_dump(mode="json"), "score": round(f.score, 4)}
+            for f in found.facts
+        ],
+        "episodes": [
+            {"episode": e.episode.model_dump(mode="json"), "score": round(e.score, 4)}
+            for e in found.episodes
+        ],
+        "took_ms": round(found.took_ms, 2),
+        "degraded": found.degraded,
+    }
+
+
+@method("memory.forget")
+async def memory_forget(params: dict[str, Any]) -> dict[str, Any]:
+    """§7.1: delete one fact by id."""
+    memory = _require_memory()
+
+    fact_id = params.get("fact_id")
+    if not isinstance(fact_id, int):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "fact_id must be an integer.")
+
+    removed = await memory.semantic.forget(fact_id)
+    if not removed:
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            f"No fact {fact_id}. Call memory.list for the current ids.",
+        )
+    return {"ok": True}
+
+
+@method("memory.update")
+async def memory_update(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit a fact, including pinning it.
+
+    Pinning rides here rather than on its own `memory.pin`: it is one column on
+    one row, and two methods writing the same row is two ways to race it.
+    """
+    memory = _require_memory()
+
+    fact_id = params.get("fact_id")
+    if not isinstance(fact_id, int):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "fact_id must be an integer.")
+
+    object_ = params.get("object")
+    confidence = params.get("confidence")
+    user_locked = params.get("user_locked")
+
+    updated = await memory.semantic.update(
+        fact_id,
+        object_=object_ if isinstance(object_, str) else None,
+        confidence=float(confidence) if isinstance(confidence, int | float) else None,
+        user_locked=bool(user_locked) if user_locked is not None else None,
+    )
+    if updated is None:
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            f"No fact {fact_id}. Call memory.list for the current ids.",
+        )
+    return {"fact": updated.model_dump(mode="json")}
+
+
+@method("memory.reflect")
+async def memory_reflect(params: dict[str, Any]) -> dict[str, Any]:
+    """Run the §8.3 pass now, rather than waiting for 3am.
+
+    Synchronous, like `models.refresh`: it sits behind a button and the caller
+    wants the report, not an acknowledgement. A second concurrent run is
+    refused rather than queued — two model calls extracting the same facts
+    would race each other into the merge.
+    """
+    from sidecar.state import runtime
+
+    reflector = runtime.reflector
+    if reflector is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Reflection is not available in this session. Memory is switched off.",
+        )
+
+    # No window unless one is asked for: the high-water mark decides what is
+    # unread, and defaulting to 24h here would reintroduce the bug it fixed —
+    # pressing the button after a week away would skip the week.
+    window = params.get("window_hours")
+    report = await reflector.run(window_hours=window if isinstance(window, int) else None)
+    return report.model_dump(mode="json")
+
+
+@method("memory.stats")
+async def memory_stats(_params: dict[str, Any]) -> dict[str, Any]:
+    """Counts, retrieval latency, and whether embeddings are actually working.
+
+    The latency block is what §9 Phase 5's "<80ms" gate is measured against, so
+    it is exposed rather than only logged — `scripts/gate_memory.py` reads it.
+    """
+    from dataclasses import asdict
+
+    from sidecar.state import runtime
+
+    memory = _require_memory()
+    last = await runtime.reflector.last_run() if runtime.reflector else None
+    return {
+        "facts": await memory.semantic.count(),
+        "episodes": await memory.episodic.count(),
+        "retrieval": asdict(memory.retriever.stats()),
+        "last_reflection": last.strftime("%Y-%m-%dT%H:%M:%SZ") if last else None,
+        "reflecting": bool(runtime.reflector and runtime.reflector.running),
+        "embeddings_ready": runtime.embeddings_ready,
+    }
+
+
+# ── proactivity (Phase 8) ────────────────────────────────────────────
+
+
+@method("proactivity.trigger")
+async def proactivity_trigger(_params: dict[str, Any]) -> dict[str, Any]:
+    """Run one sweep now, rather than waiting for the next five-minute tick.
+
+    Same reasoning as `memory.reflect`: a scheduler with its own cadence is
+    not gate-able without a way to force a pass, so this exists purely for
+    `scripts/gate_proactivity.py` and manual debugging — nothing in the
+    product UI calls it. `tick()` already never raises and applies every
+    real gate (focus, rate limit, self-check) itself; this does not bypass
+    any of them, it only stops the caller from waiting on the clock.
+    """
+    from sidecar.state import runtime
+
+    scheduler = runtime.proactivity_scheduler
+    if scheduler is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Proactivity is not available in this session. It is switched off "
+            "(proactivity_enabled=false) or the sidecar has no database open.",
+        )
+    await scheduler.tick()
+    return {"ok": True}
 
 
 # ── dispatch ──────────────────────────────────────────────────────────

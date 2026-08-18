@@ -1,0 +1,54 @@
+{
+  "generated_at": "2026-08-14T10:28:48.067526+00:00",
+  "nodes": {
+    "browser": {
+      "code_fingerprint": "",
+      "label": "Browser",
+      "last": "2026-08-14T10:25:02.806601+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T10:25:02.806601+00:00",
+          "outcome": "useful",
+          "q": "QA assessment: how good is the implementation against BUILD_SPEC?"
+        }
+      ],
+      "score": 0.999939763,
+      "source_file": "",
+      "status": "tentative",
+      "uses": 1
+    },
+    "electron_sidecar_sidecar": {
+      "code_fingerprint": "611a794d17dfdb24e00250113ccd39db366e3667d6110c92738da1487bd2bc30",
+      "label": "Sidecar",
+      "last": "2026-08-14T10:25:02.806601+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T10:25:02.806601+00:00",
+          "outcome": "useful",
+          "q": "QA assessment: how good is the implementation against BUILD_SPEC?"
+        }
+      ],
+      "score": 0.999939763,
+      "source_file": "electron/sidecar.ts",
+      "status": "tentative",
+      "uses": 1
+    },
+    "sidecar_tools_permissions_permissionengine": {
+      "code_fingerprint": "d127cea833749c7f157e7e3357ff91fbbcd6647271bc0a77bc343b3f6330eecc",
+      "label": "PermissionEngine",
+      "last": "2026-08-14T10:25:02.806601+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T10:25:02.806601+00:00",
+          "outcome": "useful",
+          "q": "QA assessment: how good is the implementation against BUILD_SPEC?"
+        }
+      ],
+      "score": 0.999939763,
+      "source_file": "sidecar/tools/permissions.py",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}

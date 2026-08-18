@@ -40,6 +40,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# **A measurement that dies two thirds of the way through is worse than no
+# measurement**, because the partial output still looks like a result. This
+# suite crashed on `UnicodeEncodeError` printing a model's reply containing ⏎ —
+# Windows consoles default to cp1252, and a fabrication preview is exactly the
+# kind of text that carries an arbitrary character. The probes themselves are
+# already Unicode-aware (`probes.normalise` folds U+2019, which once scored a
+# perfect refusal as a 78% fabrication rate); this is the same lesson one layer
+# out, in the reporting rather than the checking.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from probes import (
     SUITES,
     Expect,

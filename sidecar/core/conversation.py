@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -23,8 +24,15 @@ import structlog
 from pydantic import BaseModel
 
 from sidecar.core import context as ctx
-from sidecar.core.router import RouteDecision, Router, RoutingBias
+from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
+from sidecar.core.router import RouteDecision, Router, RoutingBias, is_tool_shaped
+from sidecar.core.tasks import spawn
+from sidecar.memory import procedures
+from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore, SessionSummary, StoredMessage
+from sidecar.memory.retrieval import MemoryServices, Retrieved
+from sidecar.memory.routing_log import RoutingLog, RoutingRecord
+from sidecar.persona import affect as affect_module
 from sidecar.providers import catalog
 from sidecar.providers.base import (
     ChatMessage,
@@ -39,13 +47,28 @@ from sidecar.providers.base import (
 from sidecar.providers.catalog import ModelInfo
 from sidecar.providers.connectivity import connectivity
 from sidecar.providers.health import HealthTracker
-from sidecar.providers.tts import TextToSpeech, split_for_speech
+from sidecar.providers.tts import TextToSpeech, shorten_for_speech, split_for_speech
 from sidecar.rpc.events import AssistantState, Event, EventBus
+from sidecar.state import runtime
 from sidecar.tools import registry
-from sidecar.tools.permissions import PermissionEngine
-from sidecar.tools.registry import Tier, ToolContext
+from sidecar.tools.permissions import PermissionEngine, PermissionMode
+from sidecar.tools.registry import ONLINE_TOOLS, Tier, ToolContext
 
 log = structlog.get_logger(__name__)
+
+
+def _session_started_at(history: list[StoredMessage]) -> datetime | None:
+    """The first stored message's timestamp, or `None` for an empty history.
+    Shared by `_machine_context` and `_update_affect` — both want "when did
+    this conversation start" from data already in hand, no extra query."""
+    if not history:
+        return None
+    with contextlib.suppress(ValueError):
+        return datetime.strptime(history[0].created_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=UTC
+        )
+    return None
+
 
 SUMMARY_MAX_TOKENS = 400
 SUMMARY_MAX_CHARS = SUMMARY_MAX_TOKENS * 4  # defensive clamp; see _summarize
@@ -73,6 +96,33 @@ class TurnStarted(BaseModel):
 
     turn_id: str
     session_id: str
+
+
+# Phase 8's procedure offers: "offer once, wait for a yes" needs something to
+# recognise the yes. A small pattern table, the same shape as
+# `persona.proactivity._INTENTION_PATTERNS` and `tools.memory._PATTERNS` —
+# Phase 5's own lesson again: whether a short reply means yes or no is not
+# worth a model call.
+_AFFIRMATIVE_REPLY = re.compile(
+    r"^(?:yes|yeah|yep|yup|sure|ok(?:ay)?|go ahead|please do|do it|sounds good)[.!]?$",
+    re.IGNORECASE,
+)
+_NEGATIVE_REPLY = re.compile(
+    r"^(?:no|nope|nah|not (?:now|really)|don'?t|skip it|no thanks)[.!]?$",
+    re.IGNORECASE,
+)
+
+
+def _parse_yes_no(text: str) -> bool | None:
+    """True/False for a clearly affirmative/negative one-line reply, else
+    None — an unrelated message must fall through to a normal turn, not be
+    silently swallowed as a "no"."""
+    stripped = text.strip()
+    if _AFFIRMATIVE_REPLY.match(stripped):
+        return True
+    if _NEGATIVE_REPLY.match(stripped):
+        return False
+    return None
 
 
 class ProviderRegistry(BaseModel):
@@ -112,13 +162,25 @@ class SpeechStream:
     though they finish out of order.
     """
 
-    def __init__(self, tts: TextToSpeech | None, bus: EventBus, started: float) -> None:
+    def __init__(
+        self,
+        tts: TextToSpeech | None,
+        bus: EventBus,
+        started: float,
+        *,
+        speed: float | None = None,
+    ) -> None:
         self._tts = tts
         self._bus = bus
         self._started = started
         self._buffer = ""
         self._index = 0
         self._tasks: list[asyncio.Task[None]] = []
+        # Phase 8: the turn's affect-derived nudge, applied to every chunk this
+        # stream speaks. None (the default in every pre-Phase-8 call site and
+        # every test) means "use the engine's own instance default" — see
+        # `KokoroTTS.synthesize`.
+        self._speed = speed
 
     @property
     def active(self) -> bool:
@@ -144,8 +206,14 @@ class SpeechStream:
             return
         tail = self._buffer.strip()
         self._buffer = ""
-        if tail:
-            self._dispatch(turn_id, tail)
+        # The tail never passed through `split_for_speech` — the model simply
+        # stopped sending tokens — so the word cap is applied here in a loop
+        # rather than dispatching it as one unbounded final breath.
+        while tail:
+            piece, tail = shorten_for_speech(tail, "")
+            if not piece:
+                break
+            self._dispatch(turn_id, piece)
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
@@ -158,7 +226,7 @@ class SpeechStream:
     async def _speak(self, turn_id: str, index: int, text: str) -> None:
         assert self._tts is not None
         try:
-            pcm, sample_rate = await self._tts.synthesize(text)
+            pcm, sample_rate = await self._tts.synthesize(text, speed=self._speed)
         except Exception as exc:  # noqa: BLE001 — silence is not worth a failed turn
             log.warning("tts.chunk_failed", turn_id=turn_id, error=str(exc))
             return
@@ -204,8 +272,16 @@ class ConversationService:
         usable_models: Callable[[], set[str]] | None = None,
         permissions: PermissionEngine | None = None,
         tts: TextToSpeech | None = None,
+        memory: MemoryServices | None = None,
+        routing_log: RoutingLog | None = None,
+        db: Database | None = None,
     ) -> None:
         self._store = store
+        # Phase 8's affect model reads/writes `affect_state` directly — its
+        # own table, no reason to route it through `ConversationStore`.
+        # None means no affect is rendered and none is updated, the same
+        # "every call site is a no-op" shape `memory` already has.
+        self._db = db
         self._provider = provider
         self._bus = bus
         self._model = model
@@ -226,6 +302,9 @@ class ConversationService:
         # None means she types and does not speak. Voice is additive: a
         # missing or broken engine must never stop a turn completing.
         self._tts = tts
+        # §9.7's labelled dataset. None simply means the decisions are not
+        # written down — every call site is a no-op, as with `memory`.
+        self._routing_log = routing_log
         # Defaults to the single provider it was constructed with, so existing
         # callers and tests keep working without a registry.
         self._registry = ProviderRegistry(
@@ -237,6 +316,9 @@ class ConversationService:
         # turn_id -> session_id, so deleting a conversation can cancel a turn
         # still streaming into it.
         self._turn_sessions: dict[str, str] = {}
+        # turn_id -> (tool, ok), carried from `_use_one_tool` to `_finish` for
+        # the routing log. Popped there, so it cannot grow.
+        self._turn_tools: dict[str, tuple[str, bool]] = {}
         # Background jobs that must not outlive the process — currently title
         # generation. Kept apart from `_tasks`, which `cancel()` reaches into.
         self._jobs: set[asyncio.Task[None]] = set()
@@ -248,9 +330,26 @@ class ConversationService:
         self._rolling_up: set[str] = set()
         # An id handed out by `new_session` that no message has landed in yet.
         self._pending_new: str | None = None
-        # Roll-up notes are per-session and rebuilt on demand; not yet durable.
-        # Phase 5 moves this into `episodes` where it belongs.
+        # Roll-up notes are per-session and rebuilt on demand, and deliberately
+        # NOT moved into `episodes` by Phase 5. A roll-up is within-session
+        # working state; an episode is cross-session memory. Merging them would
+        # have retrieval hand the current conversation back to itself.
         self._summaries: dict[str, str] = {}
+        # Facts and episodes. None means memory is off, and every call site
+        # below is a no-op — Phase 4's behaviour, unchanged.
+        self._memory = memory
+        # turn_id -> the retrieval started when the message arrived, awaited
+        # later in `_build_context`. Started early so the embed overlaps the
+        # message write and the history read.
+        self._retrievals: dict[str, asyncio.Task[Retrieved]] = {}
+        # Phase 8: the name of the procedure most recently offered via
+        # `send_proactive`, if the very next `send()` turns out to be a plain
+        # yes/no reply to it. Global, not per-session — proactive messages
+        # already are (see `count_proactive_since`) — and one-shot: `send()`
+        # clears this on the *next* call regardless of what that call turns
+        # out to be, so a stale offer never gets attached to an unrelated
+        # message sent an hour later.
+        self._pending_procedure_offer: str | None = None
 
     # ── public API (called by rpc handlers) ─────────────────────────────
 
@@ -291,6 +390,14 @@ class ConversationService:
         conversation by design, so without one to hand back, the first message
         after New Chat would land in the previous conversation.
         """
+        # New Chat is the one explicit "I am done with that" the app ever
+        # gets, so it is worth an episode. Fire-and-forget: the user is opening
+        # a blank page, not waiting on a summary of the old one.
+        if self._memory is not None:
+            previous = await self._store.latest_session_id()
+            if previous:
+                spawn(self._memory.episodic.close_session(previous), "memory.close_session")
+
         session_id = self._store.reserve_session_id()
         self._summaries.pop(session_id, None)
         # Also held here, so a caller that forgets to echo the id back still
@@ -335,6 +442,14 @@ class ConversationService:
             if self._turn_sessions.get(turn_id) == session_id and not task.done():
                 task.cancel()
 
+        # Before the store, not after. `episodes.session_id` is a foreign key
+        # and `foreign_keys` is ON, so deleting the session with an episode
+        # still pointing at it raises FOREIGN KEY constraint failed. Facts
+        # learned from those episodes survive with `source_episode` nulled —
+        # deleting the conversation does not make what you said untrue.
+        if self._memory is not None:
+            await self._memory.episodic.forget_session(session_id)
+
         removed = await self._store.delete_session(session_id)
         # Drop the roll-up note too, or a later session reusing the id would
         # inherit a summary of a conversation that no longer exists.
@@ -361,11 +476,30 @@ class ConversationService:
         if not text.strip():
             raise ValueError("Cannot send an empty message.")
 
+        offer = self._pending_procedure_offer
+        # One-shot regardless of what this message turns out to be — a
+        # window that outlives its own reply is exactly the "follow-up
+        # window" mistake §9 Phase 2 already found and removed once.
+        self._pending_procedure_offer = None
+        if offer is not None:
+            resolved = await self._resolve_procedure_reply(text, session_id, offer)
+            if resolved is not None:
+                return resolved
+
         resolved_session = await self._store.ensure_session(
             session_id or self._pending_new or await self._store.latest_session_id()
         )
         self._pending_new = None
         turn_id = f"t_{uuid.uuid4().hex[:12]}"
+
+        # Started before the write, not after: the embed then runs alongside
+        # the message insert, the router decision and the history read, all of
+        # which the turn pays for anyway. §9's 80ms budget is tight enough that
+        # this overlap is worth having.
+        if self._memory is not None:
+            retrieval = self._memory.retriever.prefetch(text)
+            self._retrievals[turn_id] = retrieval
+            retrieval.add_done_callback(lambda _: None)
 
         await self._store.add_message(resolved_session, Role.USER, text)
 
@@ -378,7 +512,65 @@ class ConversationService:
         self._turn_sessions[turn_id] = resolved_session
         task.add_done_callback(lambda _: self._tasks.pop(turn_id, None))
         task.add_done_callback(lambda _: self._turn_sessions.pop(turn_id, None))
+        task.add_done_callback(lambda _: self._retrievals.pop(turn_id, None))
 
+        return TurnStarted(turn_id=turn_id, session_id=resolved_session)
+
+    async def _resolve_procedure_reply(
+        self, text: str, session_id: str | None, procedure_name: str
+    ) -> TurnStarted | None:
+        """The other half of "offer once, wait for a yes" (Part 2). Returns a
+        completed `TurnStarted` when `text` was a clear yes/no to the offer
+        named `procedure_name`; `None` when it was not, so `send()` falls
+        through to an entirely normal turn — an unrelated reply must never be
+        read as a decline.
+
+        No model call, on purpose: a plain "yes" or "no" is exactly the case
+        Phase 5 already learned not to spend one on. It also means this never
+        touches `_run_turn`, so nothing here can invalidate the KV cache the
+        stable prefix exists to protect.
+        """
+        if self._db is None:
+            return None
+        accepted = _parse_yes_no(text)
+        if accepted is None:
+            return None
+
+        if accepted:
+            await procedures.confirm(self._db, procedure_name)
+            reply = "Got it — I'll remember that."
+        else:
+            await procedures.discard(self._db, procedure_name)
+            reply = "No problem, I won't remember it."
+
+        resolved_session = await self._store.ensure_session(
+            session_id or self._pending_new or await self._store.latest_session_id()
+        )
+        self._pending_new = None
+        turn_id = f"t_{uuid.uuid4().hex[:12]}"
+
+        await self._store.add_message(resolved_session, Role.USER, text)
+        message_id = await self._store.add_message(
+            resolved_session, Role.ASSISTANT, reply, route="local"
+        )
+        await self._bus.broadcast(Event.TOKEN, {"turn_id": turn_id, "text": reply})
+        await self._bus.broadcast(
+            Event.TURN_COMPLETE,
+            {
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "full_text": reply,
+                "route": "local",
+                "model": self._model,
+                "model_label": self._model,
+                "route_reason": "procedure_offer_reply",
+                "note": None,
+                "latency_ms": 0,
+                "first_token_ms": None,
+            },
+        )
+        await self._bus.set_state(AssistantState.IDLE)
+        log.info("procedure.offer_resolved", name=procedure_name, accepted=accepted)
         return TurnStarted(turn_id=turn_id, session_id=resolved_session)
 
     async def cancel(self, turn_id: str) -> bool:
@@ -430,6 +622,14 @@ class ConversationService:
         for job in list(self._jobs):
             job.cancel()
         await asyncio.gather(*self._jobs, return_exceptions=True)
+        # A retrieval that passed its deadline is still running detached, for
+        # the cache. It also holds a database handle.
+        for retrieval in list(self._retrievals.values()):
+            retrieval.cancel()
+        await asyncio.gather(*self._retrievals.values(), return_exceptions=True)
+        self._retrievals.clear()
+        if self._memory is not None:
+            await self._memory.retriever.aclose()
 
     # ── the turn itself ─────────────────────────────────────────────────
 
@@ -470,16 +670,21 @@ class ConversationService:
             await self._bus.set_state(AssistantState.THINKING)
 
             for attempt, info in enumerate(chain):
-                messages = await self._build_context(session_id, info)
-                requested: list[ToolCall] = []
+                messages = await self._build_context(session_id, info, turn_id)
+                state = LoopState()
                 try:
-                    first_token_ms = await self._stream_one(
-                        turn_id, info, messages, collected, started, tool_calls=requested
+                    first_token_ms, final_info, loop_note = await self._agent_loop(
+                        turn_id,
+                        session_id,
+                        info,
+                        messages,
+                        collected,
+                        started,
+                        user_text=user_text,
+                        selected=selected,
+                        spoken=spoken,
+                        state=state,
                     )
-                    if requested:
-                        first_token_ms = await self._use_one_tool(
-                            turn_id, session_id, info, messages, collected, started, requested
-                        )
                 except (ProviderUnavailable, ProviderRateLimited) as exc:
                     self._health.record_failure(
                         info.id, str(exc), rate_limited=isinstance(exc, ProviderRateLimited)
@@ -501,9 +706,24 @@ class ConversationService:
                     await self._bus.send_error("provider_failover", note, recoverable=True)
                     continue
 
-                self._health.record_success(info.id, first_token_ms)
+                if loop_note:
+                    note = f"{note} {loop_note}".strip() if note else loop_note
+
+                self._health.record_success(final_info.id, first_token_ms)
+                tool_name, tool_ok = self._turn_tools.pop(turn_id, (None, None))
                 await self._finish(
-                    turn_id, session_id, collected, started, first_token_ms, info, decision, note
+                    turn_id,
+                    session_id,
+                    collected,
+                    started,
+                    first_token_ms,
+                    final_info,
+                    decision,
+                    note,
+                    spoken=spoken,
+                    asked=user_text,
+                    tool_called=tool_name,
+                    tool_ok=tool_ok,
                 )
                 return
 
@@ -532,15 +752,17 @@ class ConversationService:
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms.
 
-        `tool_calls` collects anything the model asked to run. `offer_tools` is
-        False on the continuation pass, and that is what keeps this to a
-        *single* tool call per turn (BUILD_SPEC §9 Phase 3) — a model handed
-        its own tools again straight after using one will happily loop.
+        `tool_calls` collects anything the model asked to run. `offer_tools`
+        is False once `_agent_loop`'s step budget is spent (BUILD_SPEC §9
+        Phase 6) — a model handed its own tools with no budget left to run
+        one would just be asked to describe the call it cannot make.
         """
         provider = self._registry.for_model(info)
         await self._free_vram_for(info)
         first_token_ms: float | None = None
-        speech = SpeechStream(self._tts, self._bus, started)
+        speech = SpeechStream(
+            self._tts, self._bus, started, speed=await self._current_speech_speed()
+        )
 
         async for delta in provider.stream_chat(
             messages,
@@ -594,13 +816,29 @@ class ConversationService:
         Off, the behaviour is unchanged and is the one §7.2 wants: the model is
         not told those tools exist at all, which is stronger than asking it not
         to use them.
+
+        **`research` is hidden the same way when online mode is off**, and for
+        the same reason stated the other way round: telling a model a tool
+        exists and then refusing it is how she ends up saying "let me look that
+        up" and then not looking it up. The tool refuses too — two gates, and
+        the whole lesson of `allow_danger_tools` is that they must move
+        together.
+
+        **`PermissionMode.FULL_ACCESS` grants the same ceiling `allow_danger`
+        does, for the identical reason.** `PermissionEngine.run` already lets
+        a DANGER tool execute in that mode with nothing asked; a model never
+        told the tool exists would be the exact "I cannot delete files"
+        contradiction above, reintroduced through a second flag instead of
+        the first one.
         """
         if self._permissions is None:
             return None
-        ceiling = Tier.DANGER if self._permissions.allow_danger else Tier.CONFIRM
-        return registry.schemas(tier_max=ceiling) or None
+        full_access = self._permissions.mode is PermissionMode.FULL_ACCESS
+        ceiling = Tier.DANGER if (self._permissions.allow_danger or full_access) else Tier.CONFIRM
+        hidden = set() if runtime.online_mode else ONLINE_TOOLS
+        return registry.schemas(tier_max=ceiling, exclude=hidden) or None
 
-    async def _use_one_tool(
+    async def _agent_loop(
         self,
         turn_id: str,
         session_id: str,
@@ -608,80 +846,251 @@ class ConversationService:
         messages: list[ChatMessage],
         collected: list[str],
         started: float,
-        requested: list[ToolCall],
-    ) -> float | None:
-        """Run the first requested tool, then let the model answer with it.
+        *,
+        user_text: str,
+        selected: str,
+        spoken: bool,
+        state: LoopState,
+    ) -> tuple[float | None, ModelInfo, str | None]:
+        """Run steps until a text answer, loop detection, or the step budget
+        ends it (BUILD_SPEC §9 Phase 6). Returns `(first_token_ms, model that
+        answered, a note worth surfacing)`.
 
-        **One tool, then done.** §9 Phase 3 is explicit that chaining waits for
-        Phase 6. If a model asks for three things at once the rest are dropped
-        and it is told so, which is far better than executing a plan nobody
-        reviewed.
+        **A provider failure on step 0 propagates.** The caller's own
+        `chain`/`attempt` loop already handles that exactly as it always has —
+        rebuild context, try the next provider. A failure on step ≥ 1 is
+        different: this loop has already made progress this turn, and losing
+        it to fail over the *whole turn* onto a fresh context would throw away
+        real tool results for the failure of one step. It degrades to the
+        local default instead and keeps going — §9's own acceptance line asks
+        for a mid-chain network pull to recover, not to abort.
         """
-        assert self._permissions is not None
-        call = requested[0]
-        dropped = requested[1:]
+        current = info
+        note: str | None = None
+        first_token_ms: float | None = None
+        # Set right after a mid-task degrade, and only there. It exists so
+        # the *next* line — the top-of-loop router reselect — does not
+        # immediately undo the degrade it is about to retry. Without this a
+        # degrade routed straight back through `Router.choose`, which had
+        # just watched `_health.record_failure` trip that model's cooldown
+        # and dutifully handed back the *next*-best cloud model instead of
+        # local — so one outage walked the entire catalog, health-tripping
+        # every model in it, before finally reaching local by attrition.
+        just_degraded = False
 
-        await self._bus.broadcast(
-            Event.TOOL_CALL,
-            {"turn_id": turn_id, "call_id": call.id, "tool": call.name, "args": call.arguments},
-        )
+        while True:
+            # Step-aware routing (§9.7 stage 3's `step >= 3` upgrade) only
+            # ever *raises* the model reached for — a local-only tool's
+            # privacy constraint (`state.sticky_local`) always wins over it,
+            # or a deep-reasoning upgrade on step 3 could leak a clipboard
+            # read on step 1 to the cloud on step 3.
+            if state.step > 0 and not state.sticky_local and not just_degraded:
+                decision = self._router.choose(
+                    user_text,
+                    selected=selected,
+                    available=self._usable_models() if self._usable_models else None,
+                    step=state.step,
+                    spoken=spoken,
+                )
+                current = decision.model
+            just_degraded = False
 
-        result = await self._permissions.run(
-            call.name,
-            call.arguments,
-            ToolContext(session_id=session_id, turn_id=turn_id),
-            rationale="".join(collected).strip()[:400],
-        )
+            requested: list[ToolCall] = []
+            try:
+                first_token_ms = await self._stream_one(
+                    turn_id,
+                    current,
+                    messages,
+                    collected,
+                    started,
+                    tool_calls=requested,
+                    offer_tools=state.offer_tools,
+                )
+            except (ProviderUnavailable, ProviderRateLimited) as exc:
+                if state.step == 0:
+                    raise
+                local = catalog.get(self._model) or catalog.default_local()
+                if current.id == local.id:
+                    # Already degraded to the local default once this loop and
+                    # it failed too — retrying the same model forever is not a
+                    # degrade, it's a hang. Let it propagate: the outer
+                    # `chain`/`attempt` loop's own failover, or a plain error,
+                    # is the honest fallback left when even Ollama is down.
+                    raise
+                self._health.record_failure(
+                    current.id, str(exc), rate_limited=isinstance(exc, ProviderRateLimited)
+                )
+                # Appended, never overwritten — a turn that degrades more than
+                # once (one per cloud model it tries, in the worst case) must
+                # not have every note but the last one silently vanish, and an
+                # exhaustion note already sitting here from an earlier step
+                # must survive a later degrade too.
+                degrade_note = (
+                    f"{current.label} was unavailable mid-task, so {local.label} finished it."
+                )
+                note = f"{note} {degrade_note}".strip() if note else degrade_note
+                log.warning(
+                    "turn.agent_degrade",
+                    turn_id=turn_id,
+                    step=state.step,
+                    tried=current.id,
+                    next=local.id,
+                )
+                await self._bus.send_error("provider_failover", note, recoverable=True)
+                current = local
+                just_degraded = True
+                continue  # retry the same step locally, nothing lost
 
-        await self._bus.broadcast(
-            Event.TOOL_RESULT,
-            {
-                "turn_id": turn_id,
-                "call_id": call.id,
-                "tool": call.name,
-                "ok": result.ok,
-                "summary": result.summary,
-                "display": result.display,
-            },
-        )
+            if requested and not state.offer_tools:
+                # No real provider does this — `tools=None` was sent, so it
+                # has nothing to call. Trusting a `tool_calls` list anyway
+                # would let a misbehaving provider keep this loop going past
+                # its own budget forever; discard it and let the text (if
+                # any) stand as the answer instead.
+                log.warning(
+                    "turn.agent_ignored_unsolicited_call", turn_id=turn_id, step=state.step
+                )
+                requested = []
 
-        # Whatever it said before asking for the tool was preamble to an answer
-        # it did not have yet. Clearing stops the reply reading as two halves
-        # of different sentences.
-        if collected:
-            collected.clear()
-            await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
+            if not requested:
+                # A turn must never end silently. The model can finish a pass
+                # with zero text deltas — observed on `gate_agent.py`'s
+                # find -> read -> answer line, where it spends its steps on a
+                # file it cannot see and then says nothing — and everything
+                # downstream of here happily stores and broadcasts that empty
+                # string. To the user it is identical to a hung app.
+                if not "".join(collected).strip():
+                    log.warning(
+                        "turn.empty_reply",
+                        turn_id=turn_id,
+                        step=state.step,
+                        tool=state.last_tool,
+                    )
+                    collected.append(silent_reply_note(state.last_tool, state.last_summary))
+                return first_token_ms, current, note
 
-        note = ""
-        if dropped:
-            names = ", ".join(c.name for c in dropped)
-            note = (
-                f" You also asked for {names}; only one tool runs per turn, "
-                f"so those were not done."
+            call = requested[0]
+            dropped = requested[1:]
+            if dropped:
+                log.info(
+                    "turn.tools_dropped", turn_id=turn_id, dropped=[c.name for c in dropped]
+                )
+
+            if state.would_repeat(call.name, call.arguments):
+                log.info(
+                    "turn.loop_detected", turn_id=turn_id, tool=call.name, step=state.step
+                )
+                if collected:
+                    collected.clear()
+                    await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
+                collected.append(repeat_note(call.name))
+                return first_token_ms, current, note
+
+            tool = registry.get(call.name)
+
+            await self._bus.broadcast(
+                Event.TOOL_CALL,
+                {
+                    "turn_id": turn_id,
+                    "call_id": call.id,
+                    "tool": call.name,
+                    "args": call.arguments,
+                    "step": state.step,
+                },
             )
-            log.info("turn.tools_dropped", turn_id=turn_id, dropped=[c.name for c in dropped])
 
-        # Only `summary` goes back — never `data` or `display`. §7.2 names
-        # pasting tool output into the context as the second failure mode.
-        followup = [
-            *messages,
-            ChatMessage(role=Role.ASSISTANT, content="", tool_calls=[call]),
-            ChatMessage(
-                role=Role.TOOL,
-                content=result.summary + note,
-                tool_call_id=call.id,
-                name=call.name,
-            ),
-        ]
-        await self._bus.set_state(AssistantState.THINKING)
-        return await self._stream_one(
-            turn_id,
-            self._continuation_model(call.name, info),
-            followup,
-            collected,
-            started,
-            offer_tools=False,
-        )
+            # A tool call can only ever be `requested` when `_tool_schemas()`
+            # offered them in the first place, and that already requires a
+            # permission engine (`_tool_schemas` returns None without one) —
+            # so this can't fire, but it says so rather than a bare crash if
+            # that invariant is ever broken by a future change.
+            assert self._permissions is not None
+            # §11 asks about the *next* call, so the loop has to name it
+            # before asking. Set here rather than passed as an argument, so
+            # `should_escalate` stays a property one test can drive off a
+            # bare `LoopState` with nothing running.
+            state.pending_tool = call.name
+            result = await self._permissions.run(
+                call.name,
+                call.arguments,
+                ToolContext(session_id=session_id, turn_id=turn_id),
+                rationale="".join(collected).strip()[:400],
+                # §11: a call right after reading untrusted content is forced
+                # through confirmation regardless of its own registered tier.
+                force_confirm=state.should_escalate,
+            )
+
+            # For the routing log: whether the model's chosen tool actually
+            # worked is the single most useful label there is about a
+            # tool-shaped turn, and `_finish` is where the row is written.
+            self._turn_tools[turn_id] = (call.name, result.ok)
+
+            await self._bus.broadcast(
+                Event.TOOL_RESULT,
+                {
+                    "turn_id": turn_id,
+                    "call_id": call.id,
+                    "tool": call.name,
+                    "ok": result.ok,
+                    "summary": result.summary,
+                    "display": result.display,
+                    "step": state.step,
+                },
+            )
+
+            # Whatever it said before asking for the tool was preamble to an
+            # answer it did not have yet. Clearing stops the reply reading as
+            # two halves of different sentences.
+            if collected:
+                collected.clear()
+                await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
+
+            drop_note = ""
+            if dropped:
+                names = ", ".join(c.name for c in dropped)
+                drop_note = (
+                    f" You also asked for {names} in the same step; only one "
+                    f"tool runs per step, so those were not done."
+                )
+
+            state.record(
+                call.name,
+                call.arguments,
+                local_only=bool(tool and tool.local_only),
+                summary=result.summary,
+                ok=result.ok,
+            )
+
+            # Only `summary` goes back — never `data` or `display`. §7.2 names
+            # pasting tool output into the context as the second failure mode.
+            messages.append(ChatMessage(role=Role.ASSISTANT, content="", tool_calls=[call]))
+            messages.append(
+                ChatMessage(
+                    role=Role.TOOL,
+                    content=result.summary + drop_note,
+                    tool_call_id=call.id,
+                    name=call.name,
+                )
+            )
+
+            if state.exhausted:
+                # Not a return here — one more pass still runs below, with
+                # `state.offer_tools` now False, so the model gets to answer
+                # in text with whatever it has gathered rather than being cut
+                # off mid-task. The explanation goes out on `note`
+                # (surfaced via `TURN_COMPLETE`), the same channel a
+                # provider failover already uses — never smuggled into the
+                # model's own words as if it had said this itself.
+                note = f"{note} {exhausted_note()}".strip() if note else exhausted_note()
+                log.warning("turn.agent_exhausted", turn_id=turn_id, step=state.step)
+
+            # This tool's own local-only-ness, or a prior step's, sticks for
+            # every step after it — not just the one immediately following.
+            current = self._continuation_model(call.name, current)
+            if state.sticky_local and not current.local:
+                current = catalog.get(self._model) or catalog.default_local()
+
+            await self._bus.set_state(AssistantState.THINKING)
 
     def _continuation_model(self, tool_name: str, info: ModelInfo) -> ModelInfo:
         """Which model gets to see the tool's result.
@@ -742,22 +1151,44 @@ class ConversationService:
         info: ModelInfo,
         decision: RouteDecision,
         note: str | None = None,
+        *,
+        spoken: bool = False,
+        asked: str = "",
+        tool_called: str | None = None,
+        tool_ok: bool | None = None,
     ) -> None:
         full_text = "".join(collected)
         total_ms = int((time.perf_counter() - started) * 1000)
         route = "local" if info.local else "cloud"
 
-        await self._store.add_message(
+        message_id = await self._store.add_message(
             session_id,
             Role.ASSISTANT,
             full_text,
             route=route,
             latency_ms=total_ms,
         )
+        self._log_route(
+            message_id,
+            session_id,
+            info,
+            decision,
+            total_ms,
+            spoken=spoken,
+            asked=asked,
+            tool_called=tool_called,
+            tool_ok=tool_ok,
+        )
+        if self._db is not None and asked:
+            # Off the turn path, same as `_log_route` above — the reply is
+            # already on screen, and a mood update is worth none of the
+            # user's milliseconds. A failure here logs and never touches it.
+            spawn(self._update_affect(session_id, asked), "affect.update")
         await self._bus.broadcast(
             Event.TURN_COMPLETE,
             {
                 "turn_id": turn_id,
+                "message_id": message_id,
                 "full_text": full_text,
                 "route": route,
                 # The UI must always name what actually answered, including
@@ -772,6 +1203,113 @@ class ConversationService:
         )
         await self._bus.set_state(AssistantState.IDLE)
         self._maybe_title(session_id)
+
+    def _log_route(
+        self,
+        message_id: int,
+        session_id: str,
+        info: ModelInfo,
+        decision: RouteDecision,
+        latency_ms: int,
+        *,
+        spoken: bool,
+        asked: str,
+        tool_called: str | None,
+        tool_ok: bool | None,
+    ) -> None:
+        """Record the decision for §9.7's labelled dataset. Off the turn path.
+
+        Spawned rather than awaited, and after `add_message` rather than before:
+        the reply is already on screen, and no routing statistic is worth a
+        millisecond of the user's time. `RoutingLog.record` swallows its own
+        errors on top of that — this must never be able to fail a turn.
+
+        The *inputs* are recorded beside the outcome (bias, spoken, tool_shaped,
+        length), because a row saying only which model answered cannot be used
+        to tune anything. That is what `messages.route` already was.
+        """
+        if self._routing_log is None:
+            return
+        record = RoutingRecord(
+            message_id=message_id,
+            session_id=session_id,
+            model=info.id,
+            provider=str(info.provider),
+            local=info.local,
+            stage=decision.reason.stage,
+            detail=decision.reason.detail,
+            bias=str(self._router.bias),
+            spoken=spoken,
+            tool_shaped=is_tool_shaped(asked),
+            chars=len(asked),
+            latency_ms=latency_ms,
+            tool_called=tool_called,
+            tool_ok=tool_ok,
+        )
+        spawn(self._routing_log.record(record), "routing.record")
+
+    # ── proactivity (Phase 8) ──────────────────────────────────────────
+
+    async def send_proactive(
+        self,
+        text: str,
+        *,
+        urgency: str = "normal",
+        trigger: str = "",
+        procedure_name: str | None = None,
+    ) -> int | None:
+        """Deliver a message with no preceding question. Called by
+        `persona.proactivity.ProactivityScheduler`, never by a turn.
+
+        Reuses `_finish`'s own shapes rather than inventing new ones: a
+        `messages` row (`proactive=1`, migration 006) through the same
+        `ConversationStore` every reply already goes through, and a
+        `routing_log` row through the same `RoutingLog` every reply already
+        writes — which is what makes the *existing* `turn.rate` thumbs
+        mechanism work on a proactive message for free, no parallel rating
+        system, no new UI. Returns the stored message id, or `None` if there
+        is nowhere to attach it (no session exists yet).
+
+        `procedure_name` is set only for a `procedure_offer` candidate
+        (`persona.proactivity.Candidate.ref`) — it arms `_resolve_procedure_reply`
+        so the very next `send()` can turn a plain "yes" into
+        `procedures.confirm` without a model call.
+        """
+        self._pending_procedure_offer = procedure_name
+        session_id = await self._store.latest_session_id()
+        if session_id is None:
+            session_id = await self._store.ensure_session(None)
+
+        message_id = await self._store.add_message(
+            session_id, Role.ASSISTANT, text, route="local", proactive=True
+        )
+
+        if self._routing_log is not None:
+            local = catalog.get(self._model) or catalog.default_local()
+            record = RoutingRecord(
+                message_id=message_id,
+                session_id=session_id,
+                model=local.id,
+                provider=str(local.provider),
+                local=True,
+                stage="proactive",
+                detail=trigger,
+                bias=str(self._router.bias),
+                chars=len(text),
+            )
+            spawn(self._routing_log.record(record), "routing.record")
+
+        await self._bus.broadcast(
+            Event.PROACTIVE,
+            {
+                "text": text,
+                "urgency": urgency,
+                "message_id": message_id,
+                "session_id": session_id,
+            },
+        )
+        log.info("proactive.sent", trigger=trigger, chars=len(text))
+        return message_id
 
     # ── titles ──────────────────────────────────────────────────────────
 
@@ -872,17 +1410,31 @@ class ConversationService:
     # ── context ─────────────────────────────────────────────────────────
 
     async def _build_context(
-        self, session_id: str, info: ModelInfo | None = None
+        self, session_id: str, info: ModelInfo | None = None, turn_id: str | None = None
     ) -> list[ChatMessage]:
         # Persona is per-model: the full character makes weak models hostile and
         # prone to inventing context (see core/context.PersonaLevel).
         level = info.persona if info else ctx.PersonaLevel.FULL
         cap = min(self._num_ctx, info.context_tokens) if info else self._num_ctx
 
-        history: list[StoredMessage] = await self._store.history(session_id)
+        # Gathered, not sequenced: the retrieval started back in `send()` and
+        # the history read is a thread hop, so the two overlap instead of
+        # adding up.
+        history, retrieval = await asyncio.gather(
+            self._store.history(session_id), self._await_retrieval(turn_id)
+        )
+        retrieved = retrieval.render() if retrieval else None
         turns = ctx.to_chat_messages(history)
         summary = self._summaries.get(session_id)
         machine = self._machine_context(info, history)
+        affect = await self._current_affect()
+        # The most recent stored message is this turn's own user text —
+        # `send()` already persisted it before `_run_turn` started, so this
+        # is what's already loaded rather than a new parameter threaded
+        # through from the call site.
+        procedure_hint = None
+        if self._db is not None and history and history[-1].role is Role.USER:
+            procedure_hint = await procedures.context_hint(self._db, history[-1].content)
 
         # Budget for turns is what's left after identity + any roll-up note.
         #
@@ -893,8 +1445,19 @@ class ConversationService:
         # next one. Voice has a ~1000ms end-to-end budget and cannot absorb a
         # second generation.
         has_tools = self._tool_schemas() is not None
+        # The capability paragraph has to follow the switch, or she declines to
+        # look up something she can look up — the Phase 3 "I cannot run
+        # programs" failure, in the other direction.
+        online = has_tools and runtime.online_mode
         turn_budget = self._budget - ctx.overhead_tokens(
-            summary, level, machine, has_tools=has_tools
+            summary,
+            level,
+            machine,
+            has_tools=has_tools,
+            retrieved=retrieved,
+            online=online,
+            affect=affect,
+            procedure_hint=procedure_hint,
         )
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
@@ -903,10 +1466,111 @@ class ConversationService:
 
         # Hard backstop: the summarizer is a model call and can return anything.
         turns = ctx.fit_to_budget(
-            turns, summary=summary, hard_cap_tokens=cap, level=level, machine=machine
+            turns,
+            summary=summary,
+            hard_cap_tokens=cap,
+            level=level,
+            machine=machine,
+            has_tools=has_tools,
+            retrieved=retrieved,
+            affect=affect,
+            procedure_hint=procedure_hint,
         )
         return ctx.assemble(
-            turns, summary=summary, level=level, machine=machine, has_tools=has_tools
+            turns,
+            summary=summary,
+            level=level,
+            machine=machine,
+            has_tools=has_tools,
+            retrieved=retrieved,
+            online=online,
+            affect=affect,
+            procedure_hint=procedure_hint,
+        )
+
+    async def _await_retrieval(self, turn_id: str | None) -> Retrieved | None:
+        """Collect what `send()` started. None when memory is off or it failed.
+
+        Retrieval is never allowed to break a turn: anything that goes wrong
+        here costs recall, which the user can live without, rather than the
+        answer, which they cannot.
+        """
+        if turn_id is None:
+            return None
+        task = self._retrievals.get(turn_id)
+        if task is None:
+            return None
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("memory.retrieval_failed", turn_id=turn_id, error=str(exc))
+            return None
+
+        if not result.empty and self._memory is not None:
+            # An access is a database write and the user is waiting. Off the
+            # path, like titling.
+            spawn(
+                self._memory.episodic.record_access(result.episode_ids()),
+                "memory.record_access",
+            )
+        return result
+
+    async def _current_affect(self) -> str | None:
+        """The one line naming how she currently reads (Phase 8).
+
+        Read-only and cheap — a single-row `SELECT` — so this is awaited
+        inline like `machine_context`'s own reads, not spawned. Only the
+        *write* after the turn (`_finish`, below) is off the critical path;
+        there is nothing to gain by delaying a read this small.
+        """
+        if self._db is None:
+            return None
+        try:
+            state = await affect_module.load(self._db)
+        except Exception:  # noqa: BLE001 — never let this fail a turn
+            log.warning("affect.load_failed", exc_info=True)
+            return None
+        return affect_module.render(state, datetime.now().astimezone())
+
+    async def _current_speech_speed(self) -> float:
+        """Phase 8 voice polish's affect-driven nudge to `KokoroTTS.synthesize`.
+
+        Same single-row read as `_current_affect`, kept separate because that
+        one wants a rendered string for the prompt and this one wants the raw
+        floats. `1.0` — the engine's own neutral default — whenever there is
+        no affect to read, so a turn with memory off sounds exactly as it did
+        before this phase existed.
+        """
+        if self._db is None:
+            return 1.0
+        try:
+            state = await affect_module.load(self._db)
+        except Exception:  # noqa: BLE001 — a voice nudge is never worth a failed turn
+            log.warning("affect.load_failed", exc_info=True)
+            return 1.0
+        return affect_module.speech_speed(state)
+
+    async def _update_affect(self, session_id: str, latest_user_text: str) -> None:
+        """The write half of Phase 8's affect model — spawned from `_finish`,
+        never awaited on the turn. Re-reads history rather than threading it
+        through from `_build_context`: this runs seconds after the reply
+        already streamed, on a background task, so one more cheap read costs
+        nothing a user is waiting on.
+        """
+        if self._db is None:
+            return
+        history = await self._store.history(session_id)
+        started = _session_started_at(history) or datetime.now(UTC)
+        user_texts = [m.content for m in history if m.role is Role.USER][-3:]
+        await affect_module.refresh(
+            self._db,
+            session_id=session_id,
+            session_started_at=started,
+            message_count=len(history),
+            last_user_messages=user_texts,
+            is_casual_turn=affect_module.is_casual(latest_user_text),
         )
 
     def _machine_context(
@@ -918,12 +1582,7 @@ class ConversationService:
         `sessions` row, and the turn count from the history just loaded, so this
         costs nothing beyond what the turn already did.
         """
-        started: datetime | None = None
-        if history:
-            with contextlib.suppress(ValueError):
-                started = datetime.strptime(
-                    history[0].created_at, "%Y-%m-%dT%H:%M:%SZ"
-                ).replace(tzinfo=UTC)
+        started = _session_started_at(history)
 
         return ctx.MachineContext(
             # Local time: she is answering someone sitting at this machine, and

@@ -50,7 +50,71 @@ function UserTurn({ turn }: { turn: Turn }): JSX.Element {
   )
 }
 
-function AssistantTurn({ turn, state }: { turn: Turn; state: AssistantState }): JSX.Element {
+/** Thumbs up/down on one answer — §9.7's label half.
+ *
+ *  The spec's upgrade path is a labelled dataset, not a bigger model: "log
+ *  every routing decision with the provider, the resulting turn's latency and a
+ *  user thumbs-up/down. After a few weeks you'll have a labelled dataset to
+ *  tune the rules against." Nothing collected one until now.
+ *
+ *  Hidden until hover, like `CopyTurn` — an always-visible pair of buttons
+ *  under every answer turns a conversation into a survey. A chosen thumb stays
+ *  visible, or there would be no way to see what you had already said. */
+function RateTurn({
+  rating,
+  onRate,
+}: {
+  rating?: 1 | -1
+  onRate: (rating: 1 | -1) => void
+}): JSX.Element {
+  return (
+    <span className="flex items-center gap-0.5">
+      {([1, -1] as const).map((value) => {
+        const chosen = rating === value
+        return (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onRate(value)}
+            aria-pressed={chosen}
+            aria-label={value === 1 ? 'Good answer' : 'Bad answer'}
+            title={
+              value === 1
+                ? 'Good answer — helps her learn which model to use'
+                : 'Bad answer — helps her learn which model to use'
+            }
+            className={`rounded p-0.5 transition-colors hover:bg-white/10 ${
+              chosen ? 'text-aria-accent' : 'text-aria-faint'
+            }`}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              className={`h-3 w-3 ${value === -1 ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M4.5 14V7l3.2-5a1.6 1.6 0 0 1 2.4 1.9L9.2 6.6h3.1a1.4 1.4 0 0 1 1.4 1.7l-.9 4.4a1.6 1.6 0 0 1-1.6 1.3H4.5Z" />
+              <path d="M4.5 7H2.4v7h2.1" />
+            </svg>
+          </button>
+        )
+      })}
+    </span>
+  )
+}
+
+function AssistantTurn({
+  turn,
+  state,
+  onRate,
+}: {
+  turn: Turn
+  state: AssistantState
+  onRate?: (messageId: number, rating: 1 | -1) => void
+}): JSX.Element {
   const tools = turn.toolCalls ?? []
   const waiting = turn.streaming && !turn.content
   // Something has to occupy the gap between send and first token, or the window
@@ -63,7 +127,10 @@ function AssistantTurn({ turn, state }: { turn: Turn; state: AssistantState }): 
       {/* Above the reply, because that is the order it happened in: she acts,
           then tells you about it. */}
       {tools.map((call) => (
-        <ToolCallCard key={call.id} call={call} />
+        // The step badge only earns its place once there is more than one
+        // call to number — on an ordinary single-tool turn "Step 1" is
+        // noise, not information.
+        <ToolCallCard key={call.id} call={call} chained={tools.length > 1} />
       ))}
 
       {placeholder ? (
@@ -101,6 +168,18 @@ function AssistantTurn({ turn, state }: { turn: Turn; state: AssistantState }): 
             <CopyTurn text={turn.content} />
           </span>
         )}
+        {!turn.streaming && turn.content && onRate && turn.messageId !== undefined && (
+          <span
+            className={`transition-opacity focus-within:opacity-100 group-hover:opacity-100 ${
+              turn.rating ? 'opacity-100' : 'opacity-0'
+            }`}
+          >
+            <RateTurn
+              rating={turn.rating}
+              onRate={(value) => onRate(turn.messageId as number, value)}
+            />
+          </span>
+        )}
       </div>
     </div>
   )
@@ -109,9 +188,11 @@ function AssistantTurn({ turn, state }: { turn: Turn; state: AssistantState }): 
 export function ConversationView({
   turns,
   state = 'idle',
+  onRate,
 }: {
   turns: Turn[]
   state?: AssistantState
+  onRate?: (messageId: number, rating: 1 | -1) => void
 }): JSX.Element {
   const still = useReducedMotion()
   const scroller = useRef<HTMLDivElement>(null)
@@ -167,7 +248,7 @@ export function ConversationView({
             </motion.div>
           ) : (
             <div key={turn.id}>
-              <AssistantTurn turn={turn} state={state} />
+              <AssistantTurn turn={turn} state={state} onRate={onRate} />
             </div>
           ),
         )}

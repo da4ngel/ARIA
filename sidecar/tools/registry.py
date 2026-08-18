@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, get_args, get_origin, get_type_hints
@@ -75,7 +75,34 @@ class ToolContext:
     turn_id: str | None = None
 
 
+#: Tools that reach the internet, and are therefore hidden from the model
+#: unless online mode is on. Named here rather than in `conversation.py` so
+#: adding a second web tool cannot forget the gate.
+ONLINE_TOOLS = frozenset({"research"})
+
+#: Tools whose result is somebody else's writing, not this machine's own
+#: state — a search result, a fetched page. §11: "any tool call triggered
+#: within one step of reading untrusted content is force-escalated to T2
+#: confirmation." `research.py`'s own docstring names the reason this could
+#: not be built until the agent loop existed: one tool ran per turn, so there
+#: was never a "next call" for the rule to apply to. `core/agent.py` is where
+#: it now applies — after a step whose tool is in this set, the *next* step's
+#: tool is forced through confirmation regardless of its own registered tier,
+#: because a webpage that says "delete everything in Downloads" is a live
+#: attack vector the moment something reads pages and can also act.
+UNTRUSTED_SOURCE_TOOLS = frozenset({"research", "browser_read", "browser_navigate"})
+
 ToolFn = Callable[..., Awaitable[ToolResult]]
+#: A tool's own arguments in, a JSON-serialisable summary of what would
+#: happen out. See `Tool.preview`.
+PreviewFn = Callable[..., Awaitable["dict[str, Any] | None"]]
+#: A tool's own arguments in (as keywords, like `PreviewFn`), whether *this*
+#: call should be forced through confirmation regardless of its own
+#: registered tier. See `Tool.escalate`.
+EscalateFn = Callable[..., Awaitable[bool]]
+#: A tool's own arguments in, a refusal reason out (or None to proceed). See
+#: `Tool.refuse`.
+RefuseFn = Callable[..., Awaitable["str | None"]]
 
 
 @dataclass(frozen=True)
@@ -94,6 +121,47 @@ class Tool:
     #: when a tool declares this. That has to happen after the call rather than
     #: before it, because the continuation is where the result enters a prompt.
     local_only: bool = False
+    #: Compute what the user is being asked to approve, before it happens.
+    #:
+    #: **The confirmation fires before the tool body runs**, and `ToolContext`
+    #: carries no event bus — so a tool that works out a plan is structurally
+    #: unable to be the tool that shows it. Without this, `organize_folder` can
+    #: only put its raw arguments in front of the user (`path`, `strategy`),
+    #: which says nothing about the thirty files about to move. BUILD_SPEC §7.2
+    #: asks for the opposite: "if the agent wants to move 30 files, emit **one**
+    #: `confirm.request` describing the batch, not 30. Include the full file
+    #: list."
+    #:
+    #: Called with the tool's own arguments, never `ctx`. Must not mutate
+    #: anything — it runs whether or not the user then approves — and must not
+    #: raise: a preview that fails falls back to showing the arguments, because
+    #: losing the *confirmation* would be far worse than losing the detail.
+    preview: PreviewFn | None = None
+    #: A second, independent reason to force confirmation — not §11's
+    #: `force_confirm` (a decision the *agent loop* makes from the previous
+    #: step), but one the tool itself makes from *this* call's own arguments
+    #: or live state. Built for `tools/browser.py`'s checkout/banking hard
+    #: block (BUILD_SPEC §9:943): "any page whose URL or DOM matches banking,
+    #: payment, or checkout patterns requires T2 confirmation regardless of
+    #: tool tier." `browser_navigate` is ordinarily SAFE and would otherwise
+    #: never ask at all.
+    #:
+    #: A check that raises escalates anyway — fail closed, not open. This is
+    #: the one hook in this file where "detail lost, confirmation kept" is
+    #: the wrong default: the entire point is deciding *whether* to ask, and
+    #: a broken detector silently waving through a checkout page is worse
+    #: than an unnecessary confirmation on an ordinary one.
+    escalate: EscalateFn | None = None
+    #: A hard block, checked **before** any confirmation would fire — not a
+    #: dialog that can be declined, a call that never reaches one. Built for
+    #: `browser_fill`'s password-field refusal (§9:943): approving a fill
+    #: without knowing it targets a password field is not a choice anyone
+    #: should be asked to make, so the choice is never offered. Returns a
+    #: reason to refuse, or None to proceed as normal. A check that raises is
+    #: treated as "no reason found" — this one is a cheap, synchronous read of
+    #: the call's own arguments, not live page state, so failing open here
+    #: does not carry `escalate`'s risk.
+    refuse: RefuseFn | None = None
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -149,21 +217,33 @@ def _arg_docs(doc: str) -> dict[str, str]:
 
     These are what the model actually reads to decide what to put in a field,
     so they are worth more than the function description on its own.
+
+    **Wrapped lines are joined**, and that is not a nicety. A description was
+    silently cut at the first line break, so `remember` had been handing every
+    model `The thing to remember, in plain words, e.g. "I work on Sillara` —
+    truncated mid-example, with an unterminated quote — since Phase 5. Anything
+    that needed more than one line to explain was documented for humans and
+    hidden from the only reader that matters.
     """
     lines = doc.splitlines()
     descriptions: dict[str, str] = {}
+    order: list[str] = []
     inside = False
     for line in lines:
         stripped = line.strip()
         if stripped.lower().startswith("args:"):
             inside = True
             continue
-        if inside:
-            if not stripped or stripped.endswith(":") and " " not in stripped:
-                break
-            match = _ARG_DOC.match(line)
-            if match:
-                descriptions[match.group(1)] = match.group(2).strip()
+        if not inside:
+            continue
+        if not stripped or (stripped.endswith(":") and " " not in stripped):
+            break
+        match = _ARG_DOC.match(line)
+        if match:
+            descriptions[match.group(1)] = match.group(2).strip()
+            order.append(match.group(1))
+        elif order:
+            descriptions[order[-1]] += " " + stripped
     return descriptions
 
 
@@ -192,7 +272,14 @@ def build_parameters(fn: ToolFn) -> dict[str, Any]:
 
 
 def tool(
-    *, name: str, tier: Tier, description: str, local_only: bool = False
+    *,
+    name: str,
+    tier: Tier,
+    description: str,
+    local_only: bool = False,
+    preview: PreviewFn | None = None,
+    escalate: EscalateFn | None = None,
+    refuse: RefuseFn | None = None,
 ) -> Callable[[ToolFn], ToolFn]:
     """Register a coroutine as a tool.
 
@@ -212,6 +299,9 @@ def tool(
             parameters=build_parameters(fn),
             fn=fn,
             local_only=local_only,
+            preview=preview,
+            escalate=escalate,
+            refuse=refuse,
         )
         return fn
 
@@ -230,15 +320,25 @@ def all_tools() -> list[Tool]:
     return [_REGISTRY[n] for n in sorted(_REGISTRY)]
 
 
-def schemas(*, tier_max: Tier = Tier.CONFIRM) -> list[dict[str, Any]]:
+def schemas(
+    *, tier_max: Tier = Tier.CONFIRM, exclude: Collection[str] = ()
+) -> list[dict[str, Any]]:
     """Tool schemas for the model, up to and including `tier_max`.
 
     **DANGER is excluded by default**, which is what §7.2 means by "off by
     default": the model is not told those tools exist unless something
     deliberately raises the ceiling. A capability the model cannot see is one
     it cannot be talked into using.
+
+    `exclude` is the same idea for a capability that is switched off rather
+    than dangerous — online mode. Not a relevance filter: that question is
+    closed and measured (see CLAUDE.md), and this set changes only when a
+    setting does, so the stable prefix still holds its KV cache across a
+    conversation.
     """
-    return [t.schema for t in all_tools() if t.tier <= tier_max]
+    return [
+        t.schema for t in all_tools() if t.tier <= tier_max and t.name not in exclude
+    ]
 
 
 def snapshot() -> dict[str, Tool]:

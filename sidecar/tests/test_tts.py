@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,7 +15,10 @@ from sidecar.memory.messages import ConversationStore
 from sidecar.providers.base import ChatMessage, GenerationOptions, StreamDelta
 from sidecar.providers.tts import (
     FIRST_CHUNK_MAX_CHARS,
+    MAX_SPOKEN_WORDS,
+    KokoroTTS,
     SpeechUnavailable,
+    shorten_for_speech,
     split_for_speech,
     to_pcm16,
 )
@@ -26,12 +30,14 @@ class FakeTTS:
 
     def __init__(self) -> None:
         self.spoken: list[str] = []
+        self.speeds: list[float | None] = []
         self.ready = True
 
     async def start(self) -> None: ...
 
-    async def synthesize(self, text: str) -> tuple[bytes, int]:
+    async def synthesize(self, text: str, *, speed: float | None = None) -> tuple[bytes, int]:
         self.spoken.append(text)
+        self.speeds.append(speed)
         return b"\x00\x00" * 240, 24_000
 
     async def aclose(self) -> None: ...
@@ -47,7 +53,12 @@ class RecordingBus(EventBus):
 
 
 def drain_text(full: str, step: int = 7) -> list[str]:
-    """Feed text through the splitter the way tokens actually arrive."""
+    """Feed text through the splitter the way tokens actually arrive, then
+    flush the tail the way `SpeechStream.finish` does — through
+    `shorten_for_speech` in a loop, not appended raw. Mirroring that flush
+    here is what lets a test on this helper actually prove something about
+    the real tail path, not just the streaming one.
+    """
     out: list[str] = []
     buf = ""
     first = True
@@ -59,8 +70,12 @@ def drain_text(full: str, step: int = 7) -> list[str]:
                 break
             out.append(chunk)
             first = False
-    if buf.strip():
-        out.append(buf.strip())
+    tail = buf.strip()
+    while tail:
+        piece, tail = shorten_for_speech(tail, "")
+        if not piece:
+            break
+        out.append(piece)
     return out
 
 
@@ -111,6 +126,70 @@ def test_a_long_opening_sentence_does_not_wait_for_its_full_stop() -> None:
 def test_no_words_are_lost_or_duplicated(text: str) -> None:
     spoken = " ".join(drain_text(text))
     assert spoken.split() == text.split()
+
+
+# ── Phase 8: sentence-length enforcement ─────────────────────────────
+
+
+def test_a_long_sentence_is_split_even_with_no_char_limit_pressure() -> None:
+    """A clean, comma-free 24-word sentence sits well under CHUNK_MAX_CHARS,
+    so only the word-count cap catches it — the whole reason it exists
+    beside the character limit."""
+    text = " ".join(f"word{i}" for i in range(24)) + "."
+    chunks = drain_text(text)
+    assert len(chunks) > 1
+    assert len(chunks[0].split()) <= MAX_SPOKEN_WORDS
+
+
+def test_a_long_sentence_prefers_a_clause_boundary_within_budget() -> None:
+    """A comma inside the word budget is a more natural cut than a bare word
+    count — every chunk still respects the cap either way."""
+    text = (
+        "This is a fairly long sentence, and it keeps going well past the "
+        "point where a single breath would normally stop for air."
+    )
+    chunks = drain_text(text)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c.split()) <= MAX_SPOKEN_WORDS
+    assert chunks[0].endswith(",")
+
+
+def test_a_short_sentence_is_not_touched_by_length_enforcement() -> None:
+    assert drain_text("Canberra.") == ["Canberra."]
+
+
+def test_length_enforcement_loses_no_words_on_a_long_clause_free_sentence() -> None:
+    """No commas to cut on — falls back to a hard word-count cut rather than
+    dropping the tail."""
+    text = " ".join(f"word{i}" for i in range(30))
+    spoken = " ".join(drain_text(text))
+    assert spoken.split() == text.split()
+
+
+def test_shorten_for_speech_is_a_no_op_under_the_cap() -> None:
+    chunk, remainder = shorten_for_speech("Short and sweet.", "rest")
+    assert (chunk, remainder) == ("Short and sweet.", "rest")
+
+
+def test_shorten_for_speech_cuts_at_the_last_comma_in_budget() -> None:
+    words = [f"w{i}," if i == 10 else f"w{i}" for i in range(25)]
+    chunk, remainder = shorten_for_speech(" ".join(words), "")
+    assert chunk == " ".join(words[:11])  # up to and including "w10,"
+    assert remainder == " ".join(words[11:])
+
+
+def test_shorten_for_speech_hard_cuts_with_no_clause_boundary() -> None:
+    words = [f"w{i}" for i in range(25)]
+    chunk, remainder = shorten_for_speech(" ".join(words), "")
+    assert chunk == " ".join(words[:MAX_SPOKEN_WORDS])
+    assert remainder == " ".join(words[MAX_SPOKEN_WORDS:])
+
+
+def test_shorten_for_speech_prepends_the_cut_tail_to_the_existing_remainder() -> None:
+    words = [f"w{i}" for i in range(25)]
+    _, remainder = shorten_for_speech(" ".join(words), "already queued")
+    assert remainder == " ".join(words[MAX_SPOKEN_WORDS:]) + " already queued"
 
 
 def test_nothing_is_emitted_mid_sentence() -> None:
@@ -206,7 +285,7 @@ async def test_speech_stays_silent_when_there_is_no_engine() -> None:
 
 async def test_a_failing_synthesiser_does_not_break_the_turn() -> None:
     class Broken(FakeTTS):
-        async def synthesize(self, text: str) -> tuple[bytes, int]:
+        async def synthesize(self, text: str, *, speed: float | None = None) -> tuple[bytes, int]:
             raise SpeechUnavailable("no model files")
 
     bus = RecordingBus()
@@ -230,6 +309,54 @@ async def test_chunks_carry_an_index_so_playback_can_order_them() -> None:
     emitted = [p for m, p in bus.events if m == Event.AUDIO_OUT]
     assert [p["index"] for p in emitted] == sorted(p["index"] for p in emitted)
     assert len(emitted) == 3
+
+
+# ── Phase 8: affect-driven speed ─────────────────────────────────────
+
+
+async def test_speech_stream_passes_its_speed_to_every_chunk() -> None:
+    tts = FakeTTS()
+    bus = RecordingBus()
+    stream = SpeechStream(tts, bus, 0.0, speed=1.06)
+    stream.feed("One. Two.")
+    await stream.drain("t_1")
+    await stream.finish("t_1")
+    assert tts.speeds and all(s == 1.06 for s in tts.speeds)
+
+
+async def test_speech_stream_defaults_to_no_speed_override() -> None:
+    """Every pre-Phase-8 call site omits `speed` — the engine's own instance
+    default must still apply, not some new hardcoded value."""
+    tts = FakeTTS()
+    bus = RecordingBus()
+    stream = SpeechStream(tts, bus, 0.0)
+    stream.feed("One.")
+    await stream.drain("t_1")
+    await stream.finish("t_1")
+    assert tts.speeds == [None]
+
+
+async def test_kokoro_synthesize_uses_the_override_when_given() -> None:
+    """Direct against `KokoroTTS`, not `FakeTTS` — proves the override reaches
+    `kokoro_onnx.Kokoro.create` and doesn't just get swallowed."""
+    import numpy as np
+
+    tts = KokoroTTS(models_dir=Path("unused"), speed=1.0)
+    calls: list[float] = []
+
+    class FakeKokoro:
+        def create(
+            self, text: str, *, voice: str, speed: float, lang: str
+        ) -> tuple[np.ndarray, int]:
+            calls.append(speed)
+            return np.zeros(10, dtype="float32"), 24_000
+
+    tts._kokoro = FakeKokoro()  # noqa: SLF001 — bypassing the real model load
+
+    await tts.synthesize("hello", speed=1.08)
+    await tts.synthesize("hello")  # no override -> falls back to self.speed
+
+    assert calls == [1.08, 1.0]
 
 
 async def test_cancel_tells_the_renderer_to_stop_playing(database: Database) -> None:
