@@ -23,6 +23,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel
 
+from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
 from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
 from sidecar.core.router import RouteDecision, Router, RoutingBias, is_tool_shaped
@@ -342,6 +343,10 @@ class ConversationService:
         # later in `_build_context`. Started early so the embed overlaps the
         # message write and the history read.
         self._retrievals: dict[str, asyncio.Task[Retrieved]] = {}
+        #: What the user attached to the turn in flight. Read in `send`,
+        #: injected by `_build_context`, remembered by `_finish`, dropped
+        #: when the turn ends — the same lifetime `_retrievals` has.
+        self._attachments: dict[str, list[attach.Attachment]] = {}
         # Phase 8: the name of the procedure most recently offered via
         # `send_proactive`, if the very next `send()` turns out to be a plain
         # yes/no reply to it. Global, not per-session — proactive messages
@@ -463,6 +468,7 @@ class ConversationService:
         session_id: str | None = None,
         model: str | None = None,
         spoken: bool = False,
+        attachments: list[str] | None = None,
     ) -> TurnStarted:
         """Start a turn. Returns immediately; the reply streams as events.
 
@@ -473,7 +479,10 @@ class ConversationService:
         reserved id takes precedence here, so New Chat works even if the caller
         drops the id it was handed.
         """
-        if not text.strip():
+        # A message can be nothing but files. Dragging a PDF in and saying
+        # nothing is a complete request — "what is this?" is implied by the
+        # act, and refusing it would make attaching a two-step operation.
+        if not text.strip() and not attachments:
             raise ValueError("Cannot send an empty message.")
 
         offer = self._pending_procedure_offer
@@ -501,7 +510,34 @@ class ConversationService:
             self._retrievals[turn_id] = retrieval
             retrieval.add_done_callback(lambda _: None)
 
-        await self._store.add_message(resolved_session, Role.USER, text)
+        # Read before the turn, not inside it: the excerpt has to be in the
+        # prompt the first pass sees, and an image is a cloud round trip that
+        # would otherwise land after the model had already answered.
+        read: list[attach.Attachment] = []
+        if attachments:
+            describe = getattr(
+                self._registry.providers.get(str(catalog.ProviderName.OPENAI)),
+                "describe_image",
+                None,
+            )
+            read = await attach.read_all(attachments, describe)
+            self._attachments[turn_id] = read
+            log.info(
+                "turn.attachments",
+                turn_id=turn_id,
+                files=[a.name for a in read],
+                unreadable=[a.name for a in read if not a.ok],
+            )
+
+        # Stored with the file names in it, so the transcript still makes
+        # sense a week later — "summarise this" with no record of what "this"
+        # was is a message that reads as a bug in the history panel.
+        stored = (
+            text
+            if not read
+            else f"{text}\n\n[attached: {', '.join(a.name for a in read)}]"
+        )
+        await self._store.add_message(resolved_session, Role.USER, stored.strip())
 
         task = asyncio.create_task(
             self._run_turn(
@@ -513,6 +549,7 @@ class ConversationService:
         task.add_done_callback(lambda _: self._tasks.pop(turn_id, None))
         task.add_done_callback(lambda _: self._turn_sessions.pop(turn_id, None))
         task.add_done_callback(lambda _: self._retrievals.pop(turn_id, None))
+        task.add_done_callback(lambda _: self._attachments.pop(turn_id, None))
 
         return TurnStarted(turn_id=turn_id, session_id=resolved_session)
 
@@ -1184,6 +1221,17 @@ class ConversationService:
             # already on screen, and a mood update is worth none of the
             # user's milliseconds. A failure here logs and never touches it.
             spawn(self._update_affect(session_id, asked), "affect.update")
+
+        attached = self._attachments.get(turn_id, [])
+        if attached and self._memory is not None:
+            # Indexing embeds every chunk and a big PDF is a lot of chunks —
+            # nowhere near the turn path. Same channel as the affect update,
+            # and it swallows its own errors for the same reason: failing to
+            # remember a file must never cost the answer about it.
+            spawn(
+                attach.remember(attached, self._memory.semantic, runtime.indexer),
+                "attachment.remember",
+            )
         await self._bus.broadcast(
             Event.TURN_COMPLETE,
             {
@@ -1476,7 +1524,7 @@ class ConversationService:
             affect=affect,
             procedure_hint=procedure_hint,
         )
-        return ctx.assemble(
+        messages = ctx.assemble(
             turns,
             summary=summary,
             level=level,
@@ -1487,6 +1535,18 @@ class ConversationService:
             affect=affect,
             procedure_hint=procedure_hint,
         )
+
+        # **After the turns, not in the volatile prefix.** An attached file is
+        # about the question being asked right now, so it belongs next to it —
+        # and appending here leaves the stable prefix byte-identical, which is
+        # what keeps Ollama's KV cache worth having (~1s a turn). It is also
+        # dropped the moment the turn ends: the *text* of a PDF is not
+        # conversation history, and re-sending it on every later turn would
+        # eat the budget for something already summarised into memory.
+        block = attach.render(self._attachments.get(turn_id or "", []))
+        if block:
+            messages.append(ChatMessage(role=Role.SYSTEM, content=block))
+        return messages
 
     async def _await_retrieval(self, turn_id: str | None) -> Retrieved | None:
         """Collect what `send()` started. None when memory is off or it failed.

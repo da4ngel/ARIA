@@ -32,12 +32,14 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import structlog
 
 from sidecar.memory import procedures
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
+from sidecar.memory.settings_store import WATCHED_PROJECTS
 from sidecar.persona import focus
 from sidecar.providers.base import ChatMessage, GenerationOptions, LLMProvider, Role
 
@@ -250,10 +252,155 @@ async def idle_intention_candidate(
     return None
 
 
+# ── trigger 4: a scheduled check-in ──────────────────────────────────
+#
+# BUILD_SPEC §9 names five triggers; this is the fourth, and it was simply
+# absent rather than deferred — it had never been written down as a gap
+# either. It is also the one with the worst noise-to-value ratio if built
+# carelessly, because unlike the other three it is not a response to
+# anything the user did. §9's own warning applies hardest here: *"over-
+# triggering is the fastest path to uninstall. When in doubt, stay quiet."*
+#
+# So it is deliberately the most conditional of the four: waking hours only,
+# a long silence only, and once a day at most on top of the global rate
+# limit every candidate already passes.
+
+#: Nothing before this hour or after it. A check-in at 3am is not a
+#: check-in, it is being woken up — and `affect` already reads late-night
+#: activity as something to be gentle about rather than to interrupt.
+CHECK_IN_HOURS = range(10, 21)
+#: How long the conversation has to have been silent. Shorter than this and
+#: she is interrupting a session that is merely paused — someone reading a
+#: reply, or thinking.
+CHECK_IN_SILENCE = timedelta(hours=20)
+
+
+async def scheduled_check_in_candidate(
+    store: ConversationStore, *, now: datetime, silence: timedelta = CHECK_IN_SILENCE
+) -> Candidate | None:
+    """"You have not been around in a while" — at most once, and only when
+    that is actually true.
+
+    Keyed off the last *message* rather than a stored "last check-in" stamp:
+    the silence is the whole precondition, so a check-in that happened resets
+    it by definition — it writes a `messages` row itself. That removes a
+    piece of state that could disagree with reality.
+    """
+    local = now.astimezone()
+    if local.hour not in CHECK_IN_HOURS:
+        return None
+
+    latest = await store.latest_message_at()
+    if latest is None:
+        # Nothing has ever been said. A brand-new install being greeted
+        # unprompted is a strange first experience, not a warm one.
+        return None
+    last = datetime.strptime(latest, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    if now.astimezone(UTC) - last < silence:
+        return None
+
+    days = max(1, int((now.astimezone(UTC) - last).total_seconds() // 86400))
+    when = "a day" if days == 1 else f"{days} days"
+    return Candidate(
+        text=(
+            f"It has been about {when}. I am here if you want to pick anything "
+            f"back up — no need to reply if not."
+        ),
+        trigger="scheduled_check_in",
+    )
+
+
+# ── trigger 5: a file event on a watched project ─────────────────────
+#
+# The fifth of §9's five, and the reason it was never built is that
+# **"a watched project" did not exist anywhere in this codebase**. It still
+# needs the user to name one, so this is empty by default and cannot fire
+# until they do — which is also what keeps it from being noise. A build
+# directory churns constantly; a folder somebody deliberately pointed at
+# does not.
+#
+# Polled, not watched. `watchdog` would be a new dependency for one trigger,
+# and this project has turned down bigger ones for less (`webrtcvad`,
+# `pywinauto`, `APScheduler`). A five-minute tick comparing mtimes is
+# enough to notice "you have been working on this" — which is all the
+# trigger is for. It is not a build system.
+
+#: Only files changed inside this window count as "just now". Slightly wider
+#: than the scheduler's own tick so a change cannot fall between two passes.
+FILE_EVENT_WINDOW = timedelta(minutes=15)
+#: Below this, it is one save rather than a working session. Saying "I see
+#: you are working on X" after a single keystroke is the noise §9 warns of.
+FILE_EVENT_MIN_FILES = 3
+#: Never walk more than this. A watched folder pointed at a whole drive must
+#: cost a bounded scan, exactly as `finder._walk` is bounded.
+FILE_EVENT_MAX_ENTRIES = 2000
+
+
+def _recently_changed(root: Path, *, now: datetime, window: timedelta) -> list[str]:
+    """Names of files under `root` modified inside `window`. Bounded, and
+    never raises — an unreadable folder is one folder, not a failed tick."""
+    from sidecar.tools.finder import _SKIP_DIRS
+
+    cutoff = (now.astimezone(UTC) - window).timestamp()
+    found: list[str] = []
+    seen = 0
+    try:
+        for path in root.rglob("*"):
+            seen += 1
+            if seen > FILE_EVENT_MAX_ENTRIES:
+                break
+            if path.is_dir() or path.name.startswith("."):
+                continue
+            if any(part in _SKIP_DIRS for part in path.parts):
+                continue
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    found.append(path.name)
+            except OSError:
+                continue
+    except OSError:
+        return []
+    return found
+
+
+async def watched_project_candidate(
+    settings: object, *, now: datetime, window: timedelta = FILE_EVENT_WINDOW
+) -> Candidate | None:
+    """Notice that a watched folder is being worked in right now.
+
+    Empty by default: `WATCHED_PROJECTS` is unset until the user names a
+    folder, so this returns None on every machine that has not opted in.
+    """
+    if settings is None:
+        return None
+    roots = await settings.get(WATCHED_PROJECTS, [])  # type: ignore[attr-defined]
+    if not isinstance(roots, list) or not roots:
+        return None
+
+    for raw in roots:
+        if not isinstance(raw, str):
+            continue
+        root = Path(raw)
+        changed = await asyncio.to_thread(_recently_changed, root, now=now, window=window)
+        if len(changed) < FILE_EVENT_MIN_FILES:
+            continue
+        shown = ", ".join(sorted(set(changed))[:3])
+        return Candidate(
+            text=(
+                f"You have been working in {root.name} — {len(changed)} files "
+                f"changed just now ({shown}). Say the word if you want a hand."
+            ),
+            trigger="watched_project",
+        )
+    return None
+
+
 # ── composing the default trigger set ───────────────────────────────
 
 
-async def default_candidates(db: Database, store: ConversationStore) -> list[Candidate]:
+async def default_candidates(
+    db: Database, store: ConversationStore, settings: object = None
+) -> list[Candidate]:
     """Tried in order — the first real one wins, one candidate per tick.
     Ordered from least to most speculative: a repeated pattern is a fact
     about what happened; a stated intention is an inference about what the
@@ -279,6 +426,17 @@ async def default_candidates(db: Database, store: ConversationStore) -> list[Can
     intention = await idle_intention_candidate(store, now=datetime.now(UTC))
     if intention is not None:
         return [intention]
+
+    # The two §9 named that had never been built. Both sit last because both
+    # are the most speculative: nothing the user did prompted either, which
+    # is exactly the shape §9 warns is the fastest path to uninstall.
+    project = await watched_project_candidate(settings, now=datetime.now(UTC))
+    if project is not None:
+        return [project]
+
+    check_in = await scheduled_check_in_candidate(store, now=datetime.now(UTC))
+    if check_in is not None:
+        return [check_in]
 
     return []
 

@@ -326,7 +326,25 @@ async def read_file(ctx: ToolContext, path: str) -> ToolResult:
             error="too_large",
         )
 
-    text = await asyncio.to_thread(target.read_text, encoding="utf-8", errors="replace")
+    # **A PDF is not a text file, and `read_text` on one returns mojibake.**
+    # This tool has always done a plain UTF-8 read, so "what does this invoice
+    # say" answered with binary noise the model then tried to interpret.
+    # `memory/indexer.py` has parsed PDF, DOCX and XLSX since Phase 4 —
+    # borrowing that is strictly better than the alternative, which is a
+    # confident answer about a document nobody could read. Found while
+    # designing the upload path, which needed the same parsers.
+    from sidecar.memory.indexer import DOCUMENT_EXTENSIONS, extract_text
+
+    if target.suffix.lower() in DOCUMENT_EXTENSIONS:
+        text = await asyncio.to_thread(extract_text, target)
+        if not text.strip():
+            return ToolResult(
+                ok=False,
+                summary=f"I could not get any readable text out of {target.name}.",
+                error="unreadable",
+            )
+    else:
+        text = await asyncio.to_thread(target.read_text, encoding="utf-8", errors="replace")
     if not text.strip():
         return ToolResult(ok=True, data="", summary=f"{target.name} is empty.")
 

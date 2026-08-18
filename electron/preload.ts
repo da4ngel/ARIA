@@ -89,6 +89,15 @@ const api = {
   /** Mode changes, including ones main initiates. */
   onWindowMode: (handler: (expanded: boolean) => void): Unsubscribe =>
     subscribe('aria:window-mode', handler),
+
+  /** Open the OS file picker and return the absolute paths chosen.
+   *
+   *  The one filesystem-shaped thing in this bridge, and it stays inside the
+   *  rule at the top of this file: the renderer gets *paths*, never contents
+   *  and never a handle. The sidecar opens them. The picker itself is the
+   *  consent — nothing here can reach a file the user did not choose. */
+  pickFiles: (): Promise<string[]> =>
+    ipcRenderer.invoke('aria:pick-files') as Promise<string[]>,
 } as const
 
 export type AriaApi = typeof api

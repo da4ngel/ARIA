@@ -204,6 +204,21 @@ class ConversationStore:
         )
         return str(row["created_at"]) if row else None
 
+    async def latest_message_at(self) -> str | None:
+        """When anything was last said, in any session.
+
+        The whole precondition for §9's scheduled check-in, and deliberately
+        *not* a stored "last checked in" stamp: a check-in writes a `messages`
+        row itself, so sending one resets the silence by definition. One
+        source of truth rather than two that can disagree.
+        """
+        row = await self._db.run(
+            lambda c: c.execute(
+                "SELECT created_at FROM messages ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        )
+        return str(row["created_at"]) if row else None
+
     async def history(self, session_id: str, limit: int = 200) -> list[StoredMessage]:
         """Oldest-first turns for a session."""
 

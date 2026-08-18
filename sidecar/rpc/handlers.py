@@ -8,6 +8,7 @@ than a stub that pretends to work.
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -117,11 +118,18 @@ async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
     text = str(params.get("text", ""))
     session_id = params.get("session_id")
     model = params.get("model")
+    # Absolute paths, not bytes: the renderer picks files through Electron's
+    # own dialog and hands over where they are, and the sidecar opens them
+    # itself. The preload exposes no filesystem by design, so a path is the
+    # narrowest thing that can cross that boundary and still be useful.
+    raw = params.get("attachments")
+    attachments = [p for p in raw if isinstance(p, str)] if isinstance(raw, list) else None
     started = await runtime.require_conversation().send(
         text,
         session_id if isinstance(session_id, str) else None,
         model if isinstance(model, str) else None,
         spoken=params.get("spoken") is True,
+        attachments=attachments or None,
     )
     return started.model_dump()
 
@@ -1163,3 +1171,201 @@ async def _invoke(handler: Handler, request: RpcRequest) -> RpcResponse | None:
     if request.id is None:
         return None
     return ok(request.id, result)
+
+
+# ── the file browser panel (permission-modes Part 3) ──────────────────
+#
+# **UI-facing, not model-facing, and that distinction is the whole design.**
+# `list_folder`, `rename_file` and `delete_file` are tools: the *model* asks
+# for them, so they go through `PermissionEngine` and its confirmation
+# dialog. These are clicks the user makes in a panel they are looking at, on
+# a file they can see. Putting a modal in front of "I clicked Rename" would
+# be asking someone to confirm the thing they just did.
+#
+# What that does **not** mean is fewer safety rails. `tools/files.py`'s hard
+# refusals — drive roots, Windows, Program Files, ProgramData — are reused
+# unchanged, because those were never confirmation mechanisms: they are
+# "this must not happen at all", and a panel is not a reason to relax them.
+# Deletes go to the Recycle Bin rather than being permanent, which is what
+# Explorer itself does and what makes a misclick survivable.
+
+
+
+@method("files.browse")
+async def files_browse(params: dict[str, Any]) -> dict[str, Any]:
+    """One folder's contents, for the panel.
+
+    Deliberately not `list_folder`: that tool summarises for a model and caps
+    at what fits in a prompt. A panel wants everything, with sizes and dates,
+    and pays no context for it.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from sidecar.tools.files import known_folder
+
+    raw = str(params.get("path") or "").strip()
+    if not raw:
+        # No path means "where do I start" — the same three folders the
+        # indexer already treats as where a person's files live, plus every
+        # drive, so the whole machine is reachable from the first render.
+        roots: list[dict[str, Any]] = []
+        for name in ("desktop", "documents", "downloads"):
+            folder = known_folder(name)
+            if folder is not None and folder.is_dir():
+                roots.append({"name": name.title(), "path": str(folder), "kind": "folder"})
+        roots.extend({"name": d, "path": d, "kind": "drive"} for d in _enumerate_drives())
+        return {"path": "", "parent": None, "entries": roots}
+
+    target = Path(raw)
+    if not await asyncio.to_thread(target.is_dir):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"{target} is not a folder.")
+
+    def _read() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        # `scandir`, not `iterdir` + `stat`: one syscall per entry instead of
+        # two, which is the difference between instant and visibly slow in a
+        # folder with a few thousand files.
+        with os.scandir(target) as entries:
+            for entry in entries:
+                try:
+                    is_dir = entry.is_dir()
+                    info = entry.stat()
+                except OSError:
+                    continue  # a file that vanished mid-listing is not an error
+                out.append(
+                    {
+                        "name": entry.name,
+                        "path": entry.path,
+                        "kind": "folder" if is_dir else "file",
+                        "size": 0 if is_dir else info.st_size,
+                        "modified": info.st_mtime,
+                    }
+                )
+        # Folders first, then by name — Explorer's own order, and the one
+        # people navigate by without thinking about it.
+        out.sort(key=lambda e: (e["kind"] != "folder", str(e["name"]).lower()))
+        return out
+
+    try:
+        entries = await asyncio.to_thread(_read)
+    except OSError as exc:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, f"Could not read {target}: {exc}") from exc
+
+    parent = str(target.parent) if target.parent != target else ""
+    return {"path": str(target), "parent": parent, "entries": entries}
+
+
+@method("files.reveal")
+async def files_reveal(params: dict[str, Any]) -> dict[str, Any]:
+    """Show it in Explorer. The escape hatch for anything this panel does not do."""
+    import asyncio
+    import subprocess
+    from pathlib import Path
+
+    target = Path(str(params.get("path") or ""))
+    if not await asyncio.to_thread(target.exists):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"There is nothing at {target}.")
+    await asyncio.to_thread(
+        subprocess.Popen, ["explorer.exe", "/select,", str(target)]
+    )
+    return {"ok": True}
+
+
+@method("files.rename")
+async def files_rename(params: dict[str, Any]) -> dict[str, Any]:
+    """Rename in place, from a click in the panel.
+
+    Reuses `tools/files.py`'s own refusals rather than reimplementing them:
+    those guard against acting inside Windows or Program Files at all, which
+    is as true of a click as of a tool call.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from sidecar.tools.files import _refuse
+
+    target = Path(str(params.get("path") or ""))
+    clean = str(params.get("name") or "").strip()
+    if not clean or set(clean) & set('/\\:*?"<>|'):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"{clean!r} is not a valid name.")
+    refusal = _refuse(target)
+    if refusal is not None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"I will not rename {target}: {refusal}.")
+    if not await asyncio.to_thread(target.exists):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"There is nothing at {target}.")
+
+    destination = target.with_name(clean)
+    if await asyncio.to_thread(destination.exists):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"{clean} already exists there.")
+    await asyncio.to_thread(target.rename, destination)
+    log.info("files.renamed", was=str(target), now=str(destination))
+    _invalidate_finder_scan()
+    return {"path": str(destination)}
+
+
+@method("files.delete")
+async def files_delete(params: dict[str, Any]) -> dict[str, Any]:
+    """**To the Recycle Bin, not gone.**
+
+    This is the one place in the codebase that deletes without a confirmation
+    round-trip, and the reason it is allowed to is that it does not actually
+    destroy anything: `SHFileOperation` with `FOF_ALLOWUNDO` is what Explorer
+    itself does, and the undo is the Recycle Bin the user already knows how
+    to use. Rule 5 asks for a confirmation before a destructive operation;
+    recoverable-by-design is the honest way to satisfy it for a click the
+    user made on a file they are looking at.
+
+    `send2trash` would be the obvious library and is deliberately not added —
+    `pywin32` is already a dependency and exposes the same shell API.
+    """
+    import asyncio
+    from pathlib import Path
+
+    from sidecar.tools.files import _refuse
+
+    target = Path(str(params.get("path") or ""))
+    refusal = _refuse(target)
+    if refusal is not None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"I will not delete {target}: {refusal}.")
+    if not await asyncio.to_thread(target.exists):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"There is nothing at {target}.")
+
+    def _recycle() -> None:
+        from win32com.shell import shell, shellcon
+
+        # Double-NUL terminated, per the Win32 contract for a path *list*.
+        result, aborted = shell.SHFileOperation(
+            (
+                0,
+                shellcon.FO_DELETE,
+                str(target) + "\0",
+                None,
+                shellcon.FOF_ALLOWUNDO | shellcon.FOF_NOCONFIRMATION | shellcon.FOF_SILENT,
+                None,
+                None,
+            )
+        )
+        if result != 0 or aborted:
+            raise OSError(f"Windows would not recycle {target} (code {result}).")
+
+    try:
+        await asyncio.to_thread(_recycle)
+    except OSError as exc:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, str(exc)) from exc
+
+    log.info("files.recycled", path=str(target))
+    _invalidate_finder_scan()
+    return {"ok": True, "recycled": True}
+
+
+def _invalidate_finder_scan() -> None:
+    """The panel changed the filesystem, so the finder's cached scan is stale.
+
+    The same call every mutating tool in `tools/files.py` makes. Forgetting it
+    here would reproduce, from a different direction, the bug where a file she
+    had just touched stayed invisible to `find` for 45 seconds.
+    """
+    from sidecar.tools.finder import invalidate_scan
+
+    invalidate_scan()

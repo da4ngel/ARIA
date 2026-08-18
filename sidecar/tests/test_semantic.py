@@ -14,6 +14,7 @@ import pytest
 from sidecar.memory.db import Database
 from sidecar.memory.semantic import (
     MAX_CONFIDENCE,
+    SUPERSEDED_AFTER_DAYS,
     FactSource,
     MergeOutcome,
     SemanticMemory,
@@ -372,3 +373,44 @@ async def test_backfill_embeds_facts_written_while_ollama_was_down(
     with_embedder = SemanticMemory(database, StubEmbeddings())  # type: ignore[arg-type]
     assert await with_embedder.backfill_vectors() == 1
     assert conn.execute("SELECT COUNT(*) FROM fact_vec").fetchone()[0] == 1
+
+
+# ── the audit trail, eventually ───────────────────────────────────────
+
+
+async def test_superseded_facts_survive_the_ordinary_prune(memory: SemanticMemory) -> None:
+    """`prune` leaves them alone on purpose — they are what MemoryPanel shows
+    as "this replaced that", and losing them the moment a belief changes
+    would make every correction untraceable."""
+    await memory.upsert("user", "works_on", "Sillara pricing", source=FactSource.USER)
+    await memory.upsert("user", "works_on", "the ARIA sidecar", source=FactSource.USER)
+
+    removed = await memory.prune(now=datetime.now(UTC) + timedelta(days=400))
+
+    superseded = [f for f in await memory.list_facts(include_superseded=True) if f.superseded_by]
+    assert superseded, "the trail is still there"
+    assert removed == 0
+
+
+async def test_an_old_superseded_fact_is_eventually_dropped(memory: SemanticMemory) -> None:
+    """They are never retrieved and never reach a prompt, so the only cost of
+    keeping one is storage and the only value is being able to look. After
+    six months nobody looks."""
+    await memory.upsert("user", "works_on", "Sillara pricing", source=FactSource.USER)
+    await memory.upsert("user", "works_on", "the ARIA sidecar", source=FactSource.USER)
+
+    removed = await memory.prune_superseded(
+        now=datetime.now(UTC) + timedelta(days=SUPERSEDED_AFTER_DAYS + 1)
+    )
+
+    assert removed == 1
+    remaining = await memory.list_facts(include_superseded=True)
+    assert all(f.superseded_by is None for f in remaining)
+    assert any("ARIA sidecar" in f.object for f in remaining), "the live fact is untouched"
+
+
+async def test_a_recently_superseded_fact_is_kept(memory: SemanticMemory) -> None:
+    await memory.upsert("user", "works_on", "Sillara pricing", source=FactSource.USER)
+    await memory.upsert("user", "works_on", "the ARIA sidecar", source=FactSource.USER)
+
+    assert await memory.prune_superseded(now=datetime.now(UTC) + timedelta(days=30)) == 0

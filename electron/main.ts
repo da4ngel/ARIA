@@ -7,7 +7,16 @@
  */
 
 import { join } from 'node:path'
-import { app, BrowserWindow, globalShortcut, ipcMain, screen, session, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  screen,
+  session,
+  shell,
+} from 'electron'
 
 import { type BrainStatus, RpcClient, type RpcNotification } from './rpc'
 import { createOverlay, type OverlayHandle } from './overlay'
@@ -432,6 +441,18 @@ function registerIpc(): void {
   })
   ipcMain.handle('aria:set-expanded', (_event, next: boolean) => setExpanded(Boolean(next)))
   ipcMain.handle('aria:is-expanded', () => expanded)
+  // The only filesystem-shaped channel in the preload, and it deliberately
+  // returns *paths* rather than contents: the renderer never reads a file,
+  // the sidecar does. The dialog is the consent — nothing here can open
+  // anything the user did not pick in their own file browser.
+  ipcMain.handle('aria:pick-files', async () => {
+    if (!window || window.isDestroyed()) return []
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Attach files',
+      properties: ['openFile', 'multiSelections'],
+    })
+    return result.canceled ? [] : result.filePaths
+  })
 }
 
 function registerHotkey(): void {

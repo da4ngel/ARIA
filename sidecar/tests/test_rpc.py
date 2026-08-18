@@ -285,3 +285,121 @@ def test_token_comparison_rejects_empty() -> None:
     assert token_matches("abc", "abd") is False
     assert token_matches("abc", None) is False
     assert token_matches("abc", "") is False
+
+
+# ── a second sidecar must not touch the first one's state ─────────────
+
+
+def test_a_taken_port_is_detected_before_anything_starts() -> None:
+    """The incident, in one assertion. uvicorn runs the lifespan *before* it
+    binds, so a duplicate sidecar used to run all of `_startup` — new token,
+    handshake overwritten, database opened, Ollama spawned — fail to bind,
+    then run all of `_shutdown` and delete the handshake it had just made its
+    own. The running sidecar kept serving with no handshake on disk, and
+    every gate script died with `FileNotFoundError` naming the process that
+    worked.
+    """
+    import socket
+
+    from sidecar.main import _port_is_free
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+
+        assert not _port_is_free("127.0.0.1", port)
+
+    # And free again once the holder lets go, or a restart could never work.
+    assert _port_is_free("127.0.0.1", port)
+
+
+# ── the file browser panel's own RPCs (Part 3) ────────────────────────
+#
+# UI-facing, not model-facing. `list_folder` summarises for a model and caps
+# at what fits in a prompt; a panel wants everything, with sizes and dates,
+# and pays no context for it. What does *not* differ is the refusals —
+# `tools/files.py`'s hard blocks were never confirmation mechanisms, and a
+# click is not a reason to relax them.
+
+
+async def test_browse_with_no_path_offers_somewhere_to_start() -> None:
+    from sidecar.rpc.handlers import files_browse
+
+    listing = await files_browse({})
+
+    assert listing["path"] == ""
+    assert listing["entries"], "an empty first render is a dead end"
+    assert any(e["kind"] == "drive" for e in listing["entries"]), "the whole machine is reachable"
+
+
+async def test_browse_lists_a_real_folder_with_sizes_and_dates(tmp_path: Path) -> None:
+    from sidecar.rpc.handlers import files_browse
+
+    (tmp_path / "b.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+
+    listing = await files_browse({"path": str(tmp_path)})
+
+    names = [e["name"] for e in listing["entries"]]
+    # Folders first, then by name — Explorer's own order, and the one people
+    # navigate by without thinking about it.
+    assert names == ["sub", "b.txt"]
+    found = next(e for e in listing["entries"] if e["name"] == "b.txt")
+    assert found["size"] == 5
+    assert found["modified"] > 0
+    assert listing["parent"] == str(tmp_path.parent)
+
+
+async def test_browsing_something_that_is_not_a_folder_is_a_clear_error(tmp_path: Path) -> None:
+    from sidecar.rpc.handlers import files_browse
+    from sidecar.rpc.protocol import RpcMethodError
+
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(RpcMethodError):
+        await files_browse({"path": str(target)})
+
+
+async def test_rename_refuses_a_path_that_is_a_name(tmp_path: Path) -> None:
+    """"Rename it to ../../etc" is not a rename. Same guard `rename_file`
+    already carries, because it is as true of a click as of a tool call."""
+    from sidecar.rpc.handlers import files_rename
+    from sidecar.rpc.protocol import RpcMethodError
+
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(RpcMethodError):
+        await files_rename({"path": str(target), "name": "../../elsewhere.txt"})
+    assert target.exists()
+
+
+async def test_rename_works_and_will_not_overwrite(tmp_path: Path) -> None:
+    from sidecar.rpc.handlers import files_rename
+    from sidecar.rpc.protocol import RpcMethodError
+
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    (tmp_path / "taken.txt").write_text("y", encoding="utf-8")
+
+    result = await files_rename({"path": str(target), "name": "b.txt"})
+    assert (tmp_path / "b.txt").exists()
+    assert result["path"] == str(tmp_path / "b.txt")
+
+    with pytest.raises(RpcMethodError):
+        await files_rename({"path": str(tmp_path / "b.txt"), "name": "taken.txt"})
+
+
+async def test_the_panel_cannot_touch_a_system_folder() -> None:
+    """The refusals in `tools/files.py` are reused rather than reimplemented.
+    Trust and mode decide whether she *asks*; these decide what is allowed at
+    all, and a panel does not get its own answer to that."""
+    from sidecar.rpc.handlers import files_delete, files_rename
+    from sidecar.rpc.protocol import RpcMethodError
+
+    with pytest.raises(RpcMethodError):
+        await files_rename({"path": "C:/Windows", "name": "Windows2"})
+    with pytest.raises(RpcMethodError):
+        await files_delete({"path": "C:/Windows"})

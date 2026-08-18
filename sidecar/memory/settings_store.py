@@ -34,6 +34,11 @@ TRUSTED_PATHS = "trusted_paths"
 # "auto" (today's behavior) when unset, same as `TRUSTED_PATHS` defaults to
 # empty rather than needing a migration.
 PERMISSION_MODE = "permission_mode"
+# Folders she keeps half an eye on, as a JSON array of absolute paths.
+# **Empty until named**, which is what keeps §9's "file event on a watched
+# project" trigger from being noise: a build directory churns constantly, a
+# folder somebody deliberately pointed at does not.
+WATCHED_PROJECTS = "watched_projects"
 # What the cloud providers last said they offer, as a list of serialised
 # `ModelInfo`. Cached so the picker fills in at startup without a network
 # round-trip, and so it still lists something when the machine is offline.

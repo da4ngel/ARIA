@@ -186,6 +186,9 @@ export interface AriaApi {
   setExpanded: (expanded: boolean) => Promise<boolean>
   isExpanded: () => Promise<boolean>
   onWindowMode: (handler: (expanded: boolean) => void) => Unsubscribe
+  /** Absolute paths the user chose in the OS picker. Paths only — the
+   *  renderer never reads a file; the sidecar opens them. */
+  pickFiles: () => Promise<string[]>
 }
 
 declare global {

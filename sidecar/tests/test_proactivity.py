@@ -9,12 +9,15 @@ sends runs in milliseconds.
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
+from sidecar.persona import proactivity
 from sidecar.persona.proactivity import (
     Candidate,
     ProactivityScheduler,
@@ -403,3 +406,154 @@ async def test_default_candidates_is_empty_when_nothing_fires(database: Database
     store = ConversationStore(database)
 
     assert await default_candidates(database, store) == []
+
+
+# ── the two triggers §9 named and nobody had built ────────────────────
+#
+# BUILD_SPEC §9 Phase 8 lists five: calendar, idle-after-intention, file
+# event on a watched project, scheduled check-in, repeated failure. Three
+# were built, the calendar one was deferred by agreement, and these two were
+# simply absent — and had never been recorded as gaps either.
+#
+# Both are unprompted by anything the user did, which makes them the two
+# most capable of being noise. §9's own line is the standard they have to
+# meet: *"over-triggering is the fastest path to uninstall."*
+
+
+class FakeStore:
+    def __init__(self, latest: str | None) -> None:
+        self._latest = latest
+
+    async def latest_message_at(self) -> str | None:
+        return self._latest
+
+
+def _stamp(when: datetime) -> str:
+    return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def test_a_check_in_waits_for_a_real_silence() -> None:
+    now = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+    store = FakeStore(_stamp(now - timedelta(hours=2)))
+
+    assert await proactivity.scheduled_check_in_candidate(cast("Any", store), now=now) is None
+
+
+async def test_a_check_in_fires_after_a_long_quiet() -> None:
+    now = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+    store = FakeStore(_stamp(now - timedelta(days=3)))
+
+    candidate = await proactivity.scheduled_check_in_candidate(cast("Any", store), now=now)
+
+    assert candidate is not None
+    assert candidate.trigger == "scheduled_check_in"
+    assert "3 days" in candidate.text
+    # It has to be declinable by ignoring it. A check-in that demands an
+    # answer is a chore, and a chore arriving unprompted is uninstalled.
+    assert "no need to reply" in candidate.text
+
+
+async def test_a_check_in_never_arrives_in_the_middle_of_the_night() -> None:
+    """A check-in at 3am is not a check-in, it is being woken up — and
+    `affect` already reads late-night activity as something to be gentle
+    about rather than to interrupt."""
+    for hour in (3, 23):
+        now = datetime(2026, 8, 18, hour, 0, tzinfo=UTC).astimezone()
+        store = FakeStore(_stamp(now - timedelta(days=3)))
+        if now.hour in proactivity.CHECK_IN_HOURS:
+            continue  # the local clock landed inside the window; not this case
+        assert await proactivity.scheduled_check_in_candidate(cast("Any", store), now=now) is None
+
+
+async def test_a_brand_new_install_is_not_greeted_unprompted() -> None:
+    """Nothing has ever been said, so there is no silence to notice. Being
+    messaged first, before you have said anything at all, is a strange first
+    experience rather than a warm one."""
+    now = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+
+    empty = cast("Any", FakeStore(None))
+    assert await proactivity.scheduled_check_in_candidate(empty, now=now) is None
+
+
+class FakeSettings:
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    async def get(self, key: str, default: object = None) -> object:
+        return self._value
+
+
+async def test_no_watched_project_means_the_trigger_cannot_fire() -> None:
+    """Empty by default is what keeps this one honest — on a machine that
+    never opted in it is dead code by configuration, not by luck."""
+    now = datetime.now(UTC)
+
+    assert await proactivity.watched_project_candidate(None, now=now) is None
+    assert await proactivity.watched_project_candidate(FakeSettings([]), now=now) is None
+
+
+async def test_a_single_save_is_not_a_working_session(tmp_path: Path) -> None:
+    """"I see you are working on X" after one keystroke is precisely the
+    noise §9 warns about."""
+    (tmp_path / "one.py").write_text("x", encoding="utf-8")
+    now = datetime.now(UTC)
+
+    candidate = await proactivity.watched_project_candidate(
+        FakeSettings([str(tmp_path)]), now=now
+    )
+
+    assert candidate is None
+
+
+async def test_a_burst_of_changes_in_a_watched_folder_is_noticed(tmp_path: Path) -> None:
+    for name in ("a.py", "b.py", "c.py", "d.py"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    now = datetime.now(UTC)
+
+    candidate = await proactivity.watched_project_candidate(
+        FakeSettings([str(tmp_path)]), now=now
+    )
+
+    assert candidate is not None
+    assert candidate.trigger == "watched_project"
+    assert tmp_path.name in candidate.text
+
+
+async def test_old_changes_do_not_count_as_a_file_event(tmp_path: Path) -> None:
+    """The window is what makes this "right now" rather than "at some point".
+    Without it, a folder touched last week would trigger on every tick
+    forever."""
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    later = datetime.now(UTC) + timedelta(days=2)
+
+    candidate = await proactivity.watched_project_candidate(
+        FakeSettings([str(tmp_path)]), now=later
+    )
+
+    assert candidate is None
+
+
+async def test_a_missing_watched_folder_is_not_an_error(tmp_path: Path) -> None:
+    """Someone renames or deletes a project. That must cost this trigger,
+    not the tick — `tick()` never raising is the whole contract."""
+    candidate = await proactivity.watched_project_candidate(
+        FakeSettings([str(tmp_path / "gone")]), now=datetime.now(UTC)
+    )
+
+    assert candidate is None
+
+
+async def test_build_output_is_skipped(tmp_path: Path) -> None:
+    """It reuses the finder's own skip list rather than inventing a second
+    one. A `node_modules` write burst is a build, not you working."""
+    noisy = tmp_path / "node_modules"
+    noisy.mkdir()
+    for name in ("a.js", "b.js", "c.js", "d.js"):
+        (noisy / name).write_text("x", encoding="utf-8")
+
+    candidate = await proactivity.watched_project_candidate(
+        FakeSettings([str(tmp_path)]), now=datetime.now(UTC)
+    )
+
+    assert candidate is None

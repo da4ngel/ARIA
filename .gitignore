@@ -1,6 +1,10 @@
 # Runtime data — never committed (BUILD_SPEC §5)
 data/
 
+# Packaging output (Phase 9). The spec is source; a 464MB bundle is not.
+packaging/dist/
+packaging/build/
+
 # Node
 node_modules/
 out/

@@ -301,6 +301,10 @@ class Reflector:
 
         await self._merge(output, report)
         report.pruned = await self._semantic.prune()
+        # The audit trail, once it is old enough to be history. Same pass
+        # rather than its own job: both are housekeeping nobody is waiting
+        # on, and reflection already runs at most once a day.
+        report.pruned += await self._semantic.prune_superseded()
         await self._stamp(high_water)
 
         if output.episodes:

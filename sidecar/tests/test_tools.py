@@ -1255,3 +1255,43 @@ def test_no_registered_tool_documents_an_argument_it_then_truncates() -> None:
         for arg, spec in tool_.parameters.get("properties", {}).items():
             description = spec.get("description", "")
             assert description.count('"') % 2 == 0, f"{tool_.name}.{arg} cut mid-quote"
+
+
+async def test_read_file_parses_a_document_rather_than_returning_mojibake(
+    tmp_path: Path,
+) -> None:
+    """`read_file` did a plain UTF-8 read of whatever it was given, so "what
+    does this invoice say" about a PDF answered with binary noise that the
+    model then tried to interpret. The parsers have existed in
+    `memory/indexer.py` since Phase 4; this tool just never used them."""
+    import sidecar.tools.files as files_module
+
+    target = tmp_path / "invoice.pdf"
+    target.write_bytes(b"%PDF-1.4 not really a pdf")
+    monkey = "Invoice total: 43.20"
+
+    import sidecar.memory.indexer as indexer_module
+
+    original = indexer_module.extract_text
+    indexer_module.extract_text = lambda path: monkey
+    try:
+        result = await files_module.read_file(CTX, str(target))
+    finally:
+        indexer_module.extract_text = original
+
+    assert result.ok
+    assert "43.20" in result.summary
+
+
+async def test_read_file_says_so_when_a_document_yields_nothing(tmp_path: Path) -> None:
+    """A scanned PDF with no text layer is a normal thing to be handed. Saying
+    so beats answering confidently about a document nobody could read."""
+    import sidecar.tools.files as files_module
+
+    target = tmp_path / "scan.pdf"
+    target.write_bytes(b"%PDF-1.4 no text layer")
+
+    result = await files_module.read_file(CTX, str(target))
+
+    assert not result.ok
+    assert result.error == "unreadable"

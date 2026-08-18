@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Orb } from '@/components/Orb'
 import type { AssistantState } from '@/types/bridge'
 
-export type Section = 'history' | 'voice' | 'tools' | 'memory' | 'settings'
+export type Section = 'history' | 'voice' | 'files' | 'tools' | 'memory' | 'settings'
 
 const COLLAPSE_KEY = 'aria.sidebar.collapsed'
 
@@ -155,6 +155,14 @@ export function Sidebar({
         disabled={!connected}
         marker={listening}
         onClick={() => onSelect('voice')}
+      />
+      <Item
+        icon={<IconFolder />}
+        label="Files"
+        collapsed={collapsed}
+        active={active === 'files'}
+        disabled={!connected}
+        onClick={() => onSelect('files')}
       />
       <Item
         icon={<IconTool />}
@@ -310,6 +318,23 @@ function IconWave(): JSX.Element {
   return (
     <svg {...stroke} aria-hidden>
       <path d="M2 7h1.2M4.6 4.4v5.2M7 2.4v9.2M9.4 4.9v4.2M11.8 6.3v1.4" />
+    </svg>
+  )
+}
+
+function IconFolder(): JSX.Element {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M1.6 3.4h3.5l1.1 1.4h6.2v6.2a.6.6 0 0 1-.6.6H2.2a.6.6 0 0 1-.6-.6z" />
     </svg>
   )
 }

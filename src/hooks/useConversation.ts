@@ -70,7 +70,7 @@ interface TurnCompletePayload {
 export interface UseConversation {
   turns: Turn[]
   busy: boolean
-  send: (text: string, options?: { spoken?: boolean }) => Promise<void>
+  send: (text: string, options?: { spoken?: boolean; attachments?: string[] }) => Promise<void>
   cancel: () => Promise<void>
   /** Clear the view and start a new session in the sidecar. */
   newChat: () => Promise<void>
@@ -145,7 +145,10 @@ export function useConversation(connected: boolean): UseConversation {
   useEffect(() => {
     return window.aria.onEvent((event: SidecarEvent) => {
       if (event.method === 'token') {
-        const { turn_id: turnId, text } = event.params as { turn_id: string; text: string }
+        const { turn_id: turnId, text } = event.params as {
+          turn_id: string
+          text: string
+        }
         if (turnId !== activeTurnId.current) return
         setTurns((prev) => appendToStreaming(prev, text))
         return
@@ -154,7 +157,13 @@ export function useConversation(connected: boolean): UseConversation {
       // She is doing something. Attached to the streaming turn so the card
       // sits with the answer it belongs to rather than floating at the end.
       if (event.method === 'tool.call') {
-        const { turn_id: turnId, call_id: callId, tool, args, step } = event.params as {
+        const {
+          turn_id: turnId,
+          call_id: callId,
+          tool,
+          args,
+          step,
+        } = event.params as {
           turn_id: string
           call_id: string
           tool: string
@@ -167,7 +176,14 @@ export function useConversation(connected: boolean): UseConversation {
             ...turn,
             toolCalls: [
               ...(turn.toolCalls ?? []),
-              { id: callId, tool, args, state: 'running', startedAt: Date.now(), step },
+              {
+                id: callId,
+                tool,
+                args,
+                state: 'running',
+                startedAt: Date.now(),
+                step,
+              },
             ],
           })),
         )
@@ -175,7 +191,13 @@ export function useConversation(connected: boolean): UseConversation {
       }
 
       if (event.method === 'tool.result') {
-        const { turn_id: turnId, call_id: callId, ok, summary, display } = event.params as {
+        const {
+          turn_id: turnId,
+          call_id: callId,
+          ok,
+          summary,
+          display,
+        } = event.params as {
           turn_id: string
           call_id: string
           ok: boolean
@@ -246,38 +268,61 @@ export function useConversation(connected: boolean): UseConversation {
     })
   }, [])
 
-  const send = useCallback(async (text: string, options?: { spoken?: boolean }) => {
-    const trimmed = text.trim()
-    if (!trimmed) return
+  const send = useCallback(
+    async (text: string, options?: { spoken?: boolean; attachments?: string[] }) => {
+      const trimmed = text.trim()
+      const attachments = options?.attachments ?? []
+      // A message can be nothing but files — the sidecar allows that too.
+      // Dragging a PDF in and pressing Enter is a complete request.
+      if (!trimmed && attachments.length === 0) return
 
-    setBusy(true)
-    setTurns((prev) => [
-      ...prev,
-      { id: `u${Date.now()}`, role: 'user', content: trimmed },
-      { id: `a${Date.now()}`, role: 'assistant', content: '', streaming: true },
-    ])
+      // Shown with the file names in it, so the transcript reads sensibly.
+      // A bare "summarise this" with no record of what "this" was looks like
+      // a bug in the history rather than a message.
+      const names = attachments.map((p) => p.split(/[\\/]/).pop()).filter(Boolean)
+      const shown =
+        names.length > 0
+          ? [trimmed, `[attached: ${names.join(', ')}]`].filter(Boolean).join('\n\n')
+          : trimmed
 
-    try {
-      const started = await window.aria.call<{ turn_id: string; session_id: string }>(
-        'chat.send',
+      setBusy(true)
+      setTurns((prev) => [
+        ...prev,
+        { id: `u${Date.now()}`, role: 'user', content: shown },
         {
+          id: `a${Date.now()}`,
+          role: 'assistant',
+          content: '',
+          streaming: true,
+        },
+      ])
+
+      try {
+        const started = await window.aria.call<{
+          turn_id: string
+          session_id: string
+        }>('chat.send', {
           text: trimmed,
           session_id: sessionId.current ?? undefined,
           // Marks a turn that arrived by voice, so the sidecar answers it
           // locally and fast rather than following the Smart bias.
           spoken: options?.spoken ?? false,
-        },
-      )
-      activeTurnId.current = started.turn_id
-      sessionId.current = started.session_id
-      setActiveSession(started.session_id)
-    } catch (cause) {
-      activeTurnId.current = null
-      setBusy(false)
-      const message = cause instanceof Error ? cause.message : String(cause)
-      setTurns((prev) => finalise(prev, { turn_id: '', full_text: '', error: message }))
-    }
-  }, [])
+          // Absolute paths, never contents: the renderer has no filesystem
+          // access, and the sidecar is what opens them.
+          ...(attachments.length > 0 ? { attachments } : {}),
+        })
+        activeTurnId.current = started.turn_id
+        sessionId.current = started.session_id
+        setActiveSession(started.session_id)
+      } catch (cause) {
+        activeTurnId.current = null
+        setBusy(false)
+        const message = cause instanceof Error ? cause.message : String(cause)
+        setTurns((prev) => finalise(prev, { turn_id: '', full_text: '', error: message }))
+      }
+    },
+    [],
+  )
 
   const cancel = useCallback(async () => {
     const turnId = activeTurnId.current
@@ -332,7 +377,10 @@ export function useConversation(connected: boolean): UseConversation {
       }),
     )
     try {
-      await window.aria.call('turn.rate', { message_id: messageId, rating: next ?? 0 })
+      await window.aria.call('turn.rate', {
+        message_id: messageId,
+        rating: next ?? 0,
+      })
     } catch {
       /* The label is a nicety; failing to store one must not disturb the view. */
     }
@@ -356,10 +404,9 @@ async function loadRatings(
   setTurns: React.Dispatch<React.SetStateAction<Turn[]>>,
 ): Promise<void> {
   try {
-    const result = await window.aria.call<{ ratings: Record<string, number> }>(
-      'turn.ratings',
-      { session_id: id },
-    )
+    const result = await window.aria.call<{ ratings: Record<string, number> }>('turn.ratings', {
+      session_id: id,
+    })
     setTurns((prev) => withRatings(prev, result.ratings))
   } catch {
     /* Ratings are additive. Missing them must not empty the transcript. */
@@ -378,7 +425,10 @@ function withStreaming(turns: Turn[], change: (turn: Turn) => Turn): Turn[] {
 }
 
 function appendToStreaming(turns: Turn[], text: string): Turn[] {
-  return withStreaming(turns, (turn) => ({ ...turn, content: turn.content + text }))
+  return withStreaming(turns, (turn) => ({
+    ...turn,
+    content: turn.content + text,
+  }))
 }
 
 function clearStreaming(turns: Turn[]): Turn[] {

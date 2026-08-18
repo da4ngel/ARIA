@@ -34,8 +34,12 @@ def resolve_token(supplied: str) -> str:
 def write_handshake(path: Path, token: str) -> None:
     """Publish the token for a client that did not supply one.
 
-    Written after the server is listening, so a client that sees the file can
-    assume the port is live. Never logged.
+    **Not written after the server is listening**, whatever this docstring
+    used to claim — uvicorn runs the lifespan before it binds, and that false
+    premise is what let a duplicate sidecar overwrite a running one's token
+    and then delete it as its own. `main._port_is_free` now claims the port
+    before any of this runs, so by the time a token is published the port is
+    genuinely ours. Never logged.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token, encoding="utf-8")

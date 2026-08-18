@@ -110,9 +110,9 @@
     "semantic_hash": "1d91701197f7fb996c72f6254d916a9a"
   },
   "sidecar/config.py": {
-    "mtime": 1786648545.0428364,
-    "ast_hash": "aca727c8ee317c4b0c6c120bf952f31f",
-    "semantic_hash": "aca727c8ee317c4b0c6c120bf952f31f"
+    "mtime": 1787030883.4959562,
+    "ast_hash": "41be44db712e81185f4b27a612be9ea4",
+    "semantic_hash": ""
   },
   "sidecar/core/__init__.py": {
     "mtime": 1785988044.418364,
@@ -150,9 +150,9 @@
     "semantic_hash": "0194f490d889cbb2947fb7c50def8796"
   },
   "sidecar/main.py": {
-    "mtime": 1786705623.5137093,
-    "ast_hash": "a140973265c06fc2a9831fda83acdb27",
-    "semantic_hash": "a140973265c06fc2a9831fda83acdb27"
+    "mtime": 1787036066.305525,
+    "ast_hash": "fec12a15ebd9283877d120be2e8d7580",
+    "semantic_hash": ""
   },
   "sidecar/memory/__init__.py": {
     "mtime": 1785980611.130227,
@@ -250,9 +250,9 @@
     "semantic_hash": "96aaaf9cc03cc3caa19773d3092cbffc"
   },
   "sidecar/providers/ollama.py": {
-    "mtime": 1786064104.2335033,
-    "ast_hash": "1225f00ec64c443b5f0151b755df9086",
-    "semantic_hash": "1225f00ec64c443b5f0151b755df9086"
+    "mtime": 1787031055.3526978,
+    "ast_hash": "def3e49c0bda1b0a5790f772b7dd6bd3",
+    "semantic_hash": ""
   },
   "sidecar/providers/openai.py": {
     "mtime": 1786606745.9435382,
@@ -300,9 +300,9 @@
     "semantic_hash": "06786cd3131a829aa01cbb5963643910"
   },
   "sidecar/state.py": {
-    "mtime": 1786648612.303025,
-    "ast_hash": "273cacae36b90842fa4126a056c895fa",
-    "semantic_hash": "273cacae36b90842fa4126a056c895fa"
+    "mtime": 1787030902.0476122,
+    "ast_hash": "04be6034fd1da6bd12d123274ee57ae6",
+    "semantic_hash": ""
   },
   "sidecar/tests/__init__.py": {
     "mtime": 1785980611.1845686,
@@ -385,9 +385,9 @@
     "semantic_hash": "0a900c6a9e0624f3ad21d3965c10e1b5"
   },
   "sidecar/tests/test_tools.py": {
-    "mtime": 1786703194.2932801,
-    "ast_hash": "7de67d6363272cd7c715ee35bf09b551",
-    "semantic_hash": "7de67d6363272cd7c715ee35bf09b551"
+    "mtime": 1787030531.1250465,
+    "ast_hash": "d63fa5c626d0c8b6201e8d0ce95e7f27",
+    "semantic_hash": ""
   },
   "sidecar/tests/test_tts.py": {
     "mtime": 1786649561.0843117,
@@ -400,9 +400,9 @@
     "semantic_hash": "cad1881895c221c87d5075df23e660d1"
   },
   "sidecar/tools/apps.py": {
-    "mtime": 1786703115.3068075,
-    "ast_hash": "705438b61a6f6b7f0cb44329d816216b",
-    "semantic_hash": "705438b61a6f6b7f0cb44329d816216b"
+    "mtime": 1787030608.9021955,
+    "ast_hash": "6358db5aabc22de14f778dc4d9db4c20",
+    "semantic_hash": ""
   },
   "sidecar/tools/files.py": {
     "mtime": 1787011655.6809888,
@@ -430,9 +430,9 @@
     "semantic_hash": "d2df210b82e86372b182b31200860fd0"
   },
   "src/App.tsx": {
-    "mtime": 1786555240.6317315,
-    "ast_hash": "accd60d4903cd5ddc2c84a7297b3c571",
-    "semantic_hash": "accd60d4903cd5ddc2c84a7297b3c571"
+    "mtime": 1787031186.0712495,
+    "ast_hash": "f652846ef2d8a3eff0f139f7bf7a9d2e",
+    "semantic_hash": ""
   },
   "src/components/ComposerBar.tsx": {
     "mtime": 1786040751.969128,
@@ -440,14 +440,14 @@
     "semantic_hash": "d2ea9c850afca2aa5a8c785fbbf4d20a"
   },
   "src/components/ConfirmDialog.test.tsx": {
-    "mtime": 1786701348.9904375,
-    "ast_hash": "4a81f32e316d155921f996f1a9f42f5b",
-    "semantic_hash": "4a81f32e316d155921f996f1a9f42f5b"
+    "mtime": 1787030713.1541338,
+    "ast_hash": "014be6da43a1d19e6118372ebccc39d5",
+    "semantic_hash": ""
   },
   "src/components/ConfirmDialog.tsx": {
-    "mtime": 1786701337.3330395,
-    "ast_hash": "f7f6d37ea05bc0a89307bf37bb40140d",
-    "semantic_hash": "f7f6d37ea05bc0a89307bf37bb40140d"
+    "mtime": 1787030637.590257,
+    "ast_hash": "8bf8dea5aae43b5a10ed179469a31a93",
+    "semantic_hash": ""
   },
   "src/components/ConnectionStatus.test.tsx": {
     "mtime": 1785981365.6504996,
@@ -520,9 +520,9 @@
     "semantic_hash": "6d03024fd1d8ad369514439c418cc436"
   },
   "src/components/SettingsPanel.tsx": {
-    "mtime": 1786620050.919111,
-    "ast_hash": "8f61f214ab6be708ab882d428f6d1e37",
-    "semantic_hash": "8f61f214ab6be708ab882d428f6d1e37"
+    "mtime": 1787031211.1065614,
+    "ast_hash": "8b900ba2ea6e01f4999a482602960d68",
+    "semantic_hash": ""
   },
   "src/components/Shortcuts.tsx": {
     "mtime": 1786211197.3053493,
@@ -660,8 +660,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1787016558.4657483,
-    "ast_hash": "16e262424ab3fda36eb2b78347c1f456",
+    "mtime": 1787036387.4603674,
+    "ast_hash": "40ea6e949f029ab23f3c755de7f6707a",
     "semantic_hash": ""
   },
   "README.md": {
@@ -735,9 +735,9 @@
     "semantic_hash": "6a5cc7c5e09caf006b47371e4859926f"
   },
   "src/components/ToolsPanel.tsx": {
-    "mtime": 1786705993.6529405,
-    "ast_hash": "cf3a325d1367395114717764dcf5424a",
-    "semantic_hash": "cf3a325d1367395114717764dcf5424a"
+    "mtime": 1787031163.7231615,
+    "ast_hash": "b994167096480e71d680edd27a28340c",
+    "semantic_hash": ""
   },
   "src/components/VoicePanel.tsx": {
     "mtime": 1786210965.5549843,
@@ -755,9 +755,9 @@
     "semantic_hash": ""
   },
   "sidecar/tools/clipboard.py": {
-    "mtime": 1786292427.2862456,
-    "ast_hash": "0eeea42688a04f6368f4a427f3ac2d18",
-    "semantic_hash": "0eeea42688a04f6368f4a427f3ac2d18"
+    "mtime": 1787030135.83941,
+    "ast_hash": "7dbd44d8bfe7ff0773f097974430aa42",
+    "semantic_hash": ""
   },
   "src/components/ToolCallCard.tsx": {
     "mtime": 1786607066.1498446,
@@ -1015,9 +1015,9 @@
     "semantic_hash": ""
   },
   "src/components/ToolsPanel.test.tsx": {
-    "mtime": 1786706116.0115004,
-    "ast_hash": "a8c3332a03d8f0df3ce50dd9b3666ca4",
-    "semantic_hash": "a8c3332a03d8f0df3ce50dd9b3666ca4"
+    "mtime": 1787031272.2303662,
+    "ast_hash": "1f93070388abdb3c105eb30ac1687815",
+    "semantic_hash": ""
   },
   "AGENTS.md": {
     "mtime": 1786702213.3048637,
@@ -1038,5 +1038,35 @@
     "mtime": 1786703718.424594,
     "ast_hash": "3ed622ceeb1efd988b51729aadae65cc",
     "semantic_hash": "3ed622ceeb1efd988b51729aadae65cc"
+  },
+  "sidecar/providers/ollama_supervisor.py": {
+    "mtime": 1787036093.071222,
+    "ast_hash": "d51a60ab2e9df8d1d94c92637994cf09",
+    "semantic_hash": ""
+  },
+  "sidecar/tests/test_ollama_supervisor.py": {
+    "mtime": 1787036112.6698234,
+    "ast_hash": "c6d951af20f8427e349a93e7eed3dad4",
+    "semantic_hash": ""
+  },
+  "src/components/PermissionModeChip.test.tsx": {
+    "mtime": 1787031300.1068356,
+    "ast_hash": "b082f981a8c1a19471036f04ae6a7916",
+    "semantic_hash": ""
+  },
+  "src/components/PermissionModeChip.tsx": {
+    "mtime": 1787031143.0156627,
+    "ast_hash": "34f9a18b533b7e29134555064bcedfa4",
+    "semantic_hash": ""
+  },
+  "src/hooks/usePermissionMode.test.ts": {
+    "mtime": 1787031288.502738,
+    "ast_hash": "283d429fd4ddecb217c79f83534345e0",
+    "semantic_hash": ""
+  },
+  "src/hooks/usePermissionMode.ts": {
+    "mtime": 1787031127.1722577,
+    "ast_hash": "4725ec66a28275544828cfe249a3fabd",
+    "semantic_hash": ""
   }
 }

@@ -26,6 +26,7 @@ import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
 import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
 import { MemoryPanel } from '@/components/MemoryPanel'
+import { FilesPanel } from '@/components/FilesPanel'
 import { PermissionModeChip } from '@/components/PermissionModeChip'
 import { ToolsPanel } from '@/components/ToolsPanel'
 import { VoicePanel } from '@/components/VoicePanel'
@@ -59,6 +60,10 @@ export default function App(): JSX.Element {
   // value. Three independent fetches could disagree, and a selector that
   // disagrees with what is actually enforced is worse than none.
   const permissions = usePermissionMode(connected)
+  // Handed from the Files panel to the composer. A one-shot value rather
+  // than shared state: the composer owns its own attachment list, and two
+  // places holding that would eventually disagree.
+  const [pendingAttachment, setPendingAttachment] = useState<string | null>(null)
   // The sidecar's agent loop is suspended while one of these is open.
   const confirm = useConfirm()
   const audio = useAudio()
@@ -79,11 +84,7 @@ export default function App(): JSX.Element {
   const started = turns.length > 0
   // Real playback beats the sidecar's own state here: `speaking` should mean
   // sound is coming out, not that a turn finished and audio may be queued.
-  const orbState = voice.listening
-    ? 'listening'
-    : audio.speaking
-      ? 'speaking'
-      : assistantState
+  const orbState = voice.listening ? 'listening' : audio.speaking ? 'speaking' : assistantState
   // Only meaningful while the microphone is actually open; push-to-talk
   // does not sample levels, so it contributes nothing here.
   const orbLevel = handsFree.active ? handsFree.level : 0
@@ -280,10 +281,18 @@ export default function App(): JSX.Element {
           )}
 
           <div className="px-3 pb-3" style={noDrag}>
-            <ComposerBar busy={busy} disabled={!connected} voice={voice} onSend={send} onCancel={() => {
-              audio.stop()
-              void cancel()
-            }} />
+            <ComposerBar
+              busy={busy}
+              disabled={!connected}
+              voice={voice}
+              onSend={(text, attachments) => void send(text, { attachments })}
+              attachPath={pendingAttachment}
+              onAttachConsumed={() => setPendingAttachment(null)}
+              onCancel={() => {
+                audio.stop()
+                void cancel()
+              }}
+            />
             <footer className="mt-1.5 flex items-center justify-between px-0.5 text-micro text-aria-faint">
               <button
                 type="button"
@@ -321,6 +330,20 @@ export default function App(): JSX.Element {
             )}
             {overlay === 'voice' && (
               <VoicePanel key="voice" handsFree={handsFree} onClose={() => setOverlay(null)} />
+            )}
+            {overlay === 'files' && (
+              <FilesPanel
+                key="files"
+                onClose={() => setOverlay(null)}
+                onAttach={(path) => {
+                  // Close on pick. The panel is where you find a file; the
+                  // conversation is where you ask about it, and leaving the
+                  // sheet up over the composer you are about to type in
+                  // helps nobody.
+                  setOverlay(null)
+                  setPendingAttachment(path)
+                }}
+              />
             )}
             {overlay === 'tools' && (
               <ToolsPanel

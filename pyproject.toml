@@ -61,6 +61,7 @@ module = [
     "win32process",
     "win32clipboard",
     "win32api",
+    "win32com.shell",
     "openpyxl",
     "docx",
     "pypdf",

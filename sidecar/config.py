@@ -6,6 +6,8 @@ or by a ``.env`` file in the repo root. See ``.env.example``.
 
 from __future__ import annotations
 
+import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -15,6 +17,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # sidecar/config.py -> sidecar/ -> repo root
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _default_data_dir() -> Path:
+    """Where her database, models and logs live.
+
+    **Beside the repo in development, in `%LOCALAPPDATA%` once packaged.**
+    Found by building the PyInstaller bundle and running it: `REPO_ROOT`
+    resolves inside the bundle when frozen, so everything landed in
+    `dist/aria-sidecar/_internal/data`. On a real install that is Program
+    Files — read-only for a normal user, and wiped by the next upgrade, which
+    would take the conversation history and every learned fact with it.
+
+    `sys.frozen` is what PyInstaller sets; nothing else in this codebase
+    needs to know whether it is packaged, so the check lives here alone.
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "ARIA" / "data"
+    return REPO_ROOT / "data"
 
 
 class Settings(BaseSettings):
@@ -32,7 +53,7 @@ class Settings(BaseSettings):
     dev: bool = False
     log_level: str = "INFO"
 
-    data_dir: Path = REPO_ROOT / "data"
+    data_dir: Path = Field(default_factory=_default_data_dir)
 
     # ── Local model (Phase 1) ────────────────────────────────────────
     # Interim per CLAUDE.md; switches to qwen2.5:7b-instruct-q4_K_M once pulled.

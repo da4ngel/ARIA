@@ -561,7 +561,10 @@ def _start_proactivity_scheduler(
     store = ConversationStore(db)
 
     async def find_candidates() -> list[proactivity_module.Candidate]:
-        return await proactivity_module.default_candidates(db, store)
+        # `runtime.settings` rather than a captured one: the watched-project
+        # list is editable while she runs, and a trigger reading a snapshot
+        # taken at startup would ignore a folder added five minutes ago.
+        return await proactivity_module.default_candidates(db, store, runtime.settings)
 
     async def self_check(candidate: proactivity_module.Candidate) -> bool:
         return await proactivity_module.default_self_check(local_provider, local_model, candidate)
@@ -724,6 +727,31 @@ async def _serve(websocket: WebSocket) -> None:
             await websocket.send_text(response.model_dump_json(exclude_none=True))
 
 
+def _port_is_free(host: str, port: int) -> bool:
+    """Whether we can actually have the port, checked before anything else.
+
+    **A second sidecar used to half-start before finding out.** uvicorn runs
+    the lifespan *before* it binds, so a duplicate ran the whole of
+    `_startup` — new auth token, handshake overwritten, database opened,
+    Ollama spawned — then failed to bind, then ran the whole of `_shutdown`.
+    `clear_handshake` correctly refused to delete a handshake belonging to
+    another process, but by then the duplicate had already overwritten it
+    with its own token, so the token matched and the file went anyway. The
+    running sidecar kept serving with no handshake on disk, and every gate
+    script died with `FileNotFoundError` pointing at the process that worked.
+
+    Claiming the port first turns that into one clear line and an exit.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
 def main() -> None:
     """Console entrypoint for ``python -m sidecar.main``."""
     settings = get_settings()
@@ -731,6 +759,19 @@ def main() -> None:
     # configure_logging is idempotent; lifespan calls it again after ensure_dirs.
     settings.ensure_dirs()
     configure_logging(settings.log_path, dev=settings.dev, level=settings.log_level)
+
+    if not _port_is_free(settings.host, settings.port):
+        log.error(
+            "sidecar.port_taken",
+            port=settings.port,
+            fix=(
+                "Another sidecar is already running and still serving. Use that "
+                "one, or stop it first — starting a second changes nothing and "
+                "used to break the first."
+            ),
+        )
+        raise SystemExit(1)
+
     uvicorn.run(
         app,
         host=settings.host,

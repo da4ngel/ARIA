@@ -1,16 +1,16 @@
 # Graph Report - ARIA  (2026-08-18)
 
 ## Corpus Check
-- 209 files · ~279,866 words
+- 213 files · ~291,353 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 4292 nodes · 9798 edges · 234 communities (180 shown, 54 thin omitted)
-- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 899 edges (avg confidence: 0.52)
+- 4421 nodes · 10093 edges · 241 communities (177 shown, 64 thin omitted)
+- Extraction: 91% EXTRACTED · 9% INFERRED · 0% AMBIGUOUS · INFERRED: 915 edges (avg confidence: 0.52)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `8e4993c4`
+- Built from commit: `78c1ab61`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -18,36 +18,36 @@
 - RecordingBus
 - test_listener.py
 - main.ts
-- test_catalog.py
+- catalog.py
 - test_rpc.py
 - ConversationService
-- OllamaEmbeddings
+- read_one
 - test_tts.py
 - Database
 - test_scheduler.py
 - test_proactivity.py
 - discovery.py
-- state.py
-- Runtime
+- KokoroTTS
+- AvailabilityService
 - finder.py
 - test_tools.py
 - Indexer
-- SileroVAD
-- WakeMode
+- gate_wakeword.py
+- Event
 - ConversationStore
-- Reflector
+- ModelInfo
 - HealthTracker
 - SemanticMemory
 - test_screen.py
 - Settings
 - test_ollama_supervisor.py
 - test_router.py
-- test_episodic.py
-- method
-- EpisodicMemory
-- test_routing_log.py
+- eval_quality.py
+- handlers.py
+- OpenAIProvider
+- state.py
 - test_organize.py
-- RouteDecision
+- Router
 - Fact
 - test_retrieval.py
 - Tier
@@ -60,30 +60,30 @@
 - test_reflection.py
 - ARIA — Project Instructions
 - ToolContext
-- Role
+- measure_models.py
 - apps.py
-- _escalate_current_page
+- Reflector
 - conversation.py
 - Retriever
 - probes.py
 - test_text.py
 - ChatMessage
-- Router
+- parametrize
 - compilerOptions
-- _startup
+- memory.py
 - Connectivity
 - test_permissions.py
-- browser.py
+- MachineContext
 - Tool contract — decorator, ToolResult, derived schemas
 - ARIA Sidecar Runtime Dependencies (requirements.txt)
 - rpc
 - compilerOptions
 - EventBus
-- parametrize
+- overhead_tokens
 - test_browser.py
 - Path
 - test_vectors.py
-- FakeLocator
+- WakeWord
 - RecordingJournal
 - test_context.py
 - test_affect.py
@@ -94,37 +94,37 @@
 - bridge.d.ts
 - Electron main + Python sidecar architecture
 - affect.py
-- test_browser_setup.py
-- ProactivityScheduler
+- soak_conversation.py
+- GeminiProvider
 - test_research.py
 - test_a_call_spanning_in_and_out_still_asks
-- handlers.py
-- to_pcm16
+- CredentialKey
+- FilesPanel.tsx
 - Source
 - _reset_connection
-- test_read_is_named_as_an_untrusted_source
+- fit_to_budget
 - OllamaProvider
 - _suppress_close_errors
 - Sidebar.tsx
 - sidecar/tools/browser.py — CDP browser tools
 - online
-- test_proactivity_trigger_refuses_when_switched_off
+- datetime
 - Query: missing parts, flaws, and high-value intelligence improvements
 - devDependencies
 - context.py
-- db.py
+- SettingsStore
 - PermissionEngine
 - PermissionEngine
-- ModelVerdict
+- FilesPanel.test.tsx
 - ModelListing
 - ConfirmDialog.tsx
 - useConversation.ts
 - package.json
 - call_key
-- ._insert
+- ToolJournal
 - render
 - snapshot
-- discovered
+- _port_is_free
 - HistoryPanel.tsx
 - CLAUDE.md — ARIA Project Instructions (Claude Code-facing)
 - Router — local vs cloud, then which provider
@@ -136,7 +136,7 @@
 - ModelPicker.tsx
 - memory/{vectors,semantic,episodic,retrieval,reflection,scheduler}.py
 - PersonaLevel
-- tools_trust_all_drives
+- _vector
 - SettingsPanel.tsx
 - preload.ts
 - gate_organize.py
@@ -147,18 +147,21 @@
 - Phase 8 — moods, procedural learning, proactivity, voice polish
 - Electron UI (renderer)
 - Phase 2 stage 3 — hands free (wake word, VAD, endpointing)
-- protocol.py
+- HealthReport
 - MemoryPanel.test.tsx
 - Orb.tsx
 - scripts
 - core/router.py — model Router
-- gate_permission_modes.py
+- spawn
 - gate_research.py
-- BrowserUnavailable
+- .forget
+- test_a_short_code_request_is_not_answered_locally_to_save_time
+- test_ordinary_questions_do_not_get_the_expensive_tier
 - MemoryPanel.tsx
 - She holds a conversation now (2026-08-07)
 - Measuring answer quality
 - Smart mode: it was the tool, and then it was the router (2026-08-12)
+- test_a_spoken_turn_still_stays_local
 - is_casual
 - App.tsx
 - ModelPicker.test.tsx
@@ -170,6 +173,7 @@
 - gate_agent.py
 - gate_browser.py
 - gate_memory.py
+- test_every_tool_probe_is_recognised_as_a_command
 - ConnectionStatus.tsx
 - Markdown.tsx
 - ToolsPanel.test.tsx
@@ -215,7 +219,10 @@
 - vitest
 - sidecar/__init__.py
 - persona/__init__.py
-- RpcMethodError
+- test_a_spoken_command_is_no_longer_forced_onto_the_local_model
+- test_a_spoken_conversational_turn_still_stays_local
+- test_a_command_is_not_slowed_down_for_a_difference_that_is_noise
+- test_an_ordinary_question_still_takes_the_fast_class
 - useConfirm.ts
 - useMemory.ts
 - usePushToTalk.ts
@@ -230,12 +237,12 @@
 - Warm persona embeds its own anti-invention clause against fabricated shared memory
 
 ## God Nodes (most connected - your core abstractions)
-1. `Database` - 251 edges
-2. `ConversationStore` - 155 edges
+1. `Database` - 253 edges
+2. `ConversationStore` - 159 edges
 3. `HealthTracker` - 106 edges
 4. `ConversationService` - 102 edges
 5. `ToolContext` - 94 edges
-6. `SemanticMemory` - 88 edges
+6. `SemanticMemory` - 92 edges
 7. `ToolResult` - 84 edges
 8. `ChatMessage` - 81 edges
 9. `EpisodicMemory` - 63 edges
@@ -262,7 +269,7 @@
 - **Phase 6 agent loop design: step-aware routing, privacy stickiness, escalation** — agent_loop, rationale_sticky_local, rationale_untrusted_source_escalation, phase_6_agent_loop, router_core [EXTRACTED 1.00]
 - **KV-cache latency discipline across prompt assembly** — build_spec_stable_prefix_ordering, build_spec_prefill_cost [INFERRED 0.85]
 
-## Communities (234 total, 54 thin omitted)
+## Communities (241 total, 64 thin omitted)
 
 ### Community 0 - "RecordingBus"
 Cohesion: 0.09
@@ -276,49 +283,49 @@ Nodes (69): drain(), frame(), interrupt(), Any, ndarray, Hands-free listening: e
 Cohesion: 0.05
 Nodes (38): animateBounds(), bottomRightPosition(), centredExpandedBounds(), createWindow(), fadeTo(), hideWindow(), launchedAt, publishStatus() (+30 more)
 
-### Community 3 - "test_catalog.py"
-Cohesion: 0.08
-Nodes (39): by_class(), default_local(), ModelAvailability, ProviderName, A catalog entry plus whether it can actually be used right now., The router's pool, and **curated only**. Reading `all_models()` here would let…, The local fallback. Prefers the instruction-tuned 7B. `pulled` is what Ollama…, Every catalog entry with a live verdict and a reason fit to display. (+31 more)
+### Community 3 - "catalog.py"
+Cohesion: 0.05
+Nodes (62): Which models are usable right now. One object answers this for both…, all_models(), by_class(), default_local(), local_models(), ModelAvailability, persona_for(), ProviderName (+54 more)
 
 ### Community 4 - "test_rpc.py"
-Cohesion: 0.19
-Nodes (24): method_names(), _auth(), _call(), The /rpc token gate and JSON-RPC dispatch (BUILD_SPEC §7.1). Beyond the Phase 0…, The id is reserved, not written — so the list stays empty., CLAUDE.md rule 5: destructive operations need a confirmation round-trip., An unregistered method returns -32601, so this proves they exist., This machine's `client` fixture runs the real lifespan against a real Ollama… (+16 more)
+Cohesion: 0.12
+Nodes (37): _auth(), _call(), client(), fixture, MonkeyPatch, Path, The /rpc token gate and JSON-RPC dispatch (BUILD_SPEC §7.1). Beyond the Phase 0…, The id is reserved, not written — so the list stays empty. (+29 more)
 
 ### Community 5 - "ConversationService"
-Cohesion: 0.03
-Nodes (51): SessionSummary, ConversationService, _parse_yes_no(), Any, datetime, ModelInfo, RoutingBias, StoredMessage (+43 more)
+Cohesion: 0.04
+Nodes (42): SessionSummary, ConversationService, _parse_yes_no(), Any, datetime, ModelInfo, RoutingBias, StoredMessage (+34 more)
 
-### Community 6 - "OllamaEmbeddings"
+### Community 6 - "read_one"
 Cohesion: 0.09
-Nodes (27): Episode, BaseModel, Episodes — what happened, compressed and kept (BUILD_SPEC §7.3 tier 2). One…, A row from `episodes`, as the panel and retrieval see it., IndexStats, _age_days(), _percentile(), datetime (+19 more)
+Nodes (45): Attachment, classify(), Path, Files the user hands her, understood and kept. Eyaas: *"I should be also be…, Images need a model, and there is no local one (rule 2). So an image with no…, One attachment, understood. Never raises., Every attachment on one message, in the order they were given. Sequential…, The block that goes into the prompt. **Fenced as untrusted content**, exactly… (+37 more)
 
 ### Community 7 - "test_tts.py"
-Cohesion: 0.05
-Nodes (54): Turns a token stream into audio while it is still arriving. BUILD_SPEC §9 Phase…, Emit every chunk the buffer can currently yield., Speak whatever is left, then wait for the synthesisers to land., SpeechStream, RuntimeError, Cap one spoken breath at `max_words`, pushing the rest back onto the front of…, Take one speakable chunk off the front. Returns (chunk, remainder). `chunk` is…, Voice could not start. Never fatal — she still types. (+46 more)
+Cohesion: 0.06
+Nodes (49): ToolCall, Turns a token stream into audio while it is still arriving. BUILD_SPEC §9 Phase…, Emit every chunk the buffer can currently yield., Speak whatever is left, then wait for the synthesisers to land., Stream one model's reply into `collected`. Returns TTFT in ms. `tool_calls`…, SpeechStream, Cap one spoken breath at `max_words`, pushing the rest back onto the front of…, Take one speakable chunk off the front. Returns (chunk, remainder). `chunk` is… (+41 more)
 
 ### Community 8 - "Database"
-Cohesion: 0.08
-Nodes (51): Database, Async-safe wrapper around the single sqlite connection., confirm(), context_hint(), detect(), DetectedSequence, discard(), pending_offers() (+43 more)
+Cohesion: 0.09
+Nodes (50): Database, Async-safe wrapper around the single sqlite connection., confirm(), context_hint(), detect(), DetectedSequence, discard(), pending_offers() (+42 more)
 
 ### Community 9 - "test_scheduler.py"
 Cohesion: 0.09
 Nodes (43): MemoryScheduler, most_recent_boundary(), datetime, ReflectionReport, timedelta, The clock behind memory: idle sweeps, and reflection at 3am (§8.3). §8.3 names…, Two reasons to reflect: the night has turned, or a conversation has. The…, The last time the clock passed `hour`:00, today or yesterday. (+35 more)
 
 ### Community 10 - "test_proactivity.py"
-Cohesion: 0.12
-Nodes (39): Candidate, default_candidates(), idle_intention_candidate(), is_stated_intention(), procedure_offer_candidate(), datetime, timedelta, Unprompted messages — rate-limited, focus-aware, self-checked (BUILD_SPEC §9… (+31 more)
+Cohesion: 0.06
+Nodes (73): Unprompted messages (Phase 8). Off entirely when the switch is off — the same…, _start_proactivity_scheduler(), Candidate, default_candidates(), idle_intention_candidate(), is_stated_intention(), ProactivityScheduler, procedure_offer_candidate() (+65 more)
 
 ### Community 11 - "discovery.py"
 Cohesion: 0.07
-Nodes (49): discover_all(), discover_gemini(), discover_openai(), _fetch(), _gemini_class(), _gemini_is_chat(), _gemini_is_duplicate(), _openai_class() (+41 more)
+Nodes (51): Cost, StrEnum, discover_all(), discover_gemini(), discover_openai(), _fetch(), _gemini_class(), _gemini_is_chat() (+43 more)
 
-### Community 12 - "state.py"
+### Community 12 - "KokoroTTS"
 Cohesion: 0.05
-Nodes (45): Case, Bus, Conv, main(), ndarray, Can she hold a conversation? Measured, not assumed. python…, Talk over her and see what happens. This is the part that was unreachable: the…, Speak, then go quiet long enough to end the utterance. (+37 more)
+Nodes (46): Case, Bus, Conv, main(), ndarray, Can she hold a conversation? Measured, not assumed. python…, Talk over her and see what happens. This is the part that was unreachable: the…, Speak, then go quiet long enough to end the utterance. (+38 more)
 
-### Community 13 - "Runtime"
-Cohesion: 0.09
-Nodes (12): ModelAvailability, AvailabilityService, ModelInfo, Ask both providers what they offer, then remember the answer. A provider being…, Every catalog model with a verdict and a displayable reason., The ids the router may choose from., Live view of what can actually answer a turn., What Ollama has pulled. Discovered at startup, refreshed on demand. (+4 more)
+### Community 13 - "AvailabilityService"
+Cohesion: 0.11
+Nodes (10): ModelAvailability, AvailabilityService, ModelInfo, Ask both providers what they offer, then remember the answer. A provider being…, Every catalog model with a verdict and a displayable reason., The ids the router may choose from., Live view of what can actually answer a turn., What Ollama has pulled. Discovered at startup, refreshed on demand. (+2 more)
 
 ### Community 14 - "finder.py"
 Cohesion: 0.05
@@ -326,95 +333,95 @@ Nodes (69): Nearest chunks to `query`, as (path, text, distance)., search_chunks
 
 ### Community 15 - "test_tools.py"
 Cohesion: 0.03
-Nodes (124): main(), Console entrypoint for ``python -m sidecar.main``., app(), _focused(), MonkeyPatch, parametrize, Path, The six tools, and mostly the paths where they refuse. `delete_file` is tested… (+116 more)
+Nodes (96): _focused(), MonkeyPatch, parametrize, Path, The six tools, and mostly the paths where they refuse. `delete_file` is tested…, A claim is for one call. Left behind, it would answer for a later, unrelated…, `_preview` runs inside `_ask`, *after* its "always allow" early return, and…, 32 seconds of keystrokes is what made the incident possible at all. One Ctrl+V… (+88 more)
 
 ### Community 16 - "Indexer"
-Cohesion: 0.08
-Nodes (37): chunk(), _digest(), extract_text(), Indexer, _pack(), Path, The background file indexer (BUILD_SPEC §9 Phase 4b). Reads documents, chunks…, Whatever text this file has, or "" if it has none worth having. Never raises: a… (+29 more)
-
-### Community 17 - "SileroVAD"
-Cohesion: 0.06
-Nodes (28): main(), Download the wake word weights into data/models/openwakeword. python…, frames(), main(), NullConversation, NullSTT, ndarray, Stage 3 gate, for the parts a machine can check. python… (+20 more)
-
-### Community 18 - "WakeMode"
 Cohesion: 0.05
-Nodes (27): ListenerState, StrEnum, Where she is in a conversation. ``WAITING`` and ``CAPTURING`` are the whole…, How an utterance is decided to be for her. ``PHRASE`` gates on the transcript:…, WakeMode, Protocol, What the RPC layer depends on, so it never imports ctranslate2., SpeechToText (+19 more)
+Nodes (46): datetime, StoredMessage, Summarize every conversation that has gone quiet. Returns how many., Summarize one session into an episode. Idempotent; never raises. `ended_at` is…, Stamp `ended_at` without writing an episode., How much this conversation deserves to be remembered, computed. **The model was…, One model call for the summary and a salience hint. ("", 0.5) on failure., Embed episodes written while Ollama was down. (+38 more)
+
+### Community 17 - "gate_wakeword.py"
+Cohesion: 0.05
+Nodes (32): main(), Download the wake word weights into data/models/openwakeword. python…, frames(), main(), NullConversation, NullSTT, ndarray, Stage 3 gate, for the parts a machine can check. python… (+24 more)
+
+### Community 18 - "Event"
+Cohesion: 0.07
+Nodes (26): SilentBus, ListenerState, StrEnum, Where she is in a conversation. ``WAITING`` and ``CAPTURING`` are the whole…, How an utterance is decided to be for her. ``PHRASE`` gates on the transcript:…, WakeMode, Endpoint, Why capture stopped, so the caller can tell an utterance from a timeout. (+18 more)
 
 ### Community 19 - "ConversationStore"
-Cohesion: 0.08
-Nodes (40): ConversationStore, CRUD over `sessions` and `messages`., Most recently started session, for reload-on-launch., How many proactive messages have gone out, this recently — the rate limiter's…, When the last proactive message went out, anywhere, for the 90-minute spacing…, A fresh id with no row behind it yet. `ensure_session` creates a row for any id…, Name a conversation. The `with conn:` is load-bearing. Python's sqlite3 opens…, Remove a conversation and everything in it. Returns messages deleted. Both… (+32 more)
+Cohesion: 0.05
+Nodes (80): _parse_episode(), Read the summariser's JSON, tolerating a model that wrapped it in prose. A…, ConversationStore, CRUD over `sessions` and `messages`., Most recently started session, for reload-on-launch., How many proactive messages have gone out, this recently — the rate limiter's…, When the last proactive message went out, anywhere, for the 90-minute spacing…, When anything was last said, in any session. The whole precondition for §9's… (+72 more)
 
-### Community 20 - "Reflector"
-Cohesion: 0.07
-Nodes (37): ExtractedEpisode, ExtractedFact, BaseModel, datetime, ModelInfo, Reflection — where "learns on its own" actually lives (BUILD_SPEC §8.3). Once a…, What the model returned, once it survives validation., What one run did. Shown in MemoryPanel and asserted by the gate. (+29 more)
+### Community 20 - "ModelInfo"
+Cohesion: 0.12
+Nodes (25): ExtractedEpisode, ExtractedFact, BaseModel, Reflection — where "learns on its own" actually lives (BUILD_SPEC §8.3). Once a…, What the model returned, once it survives validation., What one run did. Shown in MemoryPanel and asserted by the gate., ReflectionOutput, ReflectionReport (+17 more)
 
 ### Community 21 - "HealthTracker"
-Cohesion: 0.08
-Nodes (30): HealthTracker, ModelHealth, BaseModel, Observed latency if we have it, else the catalog seed, else pessimistic.…, Rolling health for one model id., In-memory health per model. Rebuilt on restart, which is fine — a fresh process…, fixture, Observed latency and the circuit breaker. A 429 is treated as a routing input… (+22 more)
+Cohesion: 0.07
+Nodes (31): HealthTracker, ModelHealth, BaseModel, Per-model health and observed latency. Two jobs: 1. **Observed TTFT (EWMA).**…, Observed latency if we have it, else the catalog seed, else pessimistic.…, Rolling health for one model id., In-memory health per model. Rebuilt on restart, which is fine — a fresh process…, fixture (+23 more)
 
 ### Community 22 - "SemanticMemory"
 Cohesion: 0.08
-Nodes (44): Fact CRUD, plus the §8.3 merge. Never raises on a missing embedder., Delete a fact outright. Returns whether it existed., SemanticMemory, memory(), anyio, Connection, fixture, The §8.3 merge rules, one test per branch. The pin test is the important one:… (+36 more)
+Nodes (46): Fact CRUD, plus the §8.3 merge. Never raises on a missing embedder., SemanticMemory, memory(), anyio, Connection, fixture, The §8.3 merge rules, one test per branch. The pin test is the important one:…, §8.3 caps at 0.95. Repetition is evidence, not proof. (+38 more)
 
 ### Community 23 - "test_screen.py"
-Cohesion: 0.10
-Nodes (45): _clean_stash(), _fake_capture(), _fake_thumbnail(), Exception, fixture, MonkeyPatch, `capture_screen(question)` — the confirmation preview, the stash, §11. The…, Never raises — losing the thumbnail is far better than losing the confirmation… (+37 more)
+Cohesion: 0.09
+Nodes (47): _clean_stash(), _fake_capture(), _fake_thumbnail(), Exception, fixture, MonkeyPatch, `capture_screen(question)` — the confirmation preview, the stash, §11. The…, Never raises — losing the thumbnail is far better than losing the confirmation… (+39 more)
 
 ### Community 24 - "Settings"
-Cohesion: 0.15
-Nodes (9): BaseSettings, Path, Sidecar configuration. Single source of truth for paths, port, and auth token.…, Speech model weights. Gitignored with the rest of `data/`, and large enough…, Manifests for batch operations (§11: "undo manifests for every one"). A batch…, A `.bat` that starts the user's real Chrome with CDP on (§9 Phase 7). In…, Create the runtime directory tree. Safe to call repeatedly., Sidecar settings, loaded once per process. (+1 more)
+Cohesion: 0.14
+Nodes (11): BaseSettings, _default_data_dir(), Path, Sidecar configuration. Single source of truth for paths, port, and auth token.…, Speech model weights. Gitignored with the rest of `data/`, and large enough…, Manifests for batch operations (§11: "undo manifests for every one"). A batch…, A `.bat` that starts the user's real Chrome with CDP on (§9 Phase 7). In…, Create the runtime directory tree. Safe to call repeatedly. (+3 more)
 
 ### Community 25 - "test_ollama_supervisor.py"
 Cohesion: 0.06
-Nodes (45): find_ollama(), OllamaSupervisor, Path, Starts Ollama if it is down, and re-arms local models when it returns., Last known state. Never probes, never awaits, never raises., Probe, start Ollama if it is down, and wait for it to answer. Returns whether…, One pass. Never raises — a supervisor that dies takes the thing it was…, The `ollama` executable, or None if it is not installed. PATH first, because… (+37 more)
+Nodes (46): find_ollama(), OllamaSupervisor, Path, Keep Ollama running, and notice when it comes back. Eyaas: *"sometimes when…, Starts Ollama if it is down, and re-arms local models when it returns., Last known state. Never probes, never awaits, never raises., Probe, start Ollama if it is down, and wait for it to answer. Returns whether…, One pass. Never raises — a supervisor that dies takes the thing it was… (+38 more)
 
 ### Community 26 - "test_router.py"
 Cohesion: 0.11
 Nodes (33): is_local(), RoutingBias, Routing decisions, asserted over a labelled message set. No network. The router…, The whole point of the setting: same message, different destination., §9.7 stage 7: siblings first, then local as the last resort., Observed latency overrides the seeded table as turns land., The router must always answer. A turn with no candidates is a crash., Local models are multi-GB downloads that may not have finished. (+25 more)
 
-### Community 27 - "test_episodic.py"
-Cohesion: 0.09
-Nodes (41): _clamp_summary(), _parse_episode(), Read the summariser's JSON, tolerating a model that wrapped it in prose. A…, max_tokens is a request, not a guarantee, and this is read for months., _conversation(), _episodic(), anyio, Connection (+33 more)
+### Community 27 - "eval_quality.py"
+Cohesion: 0.13
+Nodes (18): Namespace, main(), _pulled_models(), Answer-quality and hallucination battery. Run it, change something, run again.…, Answered something that has no answer, or claimed an action it cannot perform.…, Declined or hedged a solid fact. The counter-metric — a hallucination fix that…, The individual failures worth a human reading. A rate tells you there is a…, report() (+10 more)
 
-### Community 28 - "method"
-Cohesion: 0.07
-Nodes (42): chat_delete(), chat_history(), chat_new(), chat_send(), chat_sessions(), memory_forget(), memory_list(), memory_search() (+34 more)
+### Community 28 - "handlers.py"
+Cohesion: 0.04
+Nodes (96): pcm16_to_float32(), Little-endian int16 -> float32 in [-1, 1], which is what whisper wants., browser_setup(), build_health(), _cdp_reachable(), chat_cancel(), chat_delete(), chat_history() (+88 more)
 
-### Community 29 - "EpisodicMemory"
-Cohesion: 0.09
-Nodes (15): EpisodicMemory, _now(), datetime, Row, StoredMessage, Writes and reads `episodes`. Never raises into the turn path., Summarize every conversation that has gone quiet. Returns how many., Summarize one session into an episode. Idempotent; never raises. `ended_at` is… (+7 more)
+### Community 29 - "OpenAIProvider"
+Cohesion: 0.11
+Nodes (13): _assemble(), OpenAIProvider, Any, Response, ToolCall, No-op: cloud models have no local load step to pay for., One vision call: an image in, a description out. Not `stream_chat`.…, One `data:` frame into a StreamDelta. Non-data lines are ignored. `partial`… (+5 more)
 
-### Community 30 - "test_routing_log.py"
-Cohesion: 0.15
-Nodes (19): Connection, fixture, §9.7's labelled dataset: what the router decided, and what the user thought.…, Reopening a conversation has to show the thumbs again, or they look like they…, Three thumbs-down is one bad afternoon, not evidence about a model. A number…, `ON DELETE CASCADE` on message_id, with `foreign_keys` ON — the same foreign…, A row saying only which model answered cannot be used to tune anything. That is…, A routing log that can fail a turn is worse than no routing log. (+11 more)
+### Community 30 - "state.py"
+Cohesion: 0.05
+Nodes (42): Deliver a message with no preceding question. Called by…, SQLite connection, sqlite-vec loading, and the migration runner. One connection…, _now(), Sessions and messages — the durable conversation (BUILD_SPEC §7.3). This is…, Return an existing session id, or create one., ModelVerdict, BaseModel, What the router decided, and what the user made of it (§9.7). §9.7's closing… (+34 more)
 
 ### Community 31 - "test_organize.py"
 Cohesion: 0.06
 Nodes (71): messy(), fixture, MonkeyPatch, Path, Tidying a folder, and putting it back exactly (§9 Phase 4c). The acceptance…, A `.crdownload` is a browser mid-write, and moving it corrupts the download. A…, Otherwise "organise Downloads" twice gives you Documents/Documents., Rule 5 calls overwriting destructive, and silently replacing one invoice.pdf… (+63 more)
 
-### Community 32 - "RouteDecision"
-Cohesion: 0.13
-Nodes (18): is_tool_shaped(), needs_deep_model(), BaseModel, ModelInfo, A request to act on the machine rather than to talk about something., Reasoning, code, or a multi-step request: the `smart` class earns its cost., Pick a model. `selected` is the user's choice — a model id, or "smart" to…, Cloud unless the turn is trivial. The default. `_DEEP_VERBS` is checked here… (+10 more)
+### Community 32 - "Router"
+Cohesion: 0.12
+Nodes (22): Record the decision for §9.7's labelled dataset. Off the turn path. Spawned…, is_tool_shaped(), needs_deep_model(), BaseModel, ModelInfo, Smart model selection (BUILD_SPEC §9.7). The router returns a *decision*, never…, A request to act on the machine rather than to talk about something., Reasoning, code, or a multi-step request: the `smart` class earns its cost. (+14 more)
 
 ### Community 33 - "Fact"
 Cohesion: 0.10
 Nodes (15): Fact, FactHit, BaseModel, Row, The form that gets embedded and shown in the prompt., A fact with its retrieval scoring, for the panel and the prompt., A stored `fact_vec` row back into floats, or None if it has no vector., Edit a fact from the panel. Returns None if it is gone. (+7 more)
 
 ### Community 34 - "test_retrieval.py"
-Cohesion: 0.09
-Nodes (39): 1.0 today, 0.5 after a month, never quite zero., recency_decay(), anyio, parametrize, Retrieval, and the 80ms budget that shapes it (§9 Phase 5). The mechanisms are…, A memory that keeps coming up is worth surfacing, but not enough to outrank…, A fresh install answers every turn with no memory to search., Cancelling it outright would mean paying for the same string twice. (+31 more)
+Cohesion: 0.11
+Nodes (33): 1.0 today, 0.5 after a month, never quite zero., recency_decay(), anyio, parametrize, Retrieval, and the 80ms budget that shapes it (§9 Phase 5). The mechanisms are…, A fresh install answers every turn with no memory to search., Cancelling it outright would mean paying for the same string twice., `_build_context` runs once per attempt inside the failover loop, so without… (+25 more)
 
 ### Community 35 - "Tier"
 Cohesion: 0.04
-Nodes (70): EscalateFn, PreviewFn, RefuseFn, It did not, and `remember` shipped `...e.g. "I work on Sillara` — cut mid-…, The tier says she may run it; this says the answer stays here. A clipboard…, It is a strong constraint — it overrides the router — so it should be…, SAFE, not CONFIRM. A dialog in front of "remember that I prefer short answers"…, Rule 5: destructive operations are T2+ with a confirmation round-trip. (+62 more)
+Nodes (67): EscalateFn, PreviewFn, RefuseFn, It did not, and `remember` shipped `...e.g. "I work on Sillara` — cut mid-…, The tier says she may run it; this says the answer stays here. A clipboard…, It is a strong constraint — it overrides the router — so it should be…, SAFE, not CONFIRM. A dialog in front of "remember that I prefer short answers"…, Rule 5: destructive operations are T2+ with a confirmation round-trip. (+59 more)
 
 ### Community 36 - "main.py"
-Cohesion: 0.07
-Nodes (33): FastAPI, clear_handshake(), Remove the token file on clean shutdown so no stale token survives. **Only if…, _build_indexer(), _build_memory(), _build_stt(), _build_tts(), _discover_local_models() (+25 more)
+Cohesion: 0.09
+Nodes (34): FastAPI, clear_handshake(), Path, WebSocket auth token lifecycle (BUILD_SPEC §7.1). The sidecar binds…, Use the token Electron supplied, or mint one for standalone runs., Publish the token for a client that did not supply one. **Not written after the…, Remove the token file on clean shutdown so no stale token survives. **Only if…, resolve_token() (+26 more)
 
 ### Community 37 - "listener.py"
-Cohesion: 0.14
-Nodes (19): is_stop_word(), _near_the_name(), Hands-free listening (BUILD_SPEC §9 Phase 2 stage 3). The renderer opens the…, Is this whole utterance just a request to stop talking?, Is this first word a plausible mishearing of her name? `base.en` on a single…, Was this utterance addressed to her? The whole of phrase mode rests on this one…, Remove a leading wake phrase. Leaves the name alone mid-sentence., starts_with_wake_phrase() (+11 more)
+Cohesion: 0.11
+Nodes (24): clips(), main(), ndarray, Can she hear her own name? Across many voices, because one is not a test.…, score(), is_stop_word(), _near_the_name(), Hands-free listening (BUILD_SPEC §9 Phase 2 stage 3). The renderer opens the… (+16 more)
 
 ### Community 38 - "Listener"
 Cohesion: 0.09
@@ -425,16 +432,16 @@ Cohesion: 0.07
 Nodes (41): _apply_sql(), connect(), current_version(), migrate(), Connection, Path, Run ``fn`` against the connection off the event loop, serialised., Every table in the database, including vec0 virtual tables. (+33 more)
 
 ### Community 40 - "test_conversation.py"
-Cohesion: 0.05
-Nodes (100): A model asking for a tool to be run. `id` is the provider's handle for the call…, ToolCall, _drain(), FakeProvider, make_service(), OpenEngine, _proactivity_service(), anyio (+92 more)
+Cohesion: 0.04
+Nodes (108): StrEnum, How much latency the user will trade for a better answer., RoutingBias, A model asking for a tool to be run. `id` is the provider's handle for the call…, ToolCall, _drain(), FakeProvider, make_service() (+100 more)
 
 ### Community 41 - "test_focus.py"
 Cohesion: 0.10
 Nodes (34): _cleanup_probes(), _clear_other_pending_offers(), _focus_section(), main(), _ok(), _procedure_confirmed(), §9 Phase 8's proactivity-engine acceptance gate. a pending procedure offer ->…, `pending_offers` has no ordering, so a real pattern already detected from… (+26 more)
 
 ### Community 42 - "test_reflection.py"
-Cohesion: 0.08
-Nodes (40): build_prompt(), choose_model(), _extract_json(), Any, §8.3's prompt, with the two slots filled., §8.3: cloud if a key is present, local otherwise. Walks SMART then BALANCED,…, Find the JSON object in whatever the model actually returned. A local 7B wraps…, anyio (+32 more)
+Cohesion: 0.09
+Nodes (36): build_prompt(), choose_model(), _extract_json(), Any, §8.3's prompt, with the two slots filled., §8.3: cloud if a key is present, local otherwise. Walks SMART then BALANCED,…, Find the JSON object in whatever the model actually returned. A local 7B wraps…, anyio (+28 more)
 
 ### Community 43 - "ARIA — Project Instructions"
 Cohesion: 0.06
@@ -442,51 +449,51 @@ Nodes (34): Acrylic was on, and painted over (2026-08-09), Adopting a discovered
 
 ### Community 44 - "ToolContext"
 Cohesion: 0.05
-Nodes (82): Tool Call Log: "write me an essay on space in notepad", test_system_info_reports_this_machine(), tool, The clipboard (BUILD_SPEC §9 Phase 3). `win32clipboard` ships with pywin32,…, Put text on the clipboard. Args: text: What to copy, The clipboard's text, or None when it holds something else. An image, a file…, Replace the clipboard's contents. Public for the same reason as `read_text`…, Read the clipboard's text. (+74 more)
+Nodes (78): Tool Call Log: "write me an essay on space in notepad", test_system_info_reports_this_machine(), close_app(), focus_window(), list_windows(), tool, List open application windows., Bring an open window to the front. Args: name: Part of the window's title, e.g.… (+70 more)
 
-### Community 45 - "Role"
-Cohesion: 0.08
-Nodes (36): Namespace, build_messages(), _is_reasoning(), main(), provider_for(), _pulled_models(), ModelInfo, Answer-quality and hallucination battery. Run it, change something, run again.… (+28 more)
+### Community 45 - "measure_models.py"
+Cohesion: 0.19
+Nodes (16): build_messages(), _is_reasoning(), provider_for(), ModelInfo, Exactly what the app would send: stable prefix first, then the turns., run_probe(), main(), measure_honesty() (+8 more)
 
 ### Community 46 - "apps.py"
-Cohesion: 0.05
-Nodes (70): main(), Can she find the app you meant? Resolves only — nothing is launched. python…, AppEntry, _AppIndex, _bring_to_front(), _build_index(), clear_type_targets(), close_app() (+62 more)
+Cohesion: 0.03
+Nodes (105): main(), Can she find the app you meant? Resolves only — nothing is launched. python…, main(), Console entrypoint for ``python -m sidecar.main``., _default_browser(), (exe path, profile dir) for the user's actual default browser., A `.bat`, not a `.lnk` — no COM dependency, and a plain text file the user can…, _write_browser_launcher() (+97 more)
 
-### Community 47 - "_escalate_current_page"
-Cohesion: 0.17
-Nodes (13): The URL check catches the common case; a card-number field on an unlisted…, No page has loaded yet at this point — only the URL being navigated *to* is…, test_a_generic_domain_can_still_be_caught_by_its_dom(), test_known_checkout_and_banking_urls_are_recognised(), test_navigate_escalates_on_the_target_url_before_loading_it(), test_no_checkout_fields_means_no_dom_match(), _dom_confirms_checkout(), _escalate_current_page() (+5 more)
+### Community 47 - "Reflector"
+Cohesion: 0.14
+Nodes (10): datetime, ModelInfo, One nightly pass: read the day, extract facts, merge, prune., Read the window, extract, merge, prune. Never raises., Ask the chosen model, falling back to local on any provider failure., Fold extracted facts in, one at a time. **Sequentially, deliberately.** The…, How many messages have arrived since the last successful reflection. Cheap…, The oldest unread messages, with the id to mark on success. **Oldest first, and… (+2 more)
 
 ### Community 48 - "conversation.py"
 Cohesion: 0.03
-Nodes (72): concrete_tokens(), novel_tokens(), Long-conversation contamination soak — the Phase 1 regression, restated. The…, Proper nouns and numbers, ignoring words capitalised only by position., Concrete tokens in `reply` that nobody has grounded yet., exhausted_note(), LoopState, The agent loop's pure decision logic (BUILD_SPEC §9 Phase 6). Multi-step tool… (+64 more)
+Nodes (83): exhausted_note(), LoopState, The agent loop's pure decision logic (BUILD_SPEC §9 Phase 6). Multi-step tool…, Whether the model should be handed tools on the next pass. False exactly on…, §11: the call immediately after reading untrusted content is forced through…, Told to the model, not just logged — it should know why it stopped., What the user sees when the model produced no words at all. A real, observed…, What one turn's agent loop is tracking, across its steps. Deliberately not… (+75 more)
 
 ### Community 49 - "Retriever"
-Cohesion: 0.13
-Nodes (11): Task, What one turn recalled, plus what it cost., Turns a user message into the memory worth putting in front of the model., Start retrieval now, await it later. Called from `send()` so the embed overlaps…, Facts and episodes worth injecting. Never raises, never over budget., Whether there is anything to search. Cached once it is true. This was two…, Embed within the deadline, or give up and say so. On timeout the embed is…, Keep a strong ref so the timed-out embed still reaches the cache. (+3 more)
+Cohesion: 0.08
+Nodes (21): _age_days(), _percentile(), Task, §9 Phase 5: 0.6·cosine + 0.25·recency + 0.15·salience, boosted by access. Two…, Turns a user message into the memory worth putting in front of the model., Start retrieval now, await it later. Called from `send()` so the embed overlaps…, Facts and episodes worth injecting. Never raises, never over budget., Whether there is anything to search. Cached once it is true. This was two… (+13 more)
 
 ### Community 50 - "probes.py"
-Cohesion: 0.08
-Nodes (38): Check, Answered something that has no answer, or claimed an action it cannot perform.…, admits_ignorance(), answers_flatly(), claimed_action(), contains(), contains_any(), denies_capability() (+30 more)
+Cohesion: 0.10
+Nodes (33): Check, admits_ignorance(), answers_flatly(), contains(), contains_any(), denies_capability(), exact(), excludes() (+25 more)
 
 ### Community 51 - "test_text.py"
 Cohesion: 0.11
 Nodes (30): content_words(), coverage(), idf(), Word-level matching, shared by retrieval and by episode salience. **This is the…, `runn` -> `run`, but `press` stays `press`., The words in `text` worth matching on, stemmed., How rare each word is across the candidate set. Computed over the rows actually…, How much of the query's meaning this document accounts for, 0..1. IDF-weighted,… (+22 more)
 
 ### Community 52 - "ChatMessage"
-Cohesion: 0.03
-Nodes (88): Headers, episode_request(), Prompt asking the model to compress a whole session into an episode. Distinct…, Split turns into (to_summarize, to_keep). §9 Phase 1: once the conversation…, Prompt asking the model to compress the oldest turns into a note., Prompt asking the model to name a conversation for the history list., split_for_rollup(), summarization_request() (+80 more)
+Cohesion: 0.06
+Nodes (44): Headers, Compress the oldest turns. Folds in any earlier note so it compounds., default_self_check(), Off the interactive path entirely — background, local-only, the same shape…, ChatMessage, GenerationOptions, ProviderRateLimited, ProviderUnavailable (+36 more)
 
-### Community 53 - "Router"
-Cohesion: 0.07
-Nodes (28): is_trivial(), A greeting or acknowledgement — nothing a 4B model can get wrong., Chooses a model for a turn., Router, parametrize, The line that was missing. Without it these went to the FAST class., Even in the latency-first bias. Fast and wrong is not the trade., The control. Widening the detector must not make everything SMART. (+20 more)
+### Community 53 - "parametrize"
+Cohesion: 0.18
+Nodes (12): is_trivial(), A greeting or acknowledgement — nothing a 4B model can get wrong., parametrize, The line that was missing. Without it these went to the FAST class., A false positive costs a spoken turn its ~800ms head start, which is the thing…, test_clipboard_questions_stay_on_this_machine(), test_code_requests_reach_a_reasoning_model(), test_conversation_is_not_mistaken_for_a_command() (+4 more)
 
 ### Community 54 - "compilerOptions"
 Cohesion: 0.07
 Nodes (28): DOM, DOM.Iterable, src/**/*.d.ts, src/**/*.ts, src/**/*.tsx, vite/client, compilerOptions, baseUrl (+20 more)
 
-### Community 55 - "_startup"
-Cohesion: 0.17
-Nodes (12): bearer_from_header(), Path, WebSocket auth token lifecycle (BUILD_SPEC §7.1). The sidecar binds…, Use the token Electron supplied, or mint one for standalone runs., Publish the token for a client that did not supply one. Written after the…, Extract the token from an ``Authorization: Bearer <token>`` header., resolve_token(), write_handshake() (+4 more)
+### Community 55 - "memory.py"
+Cohesion: 0.13
+Nodes (18): People say "remember that ..." to a thing whose job is remembering., The fallback is not a failure: the fact stays retrievable and the panel can fix…, test_a_lead_in_is_stripped(), test_an_unrecognised_phrasing_is_still_kept(), test_common_phrasings_become_real_predicates(), _clip(), forget(), tool (+10 more)
 
 ### Community 56 - "Connectivity"
 Cohesion: 0.12
@@ -496,9 +503,9 @@ Nodes (21): Connectivity, Is this machine on the internet? BUILD_SPEC §9.7 asks
 Cohesion: 0.11
 Nodes (20): Collection, The tier engine, tested on what it refuses. BUILD_SPEC §9 Phase 3 names this…, **Never default to approved on timeout** (§7.1). Somebody who walked away has…, `visit`'s checkout-page escalation would normally force a SAFE tool to CONFIRM.…, §7.2: "off by default" means the model is not told they exist, which is…, The half that was missing. `_tool_schemas` always asked for the CONFIRM…, `escalate` reaches the same CONFIRM floor `force_confirm` does — it must not be…, test_a_required_argument_is_marked_required() (+12 more)
 
-### Community 58 - "browser.py"
-Cohesion: 0.13
-Nodes (26): Page, test_locate_finds_a_single_role_match(), test_locate_returns_none_when_nothing_matches(), browser_click(), browser_fill(), browser_navigate(), browser_read(), browser_screenshot() (+18 more)
+### Community 58 - "MachineContext"
+Cohesion: 0.18
+Nodes (17): machine_context(), MachineContext, Facts the process already holds. Nothing here is inferred or guessed., What she can say about right now without being told. Rendered **to the minute,…, The whole design rests on this. This block sits before the conversation, so a…, These are different things to tell someone., 4 days ago' is not worth the tokens, and the date already says when., Silence beats a wrong claim: unknown facts are simply not mentioned. (+9 more)
 
 ### Community 59 - "Tool contract — decorator, ToolResult, derived schemas"
 Cohesion: 0.07
@@ -509,24 +516,24 @@ Cohesion: 0.07
 Nodes (27): ARIA Sidecar Runtime Dependencies (requirements.txt), anthropic==0.39.* (NOT adopted, Anthropic excluded), apscheduler==3.10.* (deferred, Phase 5), fastapi==0.115.*, faster-whisper==1.0.3, httpx==0.27.*, keyring==25.7.* (Windows Credential Manager), kokoro-onnx==0.4.* (+19 more)
 
 ### Community 61 - "rpc"
-Cohesion: 0.18
-Nodes (12): get, Constant-time comparison of a presented Bearer token., token_matches(), health(), Any, Liveness probe for Electron's supervisor. Deliberately cheap and dependency-…, Token-gated JSON-RPC endpoint (§7.1). The port is reachable by any browser tab…, Read/dispatch/reply until the client goes away. (+4 more)
+Cohesion: 0.13
+Nodes (16): get, bearer_from_header(), Constant-time comparison of a presented Bearer token., Extract the token from an ``Authorization: Bearer <token>`` header., token_matches(), health(), Any, Liveness probe for Electron's supervisor. Deliberately cheap and dependency-… (+8 more)
 
 ### Community 62 - "compilerOptions"
 Cohesion: 0.08
 Nodes (25): electron/**/*.ts, electron.vite.config.ts, electron-vite/node, node, compilerOptions, composite, esModuleInterop, exactOptionalPropertyTypes (+17 more)
 
 ### Community 63 - "EventBus"
-Cohesion: 0.11
-Nodes (18): AssistantState, EventBus, Any, Protocol, StrEnum, Server -> client push notifications and the set of live connections (§7.1).…, Send the current state to one client, unconditionally. A reconnecting renderer…, Send a notification to every live client, dropping dead ones. (+10 more)
+Cohesion: 0.14
+Nodes (12): EventBus, Any, Protocol, Server -> client push notifications and the set of live connections (§7.1).…, Send the current state to one client, unconditionally. A reconnecting renderer…, Send a notification to every live client, dropping dead ones., Update the assistant state and notify clients if it actually changed., Minimal transport surface — a Starlette WebSocket satisfies this. (+4 more)
 
-### Community 64 - "parametrize"
-Cohesion: 0.25
-Nodes (9): parametrize, test_ordinary_targets_are_not_refused(), test_ordinary_urls_are_not_flagged(), test_password_shaped_targets_are_refused(), test_role_name_strips_the_leading_article_and_trailing_noun(), A hard block, not a dialog — see the module docstring. Reads only the call's…, the Send button" -> "Send" — a role lookup wants the label, not the description…, _refuse_password_field() (+1 more)
+### Community 64 - "overhead_tokens"
+Cohesion: 0.15
+Nodes (17): overhead_tokens(), Content that changes per turn. Everything after this point re-prefills. Phase…, Tokens spent before the conversation even starts. Roll-up decisions must…, volatile_prefix(), full(), CLAUDE.md: keep the pre-conversation budget near 800 tokens on local., Roll-up decisions subtract this; if it were uncounted, a conversation could…, §8.2's order: temporal, then facts. Memory sits nearest the turns because that… (+9 more)
 
 ### Community 65 - "test_browser.py"
-Cohesion: 0.14
-Nodes (30): FakePage, MonkeyPatch, Browser control: the checkout/banking hard block, password refusal, and element…, The page-level check runs first, and an ordinary-looking "OK" button on a…, The actual point of this whole change: a routine click on an ordinary page…, A target that does not exist is the tool's "not found" to report, not a reason…, Implements exactly the `Page` surface `browser.py` calls., _returning() (+22 more)
+Cohesion: 0.04
+Nodes (103): Browser, Locator, Page, FakeLocator, FakePage, Exception, MonkeyPatch, parametrize (+95 more)
 
 ### Community 66 - "Path"
 Cohesion: 0.12
@@ -534,19 +541,19 @@ Nodes (21): Path, Trusting a folder means trusting what is nested in it., `allow
 
 ### Community 67 - "test_vectors.py"
 Cohesion: 0.11
-Nodes (23): cosine(), cosine_from_l2(), normalise(), pack(), Scale to unit length, so L2 distance carries cosine exactly. A zero vector has…, Raw little-endian float32, which is sqlite-vec's wire format., Recover cosine from the L2 distance between two *unit* vectors. Only valid for…, Cosine similarity of two vectors, normalised or not. Used by the merge step,… (+15 more)
+Nodes (24): cosine(), cosine_from_l2(), normalise(), pack(), Vector arithmetic for the memory tables (Phase 5). **Why this exists next to…, Scale to unit length, so L2 distance carries cosine exactly. A zero vector has…, Raw little-endian float32, which is sqlite-vec's wire format., Recover cosine from the L2 distance between two *unit* vectors. Only valid for… (+16 more)
 
-### Community 68 - "FakeLocator"
-Cohesion: 0.09
-Nodes (12): Locator, FakeLocator, An icon-only button ("🛒") can carry the meaning in its label with no visible…, No telltale wording anywhere — only `type="submit"` says what it does. The…, Refusing to act on an ambiguous-but-real description is worse than picking the…, test_a_bare_submit_button_is_caught_structurally(), test_an_ordinary_link_is_not_a_commit_action(), test_commit_wording_in_the_aria_label_alone_is_caught() (+4 more)
+### Community 68 - "WakeWord"
+Cohesion: 0.12
+Nodes (7): Protocol, What the RPC layer depends on, so it never imports ctranslate2., SpeechToText, ndarray, Protocol, What the listener depends on, so it never imports openwakeword., WakeWord
 
 ### Community 69 - "RecordingJournal"
 Cohesion: 0.17
 Nodes (13): Any, Rule 6, and the entry most worth having., Models get argument names wrong. That is a thing to say, not to crash on., An audit trail that cannot tell "you approved this" from "the folder was…, Same reasoning as trust's own audit-trail test: `approved_by` must say *why*…, RecordingJournal, test_a_denial_is_still_written_to_the_log(), test_a_failing_tool_is_reported_not_raised() (+5 more)
 
 ### Community 70 - "test_context.py"
-Cohesion: 0.07
-Nodes (51): assemble(), machine_context(), MachineContext, Facts the process already holds. Nothing here is inferred or guessed., What she can say about right now without being told. Rendered **to the minute,…, Content that changes per turn. Everything after this point re-prefills. Phase…, Build the final message list, stable content first., volatile_prefix() (+43 more)
+Cohesion: 0.09
+Nodes (28): estimate_tokens(), Render remembered facts and episodes into one system message. Returns None when…, _render_memory(), retrieved_block(), Machine context: the clock, the model, and what it costs to carry them., A turn about something she has no memory of must leave the prompt byte-…, A fact is a standing truth; an episode is one conversation., A clipped fact beats silence — the cap is a prefill guard, not a correctness… (+20 more)
 
 ### Community 71 - "test_affect.py"
 Cohesion: 0.16
@@ -565,7 +572,7 @@ Cohesion: 0.23
 Nodes (8): Any, Response, RuntimeError, Search, then read the results. One client, closed on shutdown., Top results for `query`. Raises `SearchUnavailable` with the fix., No usable search key, or the provider refused. Carries the fix., SearchUnavailable, WebSearch
 
 ### Community 75 - "_Reader"
-Cohesion: 0.20
+Cohesion: 0.22
 Nodes (4): AsyncClient, HTMLParser, Strip a page to its readable text. Not readability, not an article extractor,…, _Reader
 
 ### Community 76 - "bridge.d.ts"
@@ -580,29 +587,29 @@ Nodes (19): Electron main + Python sidecar architecture, ARIA — local-first Wi
 Cohesion: 0.17
 Nodes (18): _clamp(), _drift(), _energy_delta(), _format_hour(), _hours_since_last_interaction(), datetime, Four floats that make the same question read differently at 2am than at 2pm…, Roughly `[-1, 1]` from the last few user messages. Zero — the common case —… (+10 more)
 
-### Community 79 - "test_browser_setup.py"
-Cohesion: 0.21
-Nodes (15): _default_browser(), Path, (exe path, profile dir) for the user's actual default browser., A `.bat`, not a `.lnk` — no COM dependency, and a plain text file the user can…, _write_browser_launcher(), MonkeyPatch, Path, `browser.setup`'s launcher detection. The bug this guards against was real, not… (+7 more)
+### Community 79 - "soak_conversation.py"
+Cohesion: 0.18
+Nodes (12): concrete_tokens(), main(), novel_tokens(), Any, Long-conversation contamination soak — the Phase 1 regression, restated. The…, Proper nouns and numbers, ignoring words capitalised only by position., Concrete tokens in `reply` that nobody has grounded yet., Collects turn completions without needing a socket. (+4 more)
 
-### Community 80 - "ProactivityScheduler"
-Cohesion: 0.23
-Nodes (5): Unprompted messages (Phase 8). Off entirely when the switch is off — the same…, _start_proactivity_scheduler(), ProactivityScheduler, One pass. Never raises — a scheduler that dies stops everything, the same…, Sweeps for something worth saying, at most once per tick, and only when nothing…
+### Community 80 - "GeminiProvider"
+Cohesion: 0.25
+Nodes (3): GeminiProvider, Implements `LLMProvider` against the Gemini generateContent API., No-op: cloud models have no local load step to pay for.
 
 ### Community 81 - "test_research.py"
-Cohesion: 0.27
-Nodes (9): Readable text from a page, truncated on a word boundary., to_text(), `research(query)`, the untrusted-content boundary, and the online gate. Two…, The normal case on the open web, and returning nothing would read as "research…, Stronger than asking it not to use one: §7.2's own reasoning for hiding DANGER,…, test_extraction_is_capped(), test_malformed_html_still_yields_something(), test_scripts_and_navigation_are_dropped() (+1 more)
+Cohesion: 0.21
+Nodes (11): Readable text from a page, truncated on a word boundary., to_text(), `research(query)`, the untrusted-content boundary, and the online gate. Two…, T1. It reads and changes nothing; the consent that matters is the online…, The normal case on the open web, and returning nothing would read as "research…, Stronger than asking it not to use one: §7.2's own reasoning for hiding DANGER,…, test_extraction_is_capped(), test_malformed_html_still_yields_something() (+3 more)
 
 ### Community 82 - "test_a_call_spanning_in_and_out_still_asks"
 Cohesion: 0.22
 Nodes (9): fixture, Moving a file *out* of a trusted folder is not covered by trusting it — the…, Trust is about places. A tool that names none is not in one., A registry with one tool per tier, put back exactly as found. The snapshot…, test_a_call_spanning_in_and_out_still_asks(), test_a_tool_naming_no_path_is_never_trusted(), _tools(), clear() (+1 more)
 
-### Community 83 - "handlers.py"
+### Community 83 - "CredentialKey"
 Cohesion: 0.15
-Nodes (17): get_settings(), Process-wide settings singleton., delete_key(), pcm16_to_float32(), Little-endian int16 -> float32 in [-1, 1], which is what whisper wants., browser_setup(), build_health(), _cdp_reachable() (+9 more)
+Nodes (20): all_status(), CredentialKey, CredentialStatus, delete_key(), get_key(), BaseModel, StrEnum, API keys, stored in Windows Credential Manager (BUILD_SPEC §11). Never `.env`,… (+12 more)
 
-### Community 84 - "to_pcm16"
-Cohesion: 0.25
-Nodes (7): ndarray, float32 [-1, 1] -> little-endian int16, which is what WebAudio wants and half…, One chunk of speech as int16 PCM. Runs in a thread — onnxruntime is blocking,…, to_pcm16(), Wrapping turns a loud sample into a click at the opposite polarity., test_pcm16_clips_rather_than_wrapping(), test_pcm16_is_little_endian_and_half_the_size_of_float32()
+### Community 84 - "FilesPanel.tsx"
+Cohesion: 0.47
+Nodes (5): Entry, FilesPanel(), humanDate(), humanSize(), Listing
 
 ### Community 85 - "Source"
 Cohesion: 0.18
@@ -612,16 +619,20 @@ Nodes (12): Fetch and strip anything that arrived without text. Concurrently, an
 Cohesion: 0.67
 Nodes (3): fixture, `_get_page`/`_connect` are monkeypatched per test; nothing here should carry a…, _reset_connection()
 
+### Community 87 - "fit_to_budget"
+Cohesion: 0.40
+Nodes (5): fit_to_budget(), Drop oldest turns until the assembled prompt fits. Backstop, not policy.…, It used to omit them, so it trimmed against a budget ~1650 tokens too generous.…, test_fit_to_budget_reserves_room_for_memory(), test_fit_to_budget_reserves_room_for_the_tool_schemas()
+
 ### Community 88 - "OllamaProvider"
-Cohesion: 0.09
-Nodes (22): HTTPError, choose_with(), cosine(), main(), measure_choice(), measure_per_model(), measure_recall(), provider_for() (+14 more)
+Cohesion: 0.10
+Nodes (19): HTTPError, choose_with(), cosine(), main(), measure_choice(), measure_per_model(), measure_recall(), provider_for() (+11 more)
 
 ### Community 89 - "_suppress_close_errors"
 Cohesion: 0.33
 Nodes (4): aclose(), Release the CDP connection. For shutdown and for tests., A closed CDP connection raising on its own teardown is not worth a traceback in…, _suppress_close_errors
 
 ### Community 90 - "Sidebar.tsx"
-Cohesion: 0.14
+Cohesion: 0.13
 Nodes (5): Section, SidebarProps, storedCollapsed(), stroke, useSidebar
 
 ### Community 91 - "sidecar/tools/browser.py — CDP browser tools"
@@ -632,9 +643,9 @@ Nodes (14): sidecar/tools/browser.py — CDP browser tools, tool.escalate/refuse
 Cohesion: 0.25
 Nodes (8): online(), fixture, MonkeyPatch, The whole point of `SearchUnavailable` carrying a message., Online mode on, with a stubbed search behind it., Belt to `_tool_schemas`' braces. `allow_danger_tools` was dead for a whole…, test_it_refuses_when_online_mode_is_off(), test_no_key_says_which_key_and_where()
 
-### Community 93 - "test_proactivity_trigger_refuses_when_switched_off"
-Cohesion: 0.29
-Nodes (8): client(), fixture, MonkeyPatch, Path, The `client` fixture above leaves `proactivity_enabled` at its default (True)…, App wired to a temp data dir and a known token, via the real env path., test_handshake_file_written(), test_proactivity_trigger_refuses_when_switched_off()
+### Community 93 - "datetime"
+Cohesion: 0.40
+Nodes (3): datetime, Drop the audit trail once it is old enough to be history. `prune` above…, §8.3: drop weak, single-sighting, unpinned facts after 30 days.
 
 ### Community 94 - "Query: missing parts, flaws, and high-value intelligence improvements"
 Cohesion: 0.18
@@ -645,12 +656,12 @@ Cohesion: 0.15
 Nodes (13): autoprefixer, electron, devDependencies, autoprefixer, electron, postcss, react, react-dom (+5 more)
 
 ### Community 96 - "context.py"
-Cohesion: 0.08
-Nodes (31): clean_title(), estimate_tokens(), fit_to_budget(), overhead_tokens(), _persona(), datetime, StoredMessage, Prompt assembly and the rolling context window (BUILD_SPEC §8.2, §9 Phase 1).… (+23 more)
-
-### Community 97 - "db.py"
 Cohesion: 0.11
-Nodes (19): SQLite connection, sqlite-vec loading, and the migration runner. One connection…, Any, Durable key-value settings (BUILD_SPEC §7.1 settings.get / settings.set).…, SettingsStore, Connection, fixture, parametrize, Durable settings and the v1 -> v2 migration. The migration matters more than… (+11 more)
+Nodes (18): clean_title(), episode_request(), _persona(), datetime, StoredMessage, Prompt assembly and the rolling context window (BUILD_SPEC §8.2, §9 Phase 1).…, Fill in what she can reach and what she remembers. The rest is identical., Prompt asking the model to compress a whole session into an episode. Distinct… (+10 more)
+
+### Community 97 - "SettingsStore"
+Cohesion: 0.13
+Nodes (17): Any, SettingsStore, Connection, fixture, parametrize, Durable settings and the v1 -> v2 migration. The migration matters more than…, Values are JSON so a new setting never needs another migration., store() (+9 more)
 
 ### Community 98 - "PermissionEngine"
 Cohesion: 0.21
@@ -659,10 +670,6 @@ Nodes (12): allow_danger_tools flag was dead code: schemas() always used the CON
 ### Community 99 - "PermissionEngine"
 Cohesion: 0.25
 Nodes (4): PermissionEngine, Decides whether a tool may run, and records that it was asked., Answer a pending confirmation. Returns whether one was waiting., Deny everything outstanding. Used when a turn is cancelled.
-
-### Community 100 - "ModelVerdict"
-Cohesion: 0.29
-Nodes (5): ModelVerdict, BaseModel, Per-model tallies. The dataset §9.7 wants, as far as it has grown., How a model has actually been received, per `routing_log`., Liked as a fraction of rated, or None while it would be noise.
 
 ### Community 101 - "ModelListing"
 Cohesion: 0.29
@@ -684,21 +691,21 @@ Nodes (10): author, dependencies, ws, description, license, main, name, private 
 Cohesion: 0.47
 Nodes (4): call_key(), Any, A hashable fingerprint of one tool call, for loop detection. Sorted so argument…, Mark one step as run. `local_only` is unknown, not False, for a tool the…
 
-### Community 106 - "._insert"
-Cohesion: 0.17
-Nodes (7): _now(), Return an existing session id, or create one., Write the fact and its vector in one transaction. One transaction is not…, Any, Where every tool call is recorded (BUILD_SPEC §7.3, CLAUDE.md rule 6). Append-…, Writes to `tool_log`. Satisfies `tools.permissions.Journal`., ToolJournal
+### Community 106 - "ToolJournal"
+Cohesion: 0.40
+Nodes (3): Any, Writes to `tool_log`. Satisfies `tools.permissions.Journal`., ToolJournal
 
 ### Community 107 - "render"
 Cohesion: 0.18
 Nodes (11): _band(), ~20 tokens, `machine_context()`'s own style — words, not floats. None when…, render(), A state that has not moved should not cost a token saying so — the same "byte-…, Concern only ever reads as "elevated" — there is no natural English phrase for…, The mechanism half of BUILD_SPEC's own acceptance line — the string fed to the…, test_a_2am_state_and_a_2pm_state_render_differently(), test_baseline_renders_nothing() (+3 more)
 
 ### Community 108 - "snapshot"
-Cohesion: 0.18
-Nodes (11): BUILD_SPEC §9:476 puts browser_click/browser_fill at CONFIRM unconditionally.…, §9:943 says "regardless of tool tier" — that only means something if *every*…, test_every_browser_tool_carries_the_checkout_escalation(), test_only_fill_carries_the_password_refusal(), test_tiers_deviate_from_build_specs_blanket_confirm_by_design(), T1. It reads and changes nothing; the consent that matters is the online…, test_research_needs_no_confirmation(), BUILD_SPEC's own tier table (§9:474) lists this AUTO — that line is about the… (+3 more)
+Cohesion: 0.29
+Nodes (7): BUILD_SPEC §9:476 puts browser_click/browser_fill at CONFIRM unconditionally.…, §9:943 says "regardless of tool tier" — that only means something if *every*…, test_every_browser_tool_carries_the_checkout_escalation(), test_only_fill_carries_the_password_refusal(), test_tiers_deviate_from_build_specs_blanket_confirm_by_design(), A copy of the registry, for tests that install their own tools. Paired with…, snapshot()
 
-### Community 109 - "discovered"
-Cohesion: 0.33
-Nodes (6): discovered(), fixture, ModelInfo, None means "send nothing and let the provider decide" — the only safe default,…, One discovered model, removed again afterwards. The overlay is module state, so…, test_temperature_defaults_to_none()
+### Community 109 - "_port_is_free"
+Cohesion: 0.50
+Nodes (4): _port_is_free(), Whether we can actually have the port, checked before anything else. **A second…, The incident, in one assertion. uvicorn runs the lifespan *before* it binds, so…, test_a_taken_port_is_detected_before_anything_starts()
 
 ### Community 110 - "HistoryPanel.tsx"
 Cohesion: 0.24
@@ -741,12 +748,8 @@ Cohesion: 0.31
 Nodes (9): delete_session broke on episodes FK constraint until forget_session ran first, She forgot a conversation she had just had — six independent causes (2026-08-12), Faster CPU semantic embedding path is the primary intelligence improvement (retrieval degrades to lexical under load), memory/{vectors,semantic,episodic,retrieval,reflection,scheduler}.py, Phase 5 — she remembers (facts, episodes, reflection), Embedding retrieval deadline: falls back to lexical search when over budget, marked degraded, last_reflected_message_id high-water mark replaces wall-clock reflection window, Fact merge key widened to same-subject (predicate wording unreliable from local model) (+1 more)
 
 ### Community 120 - "PersonaLevel"
-Cohesion: 0.14
-Nodes (14): PersonaLevel, StrEnum, Content identical across turns. Everything here is KV-cached. Changing `level`…, How much character a model can carry without falling apart. Measured on…, stable_prefix(), Cost, persona_for(), StrEnum (+6 more)
-
-### Community 121 - "tools_trust_all_drives"
-Cohesion: 0.50
-Nodes (4): _enumerate_drives(), Every fixed drive letter Windows reports, as root paths ("C:\\").…, Trust every drive letter on the machine, in one call. The direct answer to…, tools_trust_all_drives()
+Cohesion: 0.20
+Nodes (12): assemble(), PersonaLevel, StrEnum, Content identical across turns. Everything here is KV-cached. Changing `level`…, How much character a model can carry without falling apart. Measured on…, Build the final message list, stable content first., stable_prefix(), The KV-cache bargain, asserted directly. CLAUDE.md's measured rule: an… (+4 more)
 
 ### Community 122 - "SettingsPanel.tsx"
 Cohesion: 0.25
@@ -784,9 +787,9 @@ Nodes (7): ARIA (local-first Windows AI assistant), Electron UI (renderer), Pyth
 Cohesion: 0.33
 Nodes (7): Barge-in never worked: AssistantState.SPEAKING was written nowhere in the sidecar, Phase 2 stage 1 — she speaks (kokoro-onnx TTS), Phase 2 stage 3 — hands free (wake word, VAD, endpointing), Barge-in: duck audio to 20% first, decide (stop/resume) after transcription, Fuzzy first-word name matching plus ARMED listener state for 'aria', src/overlay/ScreenRim.tsx — screen overlay, Voice pipeline (wake word, VAD, STT, TTS)
 
-### Community 133 - "protocol.py"
-Cohesion: 0.19
-Nodes (17): dispatch(), _invoke(), Parse and execute one client message. Returns None for notifications., Run a handler, mapping exceptions onto JSON-RPC errors., err(), ErrorCode, ok(), Any (+9 more)
+### Community 133 - "HealthReport"
+Cohesion: 0.16
+Nodes (20): dispatch(), HealthReport, _invoke(), BaseModel, Parse and execute one client message. Returns None for notifications., Run a handler, mapping exceptions onto JSON-RPC errors., Rich health snapshot for the UI (§7.1 ``system.health``, §9.6)., err() (+12 more)
 
 ### Community 134 - "MemoryPanel.test.tsx"
 Cohesion: 0.43
@@ -804,17 +807,13 @@ Nodes (6): scripts, build, dev, sidecar, test, typecheck
 Cohesion: 0.33
 Nodes (6): Model catalog discovery is a filtering problem, not a fetching one, routing_log table + thumbs rating implements §9.7 route auditing, _TOOL_SHAPED narrows which spoken turns route by bias vs stay local/fast, Per-model tool scoreboard: run-to-run spread exceeds inter-model gaps; TOOL_SCORE_MARGIN band added, TTFT does not scale with conversation length once KV cache prefix is byte-identical, core/router.py — model Router
 
-### Community 138 - "gate_permission_modes.py"
-Cohesion: 0.67
-Nodes (3): main(), _ok(), Permission modes (manual / auto / full_access), against the real sidecar.…
+### Community 138 - "spawn"
+Cohesion: 0.18
+Nodes (9): main(), _ok(), Permission modes (manual / auto / full_access), against the real sidecar.…, Start a fresh conversation, without writing anything yet. Returns a *reserved*…, Any, Task, Fire-and-forget work that must not take the process down with it. Two rules,…, Run `coro` detached. Failures are logged against `name`, never raised. (+1 more)
 
 ### Community 139 - "gate_research.py"
 Cohesion: 0.47
 Nodes (5): _check(), main(), _ok(), §9 Phase 7's research half, against the running sidecar. "research X and…, Does each cited URL actually exist? The whole point of this gate.
-
-### Community 141 - "BrowserUnavailable"
-Cohesion: 0.17
-Nodes (11): Browser, Exception, _raising(), `LAUNCH_HINT` was made browser-agnostic when Eyaas's real default turned out to…, test_navigate_reports_browser_unavailable_plainly(), test_no_user_facing_browser_error_names_chrome(), BrowserUnavailable, _connect() (+3 more)
 
 ### Community 145 - "MemoryPanel.tsx"
 Cohesion: 0.53
@@ -896,28 +895,24 @@ Nodes (3): Fact merge and supersession logic, Phase 5 — Memory, Nightly reflec
 Cohesion: 0.67
 Nodes (3): Phase 4 closed — organize_folder / undo_organize, Phase 6 finished — capture_screen + cloud vision, Tool.preview channel: one confirmation shows a whole batch plan (organize_folder)
 
-### Community 212 - "RpcMethodError"
-Cohesion: 0.08
-Nodes (25): chat_cancel(), chat_rename(), confirm_respond(), memory_reflect(), models_bias(), models_select(), permissions_mode(), proactivity_trigger() (+17 more)
-
 ## Knowledge Gaps
-- **308 isolated node(s):** `sidecar`, `rpc`, `launchedAt`, `singleInstance`, `BrainStatus` (+303 more)
+- **312 isolated node(s):** `sidecar`, `rpc`, `launchedAt`, `singleInstance`, `BrainStatus` (+307 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **54 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **64 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Database` connect `Database` to `ConversationService`, `OllamaEmbeddings`, `test_tts.py`, `test_proactivity.py`, `state.py`, `Runtime`, `finder.py`, `Indexer`, `ConversationStore`, `Reflector`, `SemanticMemory`, `test_episodic.py`, `EpisodicMemory`, `test_routing_log.py`, `Fact`, `test_retrieval.py`, `main.py`, `test_db.py`, `test_conversation.py`, `test_reflection.py`, `conversation.py`, `ChatMessage`, `_startup`, `test_affect.py`, `affect.py`, `ProactivityScheduler`, `OllamaProvider`, `db.py`, `ModelVerdict`, `._insert`, `AffectState`, `_repeated_failures`?**
-  _High betweenness centrality (0.130) - this node is a cross-community bridge._
-- **Why does `ToolContext` connect `ToolContext` to `RecordingBus`, `ConversationService`, `test_tts.py`, `BrowserUnavailable`, `finder.py`, `test_tools.py`, `test_screen.py`, `test_organize.py`, `Tier`, `apps.py`, `conversation.py`, `ChatMessage`, `test_permissions.py`, `browser.py`, `test_browser.py`, `FakeLocator`, `RecordingJournal`, `StubSearch`, `test_research.py`, `_suppress_close_errors`, `PermissionEngine`?**
-  _High betweenness centrality (0.075) - this node is a cross-community bridge._
-- **Why does `ConversationService` connect `ConversationService` to `RecordingBus`, `test_tts.py`, `Database`, `state.py`, `Runtime`, `WakeMode`, `ConversationStore`, `HealthTracker`, `RouteDecision`, `Tier`, `main.py`, `listener.py`, `Listener`, `test_conversation.py`, `ToolContext`, `Role`, `conversation.py`, `Retriever`, `ChatMessage`, `Router`, `test_permissions.py`, `EventBus`, `RecordingJournal`, `OllamaProvider`, `PermissionEngine`?**
-  _High betweenness centrality (0.073) - this node is a cross-community bridge._
-- **Are the 48 inferred relationships involving `Database` (e.g. with `Recorder` and `ConversationHistory`) actually correct?**
-  _`Database` has 48 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 31 inferred relationships involving `ConversationStore` (e.g. with `Recorder` and `ConversationHistory`) actually correct?**
-  _`ConversationStore` has 31 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Database` connect `Database` to `ConversationService`, `test_tts.py`, `test_proactivity.py`, `finder.py`, `Indexer`, `ConversationStore`, `ModelInfo`, `SemanticMemory`, `state.py`, `Fact`, `test_retrieval.py`, `main.py`, `test_db.py`, `test_conversation.py`, `test_reflection.py`, `Reflector`, `conversation.py`, `test_affect.py`, `affect.py`, `soak_conversation.py`, `SettingsStore`, `ToolJournal`, `AffectState`, `_repeated_failures`?**
+  _High betweenness centrality (0.146) - this node is a cross-community bridge._
+- **Why does `ConversationService` connect `ConversationService` to `RecordingBus`, `test_tts.py`, `Database`, `spawn`, `Event`, `ConversationStore`, `ModelInfo`, `HealthTracker`, `state.py`, `Router`, `Tier`, `main.py`, `listener.py`, `Listener`, `test_conversation.py`, `ToolContext`, `conversation.py`, `ChatMessage`, `test_permissions.py`, `EventBus`, `WakeWord`, `RecordingJournal`, `soak_conversation.py`, `PermissionEngine`?**
+  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+- **Why does `ToolContext` connect `ToolContext` to `RecordingBus`, `ConversationService`, `test_tts.py`, `finder.py`, `test_tools.py`, `test_screen.py`, `test_organize.py`, `Tier`, `test_conversation.py`, `apps.py`, `conversation.py`, `memory.py`, `test_permissions.py`, `test_browser.py`, `RecordingJournal`, `StubSearch`, `test_research.py`, `_suppress_close_errors`, `PermissionEngine`?**
+  _High betweenness centrality (0.062) - this node is a cross-community bridge._
+- **Are the 50 inferred relationships involving `Database` (e.g. with `Recorder` and `ConversationHistory`) actually correct?**
+  _`Database` has 50 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 33 inferred relationships involving `ConversationStore` (e.g. with `Recorder` and `ConversationHistory`) actually correct?**
+  _`ConversationStore` has 33 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 22 inferred relationships involving `HealthTracker` (e.g. with `Recorder` and `ConversationHistory`) actually correct?**
   _`HealthTracker` has 22 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 44 inferred relationships involving `ConversationService` (e.g. with `Recorder` and `LoopState`) actually correct?**

@@ -58,6 +58,13 @@ REINFORCE_STEP = 0.1
 #: §8.3's decay rule, in whole days.
 PRUNE_AFTER_DAYS = 30
 PRUNE_CONFIDENCE = 0.3
+#: How long a *superseded* fact is kept. Far longer than `PRUNE_AFTER_DAYS`
+#: because these are the audit trail MemoryPanel shows — "what did she
+#: believe before, and what replaced it" is the question that makes an
+#: overwritten memory reviewable rather than silent. But they are never
+#: retrieved and never enter a prompt, so keeping them forever is storage
+#: spent on history nobody will read. Measured here at 18 of 24 rows.
+SUPERSEDED_AFTER_DAYS = 180
 
 
 def _now() -> str:
@@ -378,6 +385,53 @@ class SemanticMemory:
         removed = await self._db.run(_delete)
         if removed:
             log.info("memory.forgot", fact_id=fact_id)
+        return removed
+
+    async def prune_superseded(self, *, now: datetime | None = None) -> int:
+        """Drop the audit trail once it is old enough to be history.
+
+        `prune` above deliberately leaves superseded rows alone — they are
+        what MemoryPanel shows as "this replaced that", and losing them the
+        moment a belief changes would make every correction untraceable.
+        They are also never retrieved and never reach a prompt, so the only
+        cost of keeping one is storage, and the only value is being able to
+        look. After six months nobody looks.
+
+        Only rows nothing still points at are removed, oldest first, so a
+        chain of supersessions is unwound from its tail rather than leaving a
+        `superseded_by` aimed at a row that no longer exists.
+        """
+        moment = now or datetime.now(UTC)
+        cutoff = (moment - timedelta(days=SUPERSEDED_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def _prune(conn: sqlite3.Connection) -> int:
+            with conn:
+                rows = conn.execute(
+                    """
+                    SELECT id FROM facts
+                    WHERE superseded_by IS NOT NULL
+                      AND updated_at < ?
+                      AND id NOT IN (
+                          SELECT superseded_by FROM facts WHERE superseded_by IS NOT NULL
+                      )
+                    """,
+                    (cutoff,),
+                ).fetchall()
+                ids = [int(r["id"]) for r in rows]
+                if not ids:
+                    return 0
+                marks = ",".join("?" * len(ids))
+                conn.execute(f"DELETE FROM fact_vec WHERE fact_id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM facts WHERE id IN ({marks})", ids)
+                return len(ids)
+
+        removed = await self._db.run(_prune)
+        if removed:
+            log.info(
+                "memory.pruned_superseded",
+                facts=removed,
+                older_than_days=SUPERSEDED_AFTER_DAYS,
+            )
         return removed
 
     async def prune(self, *, now: datetime | None = None) -> int:
