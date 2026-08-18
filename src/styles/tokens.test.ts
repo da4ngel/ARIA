@@ -9,6 +9,9 @@
  * you cannot read.
  */
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import { COLORS, HUES, RGB, hexToRgb } from '@/styles/tokens'
@@ -134,5 +137,24 @@ describe('the palette', () => {
     ]) {
       expect(COLORS[name], name).toBeDefined()
     }
+  })
+
+  it('is an ES module, because the renderer imports it', () => {
+    // This file shipped as CommonJS once. Vite treats `.js` under `src/` as
+    // ESM, so `HUES` resolved to nothing, `Orb` failed to evaluate, and the
+    // window came up **completely blank** — while `npm run typecheck` and
+    // `npm test` both stayed green, because tsc reads the `.d.ts` beside this
+    // file and vitest runs in Node where CJS interop is transparent.
+    //
+    // A grep, because the honest guard is `npm run build` and this is the
+    // cheap half of it that runs in the normal loop.
+    const source = readFileSync(join(process.cwd(), 'src/styles/tokens.js'), 'utf8')
+
+    // Comments mention both words; strip them before looking.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*/g, '')
+
+    expect(code).not.toContain('module.exports')
+    expect(code).not.toContain('require(')
+    expect(code).toContain('export const COLORS')
   })
 })

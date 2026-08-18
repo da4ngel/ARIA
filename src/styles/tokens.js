@@ -8,11 +8,16 @@
  * three of those live inside canvas frame loops where nothing but sampling
  * pixels would have caught it, which this project has already had to do once.
  *
- * CommonJS on purpose. `tailwind.config.js` runs in plain Node with no TS
- * toolchain, and it has to read *this* file rather than a copy generated from
- * it — a generated copy is just the five-place problem with an extra step.
- * `package.json` has no `"type": "module"`, so `.js` is CJS and Vite resolves
- * the same specifier for the renderer.
+ * **ESM, and the Tailwind config is `.mjs` to match.** The first version of
+ * this file was CommonJS so the config could `require()` it — and the
+ * renderer then imported `HUES` from it through Vite, which treats `.js` in
+ * `src/` as ESM, so the module had no exports, `Orb` failed to evaluate and
+ * the whole window came up blank.
+ *
+ * Neither `npm run typecheck` nor `npm test` caught it: tsc reads the `.d.ts`
+ * beside this file, and vitest runs in Node where CJS interop is transparent.
+ * **Only an actual renderer build exercises this path**, which is why
+ * `npm run build` now belongs in the verification loop.
  *
  * **The palette rule, unchanged:** the chrome is near-monochrome and
  * saturation always *means* something — assistant state, success, warning,
@@ -21,7 +26,7 @@
  */
 
 /** @param {string} hex @returns {[number, number, number]} */
-function hexToRgb(hex) {
+export function hexToRgb(hex) {
   const clean = hex.replace('#', '')
   return [
     parseInt(clean.slice(0, 2), 16),
@@ -30,7 +35,7 @@ function hexToRgb(hex) {
   ]
 }
 
-const COLORS = {
+export const COLORS = {
   // Ground. The window is transparent; this is what shows through where
   // acrylic cannot. Neutral and dark — the fallback should read as absence,
   // not as navy.
@@ -106,7 +111,7 @@ const COLORS = {
 }
 
 /** The five assistant states — what `Orb` and the two canvases draw. */
-const HUES = {
+export const HUES = {
   idle: COLORS.idle,
   listening: COLORS.listening,
   thinking: COLORS.thinking,
@@ -120,6 +125,4 @@ const HUES = {
  * The canvases draw with `rgba(r, g, b, a)` and used to carry the conversion
  * by hand, which is exactly how they drifted from the hex in the config.
  */
-const RGB = Object.fromEntries(Object.entries(HUES).map(([k, v]) => [k, hexToRgb(v)]))
-
-module.exports = { COLORS, HUES, RGB, hexToRgb }
+export const RGB = Object.fromEntries(Object.entries(HUES).map(([k, v]) => [k, hexToRgb(v)]))

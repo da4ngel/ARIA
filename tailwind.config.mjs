@@ -1,5 +1,10 @@
-// CommonJS on purpose: package.json has no "type": "module", because Electron 31
-// preloads must be CJS when sandbox: true (BUILD_SPEC §3 renderer isolation).
+// **ESM (`.mjs`), so this can share `src/styles/tokens.js` with the renderer.**
+//
+// It used to be CommonJS and `require()` the tokens — which forced the tokens
+// file to be CommonJS too, and Vite then found no exports in it and the whole
+// renderer came up blank. Tailwind 3.4 discovers a `.mjs` config natively.
+// package.json still has no "type": "module", so Electron preloads stay CJS
+// as `sandbox: true` requires (BUILD_SPEC §3).
 
 /**
  * Ambient glass, dark only.
@@ -13,10 +18,10 @@
  * an "edge" is a 1px inner highlight (`rim`) rather than a drawn line.
  */
 
-const { COLORS } = require('./src/styles/tokens.js')
+import { COLORS } from './src/styles/tokens.js'
 
 /** @type {import('tailwindcss').Config} */
-module.exports = {
+export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {

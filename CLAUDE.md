@@ -2263,6 +2263,30 @@ plainly different, and it was the hue that collided).
   now **fades** between state colours — it used to cut from grey-blue to
   violet, which reads as a glitch rather than a change of mind.
 
+### The retheme shipped a blank window, and neither check saw it
+Reported immediately: ARIA opened to an empty grey rectangle. The sidecar was
+fine — `[brain] connected` in the log — so it was the renderer failing to
+mount.
+
+**`src/styles/tokens.js` was CommonJS.** `tailwind.config.js` needed to
+`require()` it, so it was written with `module.exports` — and the renderer
+imports `HUES` from the same file through Vite, which treats `.js` under
+`src/` as ESM. No exports, `Orb` failed to evaluate, nothing rendered.
+
+**`npm run typecheck` and `npm test` were both green the whole time**, and
+that is the part worth keeping: tsc reads the `.d.ts` beside the file, and
+vitest runs in Node where CJS interop is transparent. Neither exercises the
+browser's module resolution. `npx electron-vite build` names the error in one
+line — **a renderer build belongs in the loop**, and CLAUDE.md's own recorded
+lesson ("look at the UI; typecheck and tests do not see it") had a build-shaped
+hole in it that this fills.
+
+Fixed by making the tokens ESM and the Tailwind config `.mjs`, which Tailwind
+3.4 discovers natively — one source preserved, and `package.json` still has no
+`"type": "module"` so Electron preloads stay CJS as `sandbox: true` requires.
+The cheap half of the guard is now a test asserting the file uses ESM syntax;
+the honest half is the build.
+
 ### A live bug found while verifying, and a live bug fixed on the way
 - **`fit_to_budget` never knew about `online`.** `overhead_tokens` grew the
   parameter when online mode shipped and this caller never did, so it passed
@@ -2380,12 +2404,12 @@ to warm slate with an indigo accent and now lives in one file instead of six.
 mode is a style, so neither is a tool.
 
 Remaining, in rough order:
-- **None of this has been seen running.** The app has been open on old code
-  throughout, and `electron-vite dev` never rebuilds main or preload — which
-  is what made the paperclip look broken in the first place. **Restart
-  `npm run dev` fully**, then look at it: every panel, both window sizes, all
-  five orb states, and over a bright white editor, which is the case the glass
-  alpha was chosen for.
+- **The UI has still not been looked at.** The renderer now builds and mounts
+  (the blank-window bug above is fixed), but nobody has seen the new palette,
+  the mode control or the attachment chips on screen. **Restart `npm run dev`
+  fully** — main and preload never hot-reload — then check every panel, both
+  window sizes, all five orb states, and the window over a bright white
+  editor, which is the case the 0.62 glass alpha was chosen for.
 - **Speech does not load in the packaged bundle.** `ctranslate2` raises
   `cannot load module more than once per process`, so `faster-whisper` and the
   wake word are dead there; everything else in the bundle works. Three
