@@ -97,7 +97,7 @@ export function ToolsPanel({
   return (
     <Panel title="Tools" onClose={onClose}>
       <section>
-        <h3 className="text-tiny font-semibold text-aria-text">Permission mode</h3>
+        <h3 className="text-tiny font-strong text-aria-text">Permission mode</h3>
         <div className="mt-2 flex gap-1 rounded-lg bg-aria-sunk p-1">
           {MODE_OPTIONS.map((option) => (
             <button
@@ -127,7 +127,7 @@ export function ToolsPanel({
 
       <section className="mt-5">
         <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-tiny font-semibold text-aria-text">Trusted folders</h3>
+          <h3 className="text-tiny font-strong text-aria-text">Trusted folders</h3>
           <button
             type="button"
             disabled={trustingAll}
@@ -196,7 +196,7 @@ export function ToolsPanel({
       </section>
 
       <section className="mt-5">
-        <h3 className="text-tiny font-semibold text-aria-text">
+        <h3 className="text-tiny font-strong text-aria-text">
           Registered tools{tools.length > 0 && ` (${tools.length})`}
         </h3>
         <ul className="mt-1.5 space-y-0.5">

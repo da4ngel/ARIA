@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from sidecar.core import context as ctx
 from sidecar.core.context import (
     PERSONA_PROMPTS,
     PERSONA_PROMPTS_ONLINE,
@@ -354,3 +357,148 @@ def test_she_is_told_to_use_relative_paths_not_a_guessed_account_name() -> None:
         for prompt in prompts.values():
             assert "relative path" in prompt
             assert "guessed absolute" in prompt
+
+
+# ── the budget must count what the prompt actually contains ────────────
+
+
+@pytest.mark.parametrize("level", list(ctx.PersonaLevel))
+@pytest.mark.parametrize("has_tools", [False, True])
+@pytest.mark.parametrize("online", [False, True])
+def test_overhead_matches_assemble_for_every_combination(
+    level: ctx.PersonaLevel, has_tools: bool, online: bool
+) -> None:
+    """`overhead_tokens` must equal what `assemble` actually produces, for
+    every flag, or the roll-up trims against a budget that is not the real
+    one — the roll-up "succeeds" and the context still overflows.
+
+    This has now happened twice with the same shape: `has_tools` was omitted
+    and under-counted by ~1650 tokens, then `online` was added to
+    `overhead_tokens` and never to `fit_to_budget`, which under-counted by 73.
+    Parametrised rather than written per flag so the next one cannot repeat it.
+    """
+    counted = ctx.overhead_tokens(
+        None, level, None, has_tools, None, online=online, affect=None, procedure_hint=None
+    )
+    assembled = sum(
+        ctx.estimate_tokens(m.content)
+        for m in ctx.assemble([], level=level, has_tools=has_tools, online=online)
+    )
+
+    assert counted == assembled
+
+
+def test_fit_to_budget_accounts_for_the_online_paragraph() -> None:
+    """The regression for the live bug: with online mode on, the real prefix
+    is 73 tokens larger than the offline one, and `fit_to_budget` used to trim
+    against the offline figure. Sized so the turn only survives if `online` is
+    ignored — which is exactly what it used to do."""
+    offline = ctx.overhead_tokens(None, ctx.PersonaLevel.FULL, None, True, None, online=False)
+    online = ctx.overhead_tokens(None, ctx.PersonaLevel.FULL, None, True, None, online=True)
+    assert online > offline, "the online paragraph is real, or this proves nothing"
+
+    turn = ChatMessage(role=Role.USER, content="x " * 20)
+    # A cap that fits the offline prefix plus the turn, but not the online one.
+    cap = offline + ctx.estimate_tokens(turn.content) + (online - offline) // 2
+
+    kept = ctx.fit_to_budget(
+        [turn], summary=None, hard_cap_tokens=cap, has_tools=True, online=True
+    )
+
+    assert kept == [], "the turn does not fit once the online paragraph is counted"
+
+
+# ── conversation modes ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("level", list(ctx.PersonaLevel))
+@pytest.mark.parametrize("has_tools", [False, True])
+@pytest.mark.parametrize("online", [False, True])
+def test_normal_mode_is_byte_identical_to_no_modes_at_all(
+    level: ctx.PersonaLevel, has_tools: bool, online: bool
+) -> None:
+    """The property that makes modes free for anyone who never uses them.
+
+    NORMAL resolves to exactly the prompt that existed before modes, so the
+    KV cache is untouched and nobody pays a token for a feature they have not
+    switched on."""
+    plain = ctx.stable_prefix(level, has_tools=has_tools, online=online)
+    normal = ctx.stable_prefix(
+        level, has_tools=has_tools, online=online, mode=ctx.ConversationMode.NORMAL
+    )
+
+    assert plain[0].content == normal[0].content
+
+
+@pytest.mark.parametrize("mode", list(ctx.ConversationMode))
+def test_a_mode_prompt_is_stable_across_calls(mode: ctx.ConversationMode) -> None:
+    """Resolved once at import, so the same configuration always yields the
+    same bytes — which is the whole reason this lives in the stable prefix."""
+    first = ctx.stable_prefix(ctx.PersonaLevel.FULL, has_tools=True, mode=mode)
+    second = ctx.stable_prefix(ctx.PersonaLevel.FULL, has_tools=True, mode=mode)
+
+    assert first[0].content == second[0].content
+
+
+def test_no_placeholder_survives_in_any_resolved_prompt() -> None:
+    """Handing a model `{capabilities}` would be showing it the seams."""
+    for content in ctx._PROMPTS.values():  # noqa: SLF001
+        for placeholder in ("{capabilities}", "{memory}", "{label}"):
+            assert placeholder not in content
+
+
+@pytest.mark.parametrize("mode", list(ctx.ConversationMode))
+def test_an_explicit_instruction_still_outranks_the_mode(mode: ctx.ConversationMode) -> None:
+    """`_INSTRUCTION_PRIORITY` exists because "reply with only the number 7"
+    once produced a 662-character refusal. A mode must not re-create that in
+    the other direction — "answer in as few words as possible" arriving after
+    an explicit request for detail would be the same bug.
+
+    Position is the mechanism: the mode block is appended last, downstream of
+    the priority clause, in the same message.
+    """
+    content = ctx.stable_prefix(ctx.PersonaLevel.FULL, has_tools=True, mode=mode)[0].content
+
+    assert "outranks your voice and style" in content
+    if mode is not ctx.ConversationMode.NORMAL:
+        assert "still outranks it" in content
+        assert content.index("outranks your voice") < content.index("still outranks it")
+
+
+@pytest.mark.parametrize("mode", [ctx.ConversationMode.STUDY, ctx.ConversationMode.RESEARCH])
+def test_the_long_modes_release_the_spoken_length_clause(mode: ctx.ConversationMode) -> None:
+    """`_FULL` says "Short sentences; you are often spoken aloud" — which
+    Study and Research contradict directly. They say so by name rather than
+    quietly disagreeing, so the clause and its release sit in one message.
+
+    Matched on "spoken aloud" rather than "Short sentences" because the
+    persona wraps that phrase across a line break; asserting on the wrapped
+    form would be a test of the source formatting, not of the prompt."""
+    content = ctx.stable_prefix(ctx.PersonaLevel.FULL, has_tools=True, mode=mode)[0].content
+
+    assert content.count("spoken aloud") == 2, "the clause, and the mode releasing it"
+    assert "does not apply" in content
+
+
+@pytest.mark.parametrize("mode", list(ctx.ConversationMode))
+def test_a_mode_stays_within_its_token_budget(mode: ctx.ConversationMode) -> None:
+    """~130 tokens is the ceiling. It is paid once, on the turn the mode
+    changes, because the block is in the stable prefix — but the local budget
+    is ~800 and a mode is not entitled to a fifth of it."""
+    base = ctx.overhead_tokens(level=ctx.PersonaLevel.MINIMAL, has_tools=True)
+    with_mode = ctx.overhead_tokens(level=ctx.PersonaLevel.MINIMAL, has_tools=True, mode=mode)
+
+    assert with_mode - base <= 130
+
+
+@pytest.mark.parametrize("mode", list(ctx.ConversationMode))
+def test_overhead_counts_the_mode_block(mode: ctx.ConversationMode) -> None:
+    """The `has_tools` bug and the `online` bug, pre-empted for the new axis:
+    a budget function that does not know about a prompt block trims against a
+    figure that is not the real one."""
+    counted = ctx.overhead_tokens(has_tools=True, mode=mode)
+    assembled = sum(
+        ctx.estimate_tokens(m.content) for m in ctx.assemble([], has_tools=True, mode=mode)
+    )
+
+    assert counted == assembled

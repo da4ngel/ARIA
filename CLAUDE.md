@@ -2108,6 +2108,177 @@ crash reporting and "Export diagnostics". Its acceptance gate — *"clean
 Windows 11 VM, install, first run, everything works"* — needs a VM, and code
 signing needs a certificate this project does not have.
 
+## Uploads that read anything, conversation modes, and a new skin (2026-08-18)
+    pytest sidecar/tests -v      # 1154
+    npm test                     # 124
+
+Three requests in one message. **1154 sidecar tests (+35), 124 renderer (+17),
+ruff, mypy and typecheck clean.**
+
+### "File uploads ain't working properly" — and the four bugs under it
+The dead paperclip was a **stale build**, which Eyaas worked out himself
+mid-planning: `npm run dev` is `electron-vite dev` with no `-w`, so
+`electron/main.ts` and `electron/preload.ts` compile **once at startup and
+never again**. `out/preload/index.js` contained no `pickFiles` at all, so
+`window.aria.pickFiles` was `undefined` and the click threw into a bare
+`catch`. **Main and preload changes need a full restart; only the renderer
+hot-reloads.**
+
+Underneath it, four real bugs — and one he had already hit without knowing:
+
+- **A file that could not be read said so only in the log.** He attached a
+  lecture `.ppt` at 10:31; `.pdf/.docx/.xlsx` were the only parsed formats, so
+  it was skipped and `turn.attachments unreadable=[...]` went nowhere he would
+  look. He found out from a vague answer. There is now an `attachment.read`
+  event per file and the reason appears **in the transcript**, so a week later
+  the history still explains why she never mentioned the lecture.
+- **A drop outside the composer navigated the app to `file:///C:/…`** and
+  replaced the entire UI. The only `preventDefault` was on the composer div,
+  and in compact mode that is a thin strip across a 420×600 window, so missing
+  it was the normal outcome. Fixed in two layers, and the renderer layer
+  **accepts** the drop rather than merely blocking it — the whole window is a
+  drop target now, which fixes the cause rather than the symptom.
+- **`ComposerBar` split paths on `/[\/]/`** — inside a character class that is
+  only the forward slash, so every Windows chip showed the entire absolute
+  path. `useConversation.ts` had the correct `/[\\/]/` all along; both now
+  share one `basename`. Mine, from the same heredoc escaping that bit this
+  session repeatedly.
+- **`chat.send` blocked on reading attachments** while the IPC layer times out
+  at 30s, so a few images made the renderer report a failed send while the
+  sidecar carried on. The read is now a task started in `send()` and awaited
+  inside `_build_context`'s existing `asyncio.gather` — **the excerpt still
+  reaches the first pass, because that point is `_build_context`, not the
+  return of `TurnStarted`.** It now overlaps the history read and the memory
+  retrieval instead of preceding them, so it is faster than before as well.
+
+### `core/extract.py` — "literally most of the widest available ones"
+Asked for all the Office formats, archives, "and other standard ones too".
+Delivered with **zero new dependencies**, which is not a compromise but the
+trade this project has made every time — `webrtcvad`, `beautifulsoup4`,
+`watchdog`, `send2trash`, `APScheduler` and `pywinauto` all went the same way.
+
+- **`.pptx` needs no library.** It is a zip of well-formed XML; `zipfile` +
+  `ElementTree` reads slides *and speaker notes* in ~25 lines. `python-pptx`
+  would pull `lxml` and `XlsxWriter` to parse a format the spec guarantees is
+  well-formed — a worse trade than the hand-rolled HTML parser this project
+  already accepted, against a far harder format. **Slides sort numerically**:
+  a lexical sort gives slide1, slide10, slide2, and a lecture read back in
+  that order looks like the model hallucinating rather than a parser bug.
+- **OpenDocument (`.odt/.ods/.odp`) and `.epub` are the same shape**, and
+  `.rtf` is text with control words — a small stripper, same reasoning as the
+  HTML one.
+- **Archives** (`.zip`, `.tar`, `.tar.gz`) unpack in memory and hand each
+  member back to the same registry. **Safety is not optional here**: this is
+  the one path that unpacks untrusted input, so 60 members, 25MB uncompressed,
+  one level of nesting, and path-traversal members refused outright.
+- **`.doc`, `.ppt`, `.xls` are deliberately unsupported.** OLE2 compound
+  binaries; every option is bad and a crude extractor returns exactly the
+  mojibake `read_file` was just fixed to stop producing. They are detected by
+  name and refused **with the fix** — *save it as .pptx* — which is worth more
+  to someone holding a lecture deck than a page of garbled bytes.
+
+**Two extension sets, and this is the subtle part.** `INDEXABLE` gates the
+throttled background sweep over Documents, Desktop and Downloads; `ATTACHABLE`
+adds archives and is for files handed over deliberately. Sharing one set would
+have ARIA quietly unpacking every zip on the machine, on a timer.
+
+A test caught a real gap: `.ppt` classified as "unsupported" short-circuited
+to a generic "I cannot read .ppt" and never reached the message naming the
+fix. Legacy formats now route through `_read_document` so they get the useful
+one.
+
+### Modes — Normal, Study, Research, Quick, Code
+**Per conversation**, at Eyaas's explicit choice: a new chat starts back at
+Normal, so a mode set last week cannot silently shape today's answers. Held in
+memory keyed by session id — the shape `_summaries` already uses, since
+`sessions` has no settings column and a migration for a value whose whole
+point is not to persist would be storing the wrong thing.
+
+- **The prompt text lives in the stable prefix**, resolved at import into a
+  30-entry matrix (2 persona levels × 3 capability variants × 5 modes). One
+  KV-cache invalidation when the mode changes, none per turn — the trade
+  online mode already makes. Measured: +87 to +129 tokens, ≈62ms of prefill,
+  once.
+- **NORMAL is byte-identical to the prompt that existed before modes**, tested
+  across all six existing combinations. Anyone who never opens the control
+  pays nothing.
+- **A mode never overrides an explicit instruction.** `_INSTRUCTION_PRIORITY`
+  exists because "reply with only the number 7" once produced a 662-character
+  refusal; a mode saying "answer in as few words as possible" is the same bug
+  waiting in the other direction. The mode block is appended *after* it, in
+  the same message, and every mode's preamble says so.
+- **Study and Research release the "short sentences" clause by name**, since
+  they contradict it directly. The clause and its release sit in one message.
+- **A mode changes style and model reach, never permission.** The one
+  non-prompt lever is an optional `bias` argument to `Router.choose` — a
+  parameter, not a save-and-restore around the process-global `_bias`, which
+  would let an overlapping voice turn and typed turn run at each other's bias.
+  It reaches only `_by_bias`, so **stages 0-3 still win and no mode can route
+  something private to the cloud**.
+- **Research reports that it needs online mode rather than switching it on.**
+  The query leaves the machine and that stays a deliberate act; the control
+  offers the fix instead of silently behaving like Normal.
+
+### The retheme — warm slate and an indigo accent
+Token **names** are unchanged and only values move, which is what makes this
+cheap: the tests that assert on colour assert on names.
+
+**The strongest argument for it was one nobody had made.** The old accent
+`#6fd3e0` sat **seven hue-degrees** from `listening` `#5ec8e8` — a focus ring
+and "she is listening" were the same colour, in a palette whose entire stated
+rule is that saturated colour means something. It is now `#6d8cff`, at least
+20° from every saturated state, and there is a test measuring exactly that
+(on **hue**, not luminance contrast — two colours can share a luminance and be
+plainly different, and it was the hue that collided).
+
+- **`src/styles/tokens.js` is now the one source.** The palette was restated
+  in *six* places — the config, `Orb`'s hue map, `Orb`'s separate disconnected
+  value, RGB triples hand-derived from the hex in both `VoiceAura` and
+  `ScreenRim`, and `::selection` hardcoding the accent at 28%. Three of those
+  live in canvas frame loops where only sampling pixels would show a
+  mismatch. CommonJS so `tailwind.config.js` reads the same file rather than a
+  copy, and the triples are **derived**, with a test asserting it.
+- **The neutral ramp gained its missing step.** It jumped 93 → 62 → 44 in
+  lightness, so anything one notch below body text fell two and the hierarchy
+  read flat. `dim` is what a paragraph inside a panel should be.
+- **The 0.62 glass alpha does not move**, and there is a test saying so — it
+  was measured on screen over a bright editor once DWM acrylic arrived, and
+  the config has pre-committed the tiebreak to readability.
+- **The acrylic incident is now un-reintroducible**: `acrylic.test.ts` asserts
+  `transparent: false`, `backgroundColor: '#00000000'` and
+  `backgroundMaterial: 'acrylic'` together, and that no `backgroundColor` in
+  main is opaque. An opaque brand colour there looks like an improvement and
+  silently paints over the material on every frame, which is precisely what
+  happened.
+- **The canvases got new colours and nothing else.** Both have a recorded
+  history of bugs visible only by frame-stepping and pixel sampling; changing
+  their geometry to make them prettier is how that happens again.
+- Typography: Segoe UI Variable ships three optical sizes and the app used
+  one, so 28px headings were being drawn in the 12-17px face. `font-display`
+  and `font-small` now exist, `body` line-height comes down from 1.65 to 1.6
+  for a 420px column, and `font-strong` (620) replaces `font-semibold` because
+  600 blooms on near-black glass.
+- Motion: `src/styles/motion.ts` replaces numbers invented at each call site,
+  and `still()` handles reduced motion in one place rather than five. The orb
+  now **fades** between state colours — it used to cut from grey-blue to
+  violet, which reads as a glitch rather than a change of mind.
+
+### A live bug found while verifying, and a live bug fixed on the way
+- **`fit_to_budget` never knew about `online`.** `overhead_tokens` grew the
+  parameter when online mode shipped and this caller never did, so it passed
+  positionally and `online` silently defaulted to False — trimming against a
+  prefix **73 tokens** smaller than the real one whenever online mode was on.
+  The identical bug the docstring immediately above it describes for
+  `has_tools`, still live, one flag later. The regression test is
+  parametrised over every flag so the next one cannot repeat it.
+- **A second sidecar deleted the running one's handshake, again** — recorded
+  as fixed, and the fix was incomplete. uvicorn runs the lifespan *before* it
+  binds, so a duplicate ran all of `_startup` (overwriting the handshake with
+  its own token) and then all of `_shutdown`, where the token matched and the
+  file went. `main._port_is_free` claims the port before anything else runs.
+  `write_handshake`'s docstring claimed it ran "after the server is listening"
+  — the false premise the whole guard rested on.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -2201,7 +2372,20 @@ PyInstaller bundle that builds and runs. **41 tools** (`type_text` and the
 upload path add none — an upload is the user handing something over, not a
 tool). See the section above.
 
+**Uploads, modes and a retheme landed 2026-08-18** — see the section above.
+Uploads read Office, OpenDocument, epub, RTF and archives with **no new
+dependency**; five conversation modes ship per-conversation; the palette moved
+to warm slate with an indigo accent and now lives in one file instead of six.
+**41 tools, unchanged** — an upload is the user handing something over, and a
+mode is a style, so neither is a tool.
+
 Remaining, in rough order:
+- **None of this has been seen running.** The app has been open on old code
+  throughout, and `electron-vite dev` never rebuilds main or preload — which
+  is what made the paperclip look broken in the first place. **Restart
+  `npm run dev` fully**, then look at it: every panel, both window sizes, all
+  five orb states, and over a bright white editor, which is the case the glass
+  alpha was chosen for.
 - **Speech does not load in the packaged bundle.** `ctranslate2` raises
   `cannot load module more than once per process`, so `faster-whisper` and the
   wake word are dead there; everything else in the bundle works. Three

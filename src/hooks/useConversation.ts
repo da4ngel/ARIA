@@ -34,6 +34,21 @@ export interface Turn {
   messageId?: number
   /** 1, -1, or undefined for un-rated. §9.7's label. */
   rating?: 1 | -1
+  /** Files attached to *this* turn, and how reading each one went.
+   *
+   *  On the user turn, not the assistant's: it is his message that carried
+   *  them. A file that could not be read used to be recorded only in the
+   *  sidecar log, so a skipped `.ppt` lecture surfaced as a vague answer and
+   *  nothing else — the whole point of this field is that the failure is
+   *  visible where he is already looking, and stays in the transcript. */
+  attachments?: AttachmentStatus[]
+}
+
+export interface AttachmentStatus {
+  name: string
+  ok: boolean
+  /** Why, when `ok` is false — and it names the fix, not just the failure. */
+  summary: string
 }
 
 export interface ToolCall {
@@ -231,6 +246,35 @@ export function useConversation(connected: boolean): UseConversation {
         const { turn_id: turnId } = event.params as { turn_id: string }
         if (turnId !== activeTurnId.current) return
         setTurns((prev) => clearStreaming(prev))
+        return
+      }
+
+      // One per attached file, as the sidecar finishes reading it. Attached
+      // to the *user* turn, which is the one that carried the files.
+      if (event.method === 'attachment.read') {
+        const payload = event.params as unknown as {
+          turn_id: string
+          name: string
+          ok: boolean
+          summary: string
+        }
+        if (payload.turn_id !== activeTurnId.current) return
+        setTurns((prev) => {
+          const next = [...prev]
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].role !== 'user') continue
+            const seen = next[i].attachments ?? []
+            next[i] = {
+              ...next[i],
+              attachments: [
+                ...seen.filter((a) => a.name !== payload.name),
+                { name: payload.name, ok: payload.ok, summary: payload.summary },
+              ],
+            }
+            break
+          }
+          return next
+        })
         return
       }
 

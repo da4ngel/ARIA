@@ -32,6 +32,7 @@ from pathlib import Path
 
 import structlog
 
+from sidecar.core import extract
 from sidecar.memory.db import Database
 from sidecar.providers.embeddings import EmbeddingsUnavailable, OllamaEmbeddings
 
@@ -55,16 +56,6 @@ OVERLAP_CHARS = 200
 #: A document yielding more than this is a database dump, not prose.
 MAX_CHUNKS_PER_FILE = 200
 
-TEXT_EXTENSIONS = frozenset(
-    {
-        ".txt", ".md", ".rst", ".log", ".csv",
-        ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml",
-        ".toml", ".ini", ".cfg", ".sql", ".sh", ".ps1", ".html", ".css",
-        ".java", ".c", ".h", ".cpp", ".go", ".rs",
-    }
-)
-DOCUMENT_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx"})
-INDEXABLE = TEXT_EXTENSIONS | DOCUMENT_EXTENSIONS
 
 
 @dataclass
@@ -76,64 +67,22 @@ class IndexStats:
 
 
 # ── reading a document ───────────────────────────────────────────────
+#
+# The parsers moved to `core/extract.py` when attachments needed the same
+# ones plus archives. **The extension policy did not move with them**, and
+# that is the point of the split: this module drives an unattended, throttled
+# walk over Documents, Desktop and Downloads, so it opens only what is cheap
+# and predictable. `ATTACHABLE` — which adds zip and tar — belongs to files a
+# person handed over deliberately, not to a background sweep that would then
+# unpack every archive on the machine.
 
+TEXT_EXTENSIONS = extract.TEXT_EXTENSIONS
+DOCUMENT_EXTENSIONS = extract.DOCUMENT_EXTENSIONS
+INDEXABLE = extract.INDEXABLE
 
-def _read_pdf(path: Path) -> str:
-    from pypdf import PdfReader
-
-    reader = PdfReader(str(path))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def _read_docx(path: Path) -> str:
-    import docx
-
-    document = docx.Document(str(path))
-    parts = [p.text for p in document.paragraphs]
-    # Tables carry most of the content in quotations and invoices, which is
-    # exactly the kind of document this is meant to find.
-    for table in document.tables:
-        for row in table.rows:
-            parts.append(" ".join(cell.text for cell in row.cells))
-    return "\n".join(parts)
-
-
-def _read_xlsx(path: Path) -> str:
-    import openpyxl
-
-    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-    parts: list[str] = []
-    for sheet in workbook.worksheets:
-        parts.append(str(sheet.title))
-        for row in sheet.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None]
-            if cells:
-                parts.append(" ".join(cells))
-    workbook.close()
-    return "\n".join(parts)
-
-
-_READERS: dict[str, Callable[[Path], str]] = {
-    ".pdf": _read_pdf,
-    ".docx": _read_docx,
-    ".xlsx": _read_xlsx,
-}
-
-
-def extract_text(path: Path) -> str:
-    """Whatever text this file has, or "" if it has none worth having.
-
-    Never raises: a corrupt PDF is a normal event in a folder of downloads,
-    and it must cost this file rather than the whole sweep.
-    """
-    reader = _READERS.get(path.suffix.lower())
-    try:
-        if reader is not None:
-            return reader(path)
-        return path.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:  # noqa: BLE001 — one unreadable file is not a failure
-        log.debug("indexer.unreadable", path=str(path), error=str(exc))
-        return ""
+#: Re-exported because `tools/files.py` and `core/attachments.py` both import
+#: it from here, and moving the import site is churn for no gain.
+extract_text = extract.extract_text
 
 
 def chunk(text: str) -> list[str]:

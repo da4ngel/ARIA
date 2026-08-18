@@ -9,6 +9,8 @@
 
 import { AnimatePresence, motion } from 'framer-motion'
 
+import { SPRING } from '@/styles/motion'
+
 interface Props {
   /** What the sidecar heard. Empty until a turn starts. */
   asked: string
@@ -32,8 +34,13 @@ export function Caption({ asked, reply, misheard }: Props): JSX.Element {
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 10 }}
-          transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+          transition={SPRING.settle}
         >
+          {/* Text follows the palette; the background deliberately does not.
+              This card floats over an arbitrary desktop, not over the app's
+              glass, so its job is legibility against unknown pixels, and
+              tokenising it would tie it to a palette tuned for a surface it
+              never sits on. */}
           <div
             className={`max-w-[46rem] rounded-2xl px-5 py-3.5 text-center shadow-2xl backdrop-blur-xl ${
               misheard && !asked && !reply
@@ -44,14 +51,14 @@ export function Caption({ asked, reply, misheard }: Props): JSX.Element {
             }`}
           >
             {misheard && !asked && !reply && (
-              <p className="text-small italic leading-relaxed text-white/40">
+              <p className="text-small italic leading-relaxed text-aria-faint">
                 heard {'“'}
                 {misheard}
                 {'”'}
               </p>
             )}
             {asked && (
-              <p className="text-small leading-relaxed text-white/55">
+              <p className="text-small leading-relaxed text-aria-dim">
                 {'“'}
                 {asked}
                 {'”'}
@@ -59,7 +66,7 @@ export function Caption({ asked, reply, misheard }: Props): JSX.Element {
             )}
             {reply && (
               <p
-                className={`text-body leading-relaxed text-white ${asked ? 'mt-1.5' : ''}`}
+                className={`text-body leading-relaxed text-aria-text ${asked ? 'mt-1.5' : ''}`}
                 // Long answers are spoken, not read. Clamping keeps this a
                 // caption instead of a wall of text over someone's screen.
                 style={{

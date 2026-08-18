@@ -275,6 +275,29 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' }
   })
 
+  // **Nothing navigates this window away from the app. Ever.**
+  //
+  // The case that made this urgent is dropping a file: Chromium's default
+  // action for a dropped file is to navigate to it, so a drop that missed the
+  // composer by a few pixels replaced the entire UI with `file:///C:/…` and
+  // there was no way back short of restarting. In compact mode the composer
+  // is a thin strip across the bottom of a 420×600 window, so missing it is
+  // the normal outcome, not an edge case.
+  //
+  // `webSecurity` and the CSP do not cover this — `default-src 'self'` never
+  // restricted top-level navigation. The renderer is a single React app that
+  // legitimately never navigates anywhere, so the honest rule is "no".
+  win.webContents.on('will-navigate', (event, url) => {
+    const target = new URL(url)
+    const current = new URL(win.webContents.getURL())
+    if (target.origin === current.origin && target.pathname === current.pathname) return
+    event.preventDefault()
+    sendToRenderer('aria:log', {
+      level: 'warn',
+      message: `Blocked a navigation to ${url} — the app never navigates.`,
+    })
+  })
+
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {

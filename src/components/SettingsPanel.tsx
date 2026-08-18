@@ -217,7 +217,7 @@ export function SettingsPanel({
           In Full access nothing ever prompts, so the state with the largest
           consequences was the one with no evidence on screen at all. */}
       <div className="mb-4">
-        <h3 className="text-tiny font-semibold text-aria-text">Permission mode</h3>
+        <h3 className="text-tiny font-strong text-aria-text">Permission mode</h3>
         <div className="mt-1.5 flex gap-1 rounded-xl bg-aria-sunk p-1">
           {MODE_OPTIONS.map((option) => (
             <button

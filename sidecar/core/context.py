@@ -214,16 +214,117 @@ When you know something only approximately, give the approximation and say it is
 approximate. Answer what you do know and flag only what you do not — being
 honest is not a reason to be unhelpful."""
 
-def _persona(template: str, *, has_tools: bool, online: bool = False) -> str:
-    """Fill in what she can reach and what she remembers. The rest is identical."""
+class ConversationMode(StrEnum):
+    """How she should answer this conversation — the ChatGPT-style modes.
+
+    **Per conversation, not global**, at Eyaas's explicit choice: a new chat
+    starts back at NORMAL, so a mode set last week cannot silently shape
+    today's answers. That is the mental model he already has from ChatGPT,
+    and it is the one that fails safe — a forgotten global mode is invisible
+    and changes every reply.
+
+    **A mode changes style and which model is reached for. It never changes
+    what she is allowed to do.** Nothing here touches a tier, a confirmation,
+    `Tool.refuse`, or the `_PRIVATE` routing stage. That separation is the
+    whole reason this can be a one-click control in the header: the tier
+    system is the safety boundary, and CLAUDE.md's own recorded lesson —
+    `allow_danger_tools` dead for a phase because a gate drifted from the
+    thing it gated — is what happens when a cosmetic switch grows teeth.
+    """
+
+    NORMAL = "normal"
+    STUDY = "study"
+    RESEARCH = "research"
+    QUICK = "quick"
+    CODE = "code"
+
+
+#: One preamble for every mode rather than four copies, because the sentence
+#: that matters is the one about precedence: `_INSTRUCTION_PRIORITY` above
+#: still wins. "Reply with only the number 7" must produce "7" in Study mode,
+#: and stating that once means it cannot drift between modes as they are
+#: edited.
+_MODE_PREAMBLE = (
+    "Mode: {label}. This shapes how you answer when he has not said "
+    "otherwise. Anything he asks for explicitly still outranks it."
+)
+
+#: Label and body per mode. NORMAL is empty **on purpose**: it resolves to
+#: today's prompt byte-for-byte, so a user who never opens the control pays
+#: nothing and the KV cache is untouched. There is a test for exactly that.
+_MODE_TEXT: dict[ConversationMode, tuple[str, str]] = {
+    ConversationMode.NORMAL: ("Normal", ""),
+    ConversationMode.STUDY: (
+        "Study",
+        "Teach rather than answer. Give the idea in plain words, one worked "
+        "example, then a single question back that checks it landed. Define a "
+        "term the first time you use it. Do not hand over a final answer he "
+        "asked to work through — but if he asks for it outright, give it. "
+        "Full paragraphs are right here: the short-sentences guidance is "
+        "about being spoken aloud and does not apply in this mode.",
+    ),
+    ConversationMode.RESEARCH: (
+        "Research",
+        "Gather before concluding. Prefer current sources over memory, name "
+        "what you used, and say plainly where sources disagree or where you "
+        "found nothing. Never fill a gap with a plausible guess — an "
+        "uncertain answer said clearly is worth more than a confident one "
+        "that is wrong. Length follows the evidence; the short-sentences "
+        "guidance is about being spoken aloud and does not apply here.",
+    ),
+    ConversationMode.QUICK: (
+        "Quick",
+        "Answer in as few words as the question allows, often one line. No "
+        "preamble, no restating the question, no offer to elaborate. If a "
+        "correct answer genuinely needs more room, take it — being brief is "
+        "never worth being wrong.",
+    ),
+    ConversationMode.CODE: (
+        "Code",
+        "Code first, prose second. One complete runnable block with its "
+        "language tagged, then at most two lines on what to watch for. Do not "
+        "walk through code he can read. If the language or version was not "
+        "given, state the assumption you made.",
+    ),
+}
+
+
+def mode_label(mode: ConversationMode) -> str:
+    return _MODE_TEXT[mode][0]
+
+
+def _mode_block(mode: ConversationMode) -> str:
+    label, body = _MODE_TEXT[mode]
+    if not body:
+        return ""
+    return f"{_MODE_PREAMBLE.format(label=label)} {body}"
+
+
+def _persona(
+    template: str,
+    *,
+    has_tools: bool,
+    online: bool = False,
+    mode: ConversationMode = ConversationMode.NORMAL,
+) -> str:
+    """Fill in what she can reach, what she remembers, and how to answer.
+
+    The mode block goes **last**, so it sits downstream of
+    `_INSTRUCTION_PRIORITY` in the same message. That ordering is the point:
+    an instruction about style must never read as outranking an explicit
+    request, and the volatile section — which is nearer the conversation and
+    therefore louder — is the wrong home for it.
+    """
     if not has_tools:
         capabilities = _NO_TOOLS
     else:
         capabilities = _WITH_TOOLS_ONLINE if online else _WITH_TOOLS
     filled = template.replace("{capabilities}", capabilities)
-    return filled.replace(
-        "{memory}", _MEMORY_WITH_RECALL if has_tools else _MEMORY_NO_RECALL
-    )
+    filled = filled.replace("{memory}", _MEMORY_WITH_RECALL if has_tools else _MEMORY_NO_RECALL)
+    block = _mode_block(mode)
+    # Appended rather than interpolated at a placeholder, so NORMAL leaves the
+    # template byte-identical to what it was before modes existed.
+    return f"{filled}\n\n{block}" if block else filled
 
 
 _MINIMAL = f"""You are Aria, an assistant running locally on Eyaas's Windows machine.
@@ -263,22 +364,43 @@ _TEMPLATES: dict[PersonaLevel, str] = {
     PersonaLevel.FULL: _FULL,
 }
 
-#: Resolved both ways at import. `stable_prefix` picks one, and because the
-#: text is constant per (level, has_tools) the KV cache still survives every
-#: turn — §8.2's stable-first rule.
+#: (has_tools, online) — the three reachable combinations. "online with no
+#: tools" is not one of them: online mode is about a tool existing.
+_VARIANTS: tuple[tuple[bool, bool], ...] = ((False, False), (True, False), (True, True))
+
+#: **Every prompt this app can produce, resolved once at import.**
+#:
+#: Thirty strings - two persona levels by three capability variants by five
+#: modes — built by a comprehension rather than written out, because the
+#: property that matters is not how they are spelled but that a given
+#: configuration always yields byte-identical text. That is what keeps
+#: Ollama's KV cache alive across a conversation (§8.2: a stable prefix costs
+#: 1970ms once and ~790ms a turn after; a volatile one costs ~1750ms *every*
+#: turn), and it is the same guarantee the three dicts below used to give for
+#: their own axes.
+#:
+#: Switching mode invalidates the prefix exactly once, on the turn it changes
+#: — the trade online mode already makes, and the reason mode text lives here
+#: rather than in `volatile_prefix`.
+_PROMPTS: dict[tuple[PersonaLevel, bool, bool, ConversationMode], str] = {
+    (level, has_tools, online, mode): _persona(
+        template, has_tools=has_tools, online=online, mode=mode
+    )
+    for level, template in _TEMPLATES.items()
+    for has_tools, online in _VARIANTS
+    for mode in ConversationMode
+}
+
+#: Views over `_PROMPTS` at NORMAL, kept because callers and tests predate
+#: modes and there is no reason to churn them.
 PERSONA_PROMPTS: dict[PersonaLevel, str] = {
-    level: _persona(template, has_tools=False) for level, template in _TEMPLATES.items()
+    level: _PROMPTS[level, False, False, ConversationMode.NORMAL] for level in _TEMPLATES
 }
 PERSONA_PROMPTS_WITH_TOOLS: dict[PersonaLevel, str] = {
-    level: _persona(template, has_tools=True) for level, template in _TEMPLATES.items()
+    level: _PROMPTS[level, True, False, ConversationMode.NORMAL] for level in _TEMPLATES
 }
-#: And once online mode is on. **Resolved at import like the other two**, so
-#: turning the switch changes the prefix exactly once rather than per turn —
-#: the KV cache survives a conversation either side of it, which is the whole
-#: reason §8.2 wants this text constant.
 PERSONA_PROMPTS_ONLINE: dict[PersonaLevel, str] = {
-    level: _persona(template, has_tools=True, online=True)
-    for level, template in _TEMPLATES.items()
+    level: _PROMPTS[level, True, True, ConversationMode.NORMAL] for level in _TEMPLATES
 }
 
 # Kept as the default so callers that predate model-aware persona still work.
@@ -293,6 +415,7 @@ def stable_prefix(
     *,
     has_tools: bool = False,
     online: bool = False,
+    mode: ConversationMode = ConversationMode.NORMAL,
 ) -> list[ChatMessage]:
     """Content identical across turns. Everything here is KV-cached.
 
@@ -302,11 +425,10 @@ def stable_prefix(
     Phase 3 appends tool schemas to this list — they are stable across turns
     only if the relevance-selection sorts deterministically (§8.2 corollary).
     """
-    if not has_tools:
-        prompts = PERSONA_PROMPTS
-    else:
-        prompts = PERSONA_PROMPTS_ONLINE if online else PERSONA_PROMPTS_WITH_TOOLS
-    return [ChatMessage(role=Role.SYSTEM, content=prompts[level])]
+    # One lookup into the matrix resolved at import. `online` only means
+    # anything with tools, which is why the key normalises it.
+    key = (level, has_tools, has_tools and online, mode)
+    return [ChatMessage(role=Role.SYSTEM, content=_PROMPTS[key])]
 
 
 @dataclass(frozen=True)
@@ -558,6 +680,7 @@ def overhead_tokens(
     online: bool = False,
     affect: str | None = None,
     procedure_hint: str | None = None,
+    mode: ConversationMode = ConversationMode.NORMAL,
 ) -> int:
     """Tokens spent before the conversation even starts.
 
@@ -569,7 +692,7 @@ def overhead_tokens(
     they say anything at all) are smaller ones of the same shape.
     """
     prefix = [
-        *stable_prefix(level, has_tools=has_tools, online=online),
+        *stable_prefix(level, has_tools=has_tools, online=online, mode=mode),
         *volatile_prefix(summary, machine, retrieved, affect, procedure_hint),
     ]
     return sum(estimate_tokens(m.content) for m in prefix)
@@ -586,10 +709,11 @@ def assemble(
     online: bool = False,
     affect: str | None = None,
     procedure_hint: str | None = None,
+    mode: ConversationMode = ConversationMode.NORMAL,
 ) -> list[ChatMessage]:
     """Build the final message list, stable content first."""
     return [
-        *stable_prefix(level, has_tools=has_tools, online=online),
+        *stable_prefix(level, has_tools=has_tools, online=online, mode=mode),
         *volatile_prefix(summary, machine, retrieved, affect, procedure_hint),
         *turns,
     ]
@@ -604,8 +728,10 @@ def fit_to_budget(
     machine: MachineContext | None = None,
     has_tools: bool = False,
     retrieved: str | None = None,
+    online: bool = False,
     affect: str | None = None,
     procedure_hint: str | None = None,
+    mode: ConversationMode = ConversationMode.NORMAL,
 ) -> list[ChatMessage]:
     """Drop oldest turns until the assembled prompt fits. Backstop, not policy.
 
@@ -622,9 +748,27 @@ def fit_to_budget(
     function used to omit them from its own overhead, so it trimmed against a
     budget that was too generous by that much. Phase 5 threads it through
     alongside `retrieved` rather than adding a second under-count.
+
+    **`online` is the same bug, and it was still live.** `overhead_tokens`
+    grew the parameter when online mode shipped; this function never did, so
+    it called it positionally and `online` silently defaulted to False. With
+    online mode on, the `_WITH_TOOLS_ONLINE` paragraph made the real prefix
+    **73 tokens** larger than what this trimmed against — measured, both
+    persona levels. Exactly the shape the paragraph above describes, one flag
+    later. Adding a parameter to a budget function and not to its caller is
+    apparently the recurring mistake here; the guard is
+    `test_overhead_matches_assemble_for_every_combination`.
     """
     overhead = overhead_tokens(
-        summary, level, machine, has_tools, retrieved, affect=affect, procedure_hint=procedure_hint
+        summary,
+        level,
+        machine,
+        has_tools,
+        retrieved,
+        online=online,
+        affect=affect,
+        procedure_hint=procedure_hint,
+        mode=mode,
     )
     budget = hard_cap_tokens - overhead
     if budget <= 0:

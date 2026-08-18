@@ -221,4 +221,49 @@ describe('tool calls', () => {
     render(<ConversationView turns={[rated({ messageId: undefined })]} onRate={() => {}} />)
     expect(screen.queryByLabelText('Good answer')).toBeNull()
   })
+
+  // ── attachments that could not be read ──────────────────────────────
+
+  it('shows why a file was skipped, in the transcript', () => {
+    // The bug: a lecture .ppt was attached, could not be parsed, and the only
+    // record was a log line — so the first he knew of it was a vague answer.
+    render(
+      <ConversationView
+        turns={[
+          {
+            id: 'u1',
+            role: 'user',
+            content: 'summarise this',
+            attachments: [
+              {
+                name: 'lecture.ppt',
+                ok: false,
+                summary:
+                  'lecture.ppt — .ppt is the old binary PowerPoint format. Save as .pptx.',
+              },
+            ],
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.getByText(/old binary PowerPoint format/)).toBeDefined()
+  })
+
+  it('says nothing about files that read fine', () => {
+    render(
+      <ConversationView
+        turns={[
+          {
+            id: 'u1',
+            role: 'user',
+            content: 'summarise this',
+            attachments: [{ name: 'lease.pdf', ok: true, summary: 'lease.pdf — a document.' }],
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.queryByText(/lease.pdf/)).toBeNull()
+  })
 })

@@ -18,6 +18,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -26,7 +27,13 @@ from pydantic import BaseModel
 from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
 from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
-from sidecar.core.router import RouteDecision, Router, RoutingBias, is_tool_shaped
+from sidecar.core.router import (
+    MODE_BIAS,
+    RouteDecision,
+    Router,
+    RoutingBias,
+    is_tool_shaped,
+)
 from sidecar.core.tasks import spawn
 from sidecar.memory import procedures
 from sidecar.memory.db import Database
@@ -90,6 +97,11 @@ TITLE_IDLE_TIMEOUT_S = 90.0
 # Opening History should not queue a model call for every conversation ever had.
 # A few per open catches up over a couple of visits.
 TITLE_BACKFILL_PER_CALL = 3
+# A ceiling on reading attachments, so one pathological file cannot hold a
+# turn open indefinitely. Generous: several images are several cloud round
+# trips, and the point of moving this off the RPC path was to stop racing a
+# timeout, not to introduce a tighter one.
+ATTACHMENT_READ_TIMEOUT_S = 120.0
 
 
 class TurnStarted(BaseModel):
@@ -343,9 +355,20 @@ class ConversationService:
         # later in `_build_context`. Started early so the embed overlaps the
         # message write and the history read.
         self._retrievals: dict[str, asyncio.Task[Retrieved]] = {}
-        #: What the user attached to the turn in flight. Read in `send`,
-        #: injected by `_build_context`, remembered by `_finish`, dropped
-        #: when the turn ends — the same lifetime `_retrievals` has.
+        #: What the user attached to the turn in flight. Started in `send`,
+        #: awaited by `_build_context`, remembered by `_finish`, dropped when
+        #: the turn ends — the same lifetime and the same shape `_retrievals`
+        #: has, for the same reason: it is slow, and the turn should not wait
+        #: on it any longer than the one point that genuinely needs it.
+        #: The conversation mode, per session. **Per conversation rather
+        #: than global**, at Eyaas's explicit choice: a new chat starts at
+        #: NORMAL, so a mode set last week cannot silently shape today's
+        #: answers. In memory and keyed by session id, the shape
+        #: `_summaries` already uses — `sessions` has no settings column,
+        #: and a migration for a value that resets on New Chat would be
+        #: storing something whose whole point is not to persist.
+        self._modes: dict[str, ctx.ConversationMode] = {}
+        self._attachment_reads: dict[str, asyncio.Task[list[attach.Attachment]]] = {}
         self._attachments: dict[str, list[attach.Attachment]] = {}
         # Phase 8: the name of the procedure most recently offered via
         # `send_proactive`, if the very next `send()` turns out to be a plain
@@ -375,6 +398,11 @@ class ConversationService:
     @property
     def selected_model(self) -> str:
         return self._selected
+
+    @property
+    def store(self) -> ConversationStore:
+        """The message store, for callers that need to resolve a session id."""
+        return self._store
 
     @property
     def routing_bias(self) -> RoutingBias:
@@ -510,33 +538,33 @@ class ConversationService:
             self._retrievals[turn_id] = retrieval
             retrieval.add_done_callback(lambda _: None)
 
-        # Read before the turn, not inside it: the excerpt has to be in the
-        # prompt the first pass sees, and an image is a cloud round trip that
-        # would otherwise land after the model had already answered.
-        read: list[attach.Attachment] = []
+        # **Started here, awaited in `_build_context` — not awaited here.**
+        #
+        # The excerpt does have to reach the prompt the first pass sees, but
+        # that point is `_build_context`, not the return of `TurnStarted`, and
+        # the gap between them is the whole fix. Reading is sequential and
+        # every image is a cloud round trip, so a few of them took longer than
+        # the renderer's 30s RPC timeout (`electron/rpc.ts`): the UI reported
+        # a failed send while the sidecar carried happily on, and the two
+        # states diverged. Now the read overlaps the history read and the
+        # memory retrieval instead of preceding them, which is also faster
+        # than it was.
         if attachments:
             describe = getattr(
                 self._registry.providers.get(str(catalog.ProviderName.OPENAI)),
                 "describe_image",
                 None,
             )
-            read = await attach.read_all(attachments, describe)
-            self._attachments[turn_id] = read
-            log.info(
-                "turn.attachments",
-                turn_id=turn_id,
-                files=[a.name for a in read],
-                unreadable=[a.name for a in read if not a.ok],
+            self._attachment_reads[turn_id] = asyncio.create_task(
+                self._read_attachments(turn_id, attachments, describe)
             )
 
-        # Stored with the file names in it, so the transcript still makes
-        # sense a week later — "summarise this" with no record of what "this"
-        # was is a message that reads as a bug in the history panel.
-        stored = (
-            text
-            if not read
-            else f"{text}\n\n[attached: {', '.join(a.name for a in read)}]"
-        )
+        # Names come from the paths, not from the read, precisely because the
+        # read has not finished. That is also more honest: a file that turns
+        # out to be unreadable still belongs in the transcript, or a week
+        # later "summarise this" has no record of what "this" was.
+        names = [Path(p).name for p in attachments or []]
+        stored = text if not names else f"{text}\n\n[attached: {', '.join(names)}]"
         await self._store.add_message(resolved_session, Role.USER, stored.strip())
 
         task = asyncio.create_task(
@@ -550,8 +578,25 @@ class ConversationService:
         task.add_done_callback(lambda _: self._turn_sessions.pop(turn_id, None))
         task.add_done_callback(lambda _: self._retrievals.pop(turn_id, None))
         task.add_done_callback(lambda _: self._attachments.pop(turn_id, None))
+        task.add_done_callback(lambda _: self._attachment_reads.pop(turn_id, None))
 
         return TurnStarted(turn_id=turn_id, session_id=resolved_session)
+
+    def mode_for(self, session_id: str | None) -> ctx.ConversationMode:
+        """This conversation's mode, NORMAL until it is set."""
+        if session_id is None:
+            return ctx.ConversationMode.NORMAL
+        return self._modes.get(session_id, ctx.ConversationMode.NORMAL)
+
+    def set_mode(self, session_id: str, mode: ctx.ConversationMode) -> None:
+        """Set it for one conversation. NORMAL is stored as an absence, so a
+        session that has been set back to NORMAL is indistinguishable from one
+        that never moved — which is what it should be."""
+        if mode is ctx.ConversationMode.NORMAL:
+            self._modes.pop(session_id, None)
+        else:
+            self._modes[session_id] = mode
+        log.info("chat.mode_changed", session_id=session_id, mode=str(mode))
 
     async def _resolve_procedure_reply(
         self, text: str, session_id: str | None, procedure_name: str
@@ -688,12 +733,17 @@ class ConversationService:
             selected=selected,
             available=self._usable_models() if self._usable_models else None,
             spoken=spoken,
+            # The conversation's mode may ask for a different class of model.
+            # It cannot reach past the privacy or explicit-choice stages —
+            # `_by_bias` runs after both.
+            bias=MODE_BIAS[str(self.mode_for(session_id))],
         )
         log.info(
             "turn.routed",
             turn_id=turn_id,
             model=decision.model.id,
             stage=decision.reason.stage,
+            mode=str(self.mode_for(session_id)),
             bias=str(self._router.bias),
             fallbacks=[m.id for m in decision.fallbacks],
         )
@@ -928,6 +978,7 @@ class ConversationService:
                     available=self._usable_models() if self._usable_models else None,
                     step=state.step,
                     spoken=spoken,
+                    bias=MODE_BIAS[str(self.mode_for(session_id))],
                 )
                 current = decision.model
             just_degraded = False
@@ -1464,12 +1515,19 @@ class ConversationService:
         # prone to inventing context (see core/context.PersonaLevel).
         level = info.persona if info else ctx.PersonaLevel.FULL
         cap = min(self._num_ctx, info.context_tokens) if info else self._num_ctx
+        mode = self.mode_for(session_id)
 
         # Gathered, not sequenced: the retrieval started back in `send()` and
         # the history read is a thread hop, so the two overlap instead of
         # adding up.
-        history, retrieval = await asyncio.gather(
-            self._store.history(session_id), self._await_retrieval(turn_id)
+        # Three slow things at once rather than in a row: the history read is
+        # a thread hop, the retrieval started back in `send()`, and so did the
+        # attachment read. Overlapping them makes an attached image cost less
+        # than it did when it blocked `send()` outright.
+        history, retrieval, _ = await asyncio.gather(
+            self._store.history(session_id),
+            self._await_retrieval(turn_id),
+            self._await_attachments(turn_id),
         )
         retrieved = retrieval.render() if retrieval else None
         turns = ctx.to_chat_messages(history)
@@ -1506,6 +1564,7 @@ class ConversationService:
             online=online,
             affect=affect,
             procedure_hint=procedure_hint,
+            mode=mode,
         )
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
@@ -1521,8 +1580,10 @@ class ConversationService:
             machine=machine,
             has_tools=has_tools,
             retrieved=retrieved,
+            online=online,
             affect=affect,
             procedure_hint=procedure_hint,
+            mode=mode,
         )
         messages = ctx.assemble(
             turns,
@@ -1534,6 +1595,7 @@ class ConversationService:
             online=online,
             affect=affect,
             procedure_hint=procedure_hint,
+            mode=mode,
         )
 
         # **After the turns, not in the volatile prefix.** An attached file is
@@ -1547,6 +1609,63 @@ class ConversationService:
         if block:
             messages.append(ChatMessage(role=Role.SYSTEM, content=block))
         return messages
+
+    async def _read_attachments(
+        self, turn_id: str, paths: list[str], describe: object
+    ) -> list[attach.Attachment]:
+        """Read each file, telling the UI about each one as it lands.
+
+        The per-file event is the fix for the bug this whole feature had: a
+        `.ppt` that could not be parsed was recorded in a log line and nowhere
+        else, so the only clue was a vague reply. It doubles as the progress
+        signal — reading is off the RPC path now, and without this the
+        composer would sit silent while several images make cloud round trips.
+        """
+        read: list[attach.Attachment] = []
+        for path in paths:
+            one = await attach.read_one(Path(path), describe)
+            read.append(one)
+            await self._bus.broadcast(
+                Event.ATTACHMENT_READ,
+                {
+                    "turn_id": turn_id,
+                    "name": one.name,
+                    "ok": one.ok,
+                    "summary": one.summary,
+                },
+            )
+        self._attachments[turn_id] = read
+        log.info(
+            "turn.attachments",
+            turn_id=turn_id,
+            files=[a.name for a in read],
+            unreadable=[a.name for a in read if not a.ok],
+        )
+        return read
+
+    async def _await_attachments(self, turn_id: str | None) -> None:
+        """Collect what `send()` started, and never let it hold the turn.
+
+        A pathological file must not hang the answer forever — moving the read
+        off the RPC path removed the *timeout*, not the possibility of a hang,
+        so this is the ceiling. On expiry the turn proceeds with whatever
+        finished, which is the same call `_await_retrieval` makes: losing an
+        attachment costs the answer some context, losing the answer costs
+        everything.
+        """
+        if turn_id is None:
+            return
+        task = self._attachment_reads.get(turn_id)
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=ATTACHMENT_READ_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("turn.attachments_timed_out", turn_id=turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("turn.attachments_failed", turn_id=turn_id, error=str(exc))
 
     async def _await_retrieval(self, turn_id: str | None) -> Retrieved | None:
         """Collect what `send()` started. None when memory is off or it failed.

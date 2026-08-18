@@ -16,17 +16,17 @@
 import { motion, useReducedMotion } from 'framer-motion'
 
 import type { AssistantState } from '@/types/bridge'
+import { SPRING } from '@/styles/motion'
+import { COLORS, HUES } from '@/styles/tokens'
 
 export const ORB_LAYOUT_ID = 'aria-orb'
 
-/** Per-state colour. The app's only saturated hues besides the semantic three. */
-const HUE: Record<AssistantState, string> = {
-  idle: '#9fb0c9',
-  listening: '#5ec8e8',
-  thinking: '#a78bfa',
-  speaking: '#4ade80',
-  acting: '#fbbf24',
-}
+/** Per-state colour, from the one place they are defined.
+ *
+ *  This used to be a literal copy of `tailwind.config.js`'s values, and the
+ *  two canvases carried a third and fourth copy as hand-derived RGB triples.
+ *  Four copies of five colours is four chances for a recolour to half-apply. */
+const HUE = HUES as Record<AssistantState, string>
 
 /** Breathing: period in seconds, and how far the bloom swells. */
 const BREATH: Record<AssistantState, { period: number; swell: number }> = {
@@ -62,7 +62,7 @@ export function Orb({
   level = 0,
 }: OrbProps): JSX.Element {
   const still = useReducedMotion()
-  const hue = connected ? HUE[state] : '#5d6478'
+  const hue = connected ? HUE[state] : COLORS.faint
   const breath = BREATH[state]
   const spin = SPINS.has(state) && connected && !still
 
@@ -79,7 +79,7 @@ export function Orb({
       style={{ width: size, height: size, color: hue }}
       // The size change is the shared-element transition; a spring reads as the
       // orb moving into place rather than the layout jumping.
-      transition={{ type: 'spring', stiffness: 260, damping: 30 }}
+      transition={SPRING.shared}
       title={connected ? `Aria is ${state}` : 'Aria is not connected'}
     >
       {/* Bloom — the soft light that makes it feel lit rather than drawn. */}
@@ -98,10 +98,14 @@ export function Orb({
         transition={{ duration: breath.period, repeat: Infinity, ease: 'easeInOut' }}
       />
 
-      {/* Core — off-centre highlight, so it reads as a sphere and not a disc. */}
+      {/* Core — off-centre highlight, so it reads as a sphere and not a disc.
+          The colour **fades** between states rather than cutting. This is the
+          app's signature element and it used to snap: idle to thinking was an
+          instant swap from grey-blue to violet, which reads as a glitch
+          rather than as a change of mind. */}
       <motion.span
         aria-hidden
-        className="absolute inset-0 rounded-full"
+        className="absolute inset-0 rounded-full transition-[background,box-shadow] duration-300 ease-out"
         style={{
           background: `radial-gradient(circle at 32% 28%, ${
             connected ? '#ffffffcc' : '#ffffff55'

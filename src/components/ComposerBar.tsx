@@ -24,6 +24,18 @@ interface Props {
 const MAX_ROWS = 6
 const LINE_HEIGHT = 21
 
+/** The filename out of an absolute path, on either separator.
+ *
+ *  **`[\\/]`, not `[\/]`.** Inside a character class a backslash before the
+ *  delimiter only escapes the delimiter, so `[\/]` matches the forward slash
+ *  alone — and every Windows path then came back whole, so the chip for
+ *  `C:\Users\…\lease.txt` read as the entire path and the remove button
+ *  announced it. `useConversation.ts` had the correct form all along; this is
+ *  the same helper so the two can no longer disagree. */
+export function basename(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path
+}
+
 export function ComposerBar({
   busy,
   disabled,
@@ -133,11 +145,11 @@ export function ComposerBar({
               className="flex max-w-full items-center gap-1 rounded-md bg-aria-sunk px-1.5 py-0.5 text-micro text-aria-muted"
             >
               <span className="truncate" title={path}>
-                {path.split(/[\/]/).pop()}
+                {basename(path)}
               </span>
               <button
                 type="button"
-                aria-label={`Remove ${path.split(/[\/]/).pop()}`}
+                aria-label={`Remove ${basename(path)}`}
                 onClick={() => setAttached((c) => c.filter((p) => p !== path))}
                 className="interactive shrink-0 rounded text-aria-faint hover:text-aria-text"
               >

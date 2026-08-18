@@ -133,8 +133,12 @@ input:focus-visible {
   outline: none;
 }
 
+/* Through the token, not a copy of it. This was the old accent hardcoded at
+   28%, so it would silently have kept the previous cyan after a recolour —
+   the sixth place the palette was restated. `color-mix` is supported by the
+   Chromium in Electron 31. */
 ::selection {
-  background: rgba(111, 211, 224, 0.28);
+  background: color-mix(in srgb, theme('colors.aria.accent') 28%, transparent);
 }
 
 /* Thin scrollbars. The default Windows bar is heavier than anything else in

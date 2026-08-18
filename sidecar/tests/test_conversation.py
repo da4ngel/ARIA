@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -27,6 +29,7 @@ from sidecar.providers.base import (
 )
 from sidecar.providers.health import HealthTracker
 from sidecar.rpc.events import AssistantState, Event, EventBus
+from sidecar.state import runtime
 from sidecar.tools.permissions import PermissionMode
 
 
@@ -1414,3 +1417,170 @@ async def test_a_turn_without_memory_behaves_exactly_as_before(service) -> None:
 
     assert bus.texts() == "Canberra."
     assert started.session_id
+
+
+# ── attachments no longer block the send, and never fail silently ─────
+
+
+async def test_send_returns_before_the_files_are_read(
+    database: Database, make_service, tmp_path: Path
+) -> None:
+    """The divergent-state bug: reading is sequential and every image is a
+    cloud round trip, so several of them took longer than the renderer's 30s
+    RPC timeout. The UI reported a failed send while the sidecar carried on.
+
+    The excerpt still has to reach the first pass — but that point is
+    `_build_context`, not the return of `TurnStarted`, and the gap between
+    them is the whole fix.
+    """
+    import sidecar.core.attachments as attach_module
+
+    target = tmp_path / "slow.txt"
+    target.write_text("the contents", encoding="utf-8")
+    released = asyncio.Event()
+
+    async def _slow(path: Path, describe: object = None) -> attach_module.Attachment:
+        await released.wait()
+        return attach_module.Attachment(
+            path=path, kind="document", excerpt="x", summary="read", ok=True
+        )
+
+    svc, _bus = tool_service(database, make_service, FakeProvider(chunks=["hi"]), OpenEngine())
+    with patch.object(attach_module, "read_one", _slow):
+        started = await svc.send("what is this", attachments=[str(target)])
+        assert started.turn_id, "send returned while the read was still blocked"
+        released.set()
+        await _drain(svc)
+
+
+async def test_every_attachment_is_reported_to_the_renderer(
+    database: Database, make_service, tmp_path: Path
+) -> None:
+    """The actual bug. An unreadable file was recorded in a log line and
+    nowhere a person would look, so a skipped `.ppt` lecture surfaced only as
+    a vague answer."""
+    good = tmp_path / "notes.txt"
+    good.write_text("readable", encoding="utf-8")
+    bad = tmp_path / "lecture.ppt"
+    bad.write_bytes(b"\xd0\xcf\x11\xe0")
+
+    svc, bus = tool_service(database, make_service, FakeProvider(chunks=["hi"]), OpenEngine())
+    await svc.send("summarise these", attachments=[str(good), str(bad)])
+    await _drain(svc)
+
+    events = bus.of(Event.ATTACHMENT_READ)
+    assert [e["name"] for e in events] == ["notes.txt", "lecture.ppt"]
+    failed = next(e for e in events if not e["ok"])
+    assert ".pptx" in failed["summary"], "the message names the fix, not just the failure"
+
+
+async def test_a_readable_attachment_still_reaches_the_first_pass(
+    database: Database, make_service, tmp_path: Path
+) -> None:
+    """The guarantee the non-blocking move must not break."""
+    target = tmp_path / "lease.txt"
+    target.write_text("The rent is 1250 a month.", encoding="utf-8")
+    provider = FakeProvider(chunks=["ok"])
+
+    svc, _bus = tool_service(database, make_service, provider, OpenEngine())
+    await svc.send("what is the rent", attachments=[str(target)])
+    await _drain(svc)
+
+    sent = "\n".join(m.content for m in provider.calls[0])
+    assert "1250 a month" in sent
+    assert "<untrusted_content>" in sent, "a document is still somebody else's writing"
+
+
+# ── conversation modes ────────────────────────────────────────────────
+
+
+async def test_chat_mode_reads_without_setting_anything(
+    database: Database, make_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.rpc.handlers import chat_mode
+
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+    )
+    session = await svc.new_session()
+    await svc.send("hello", session)
+    monkeypatch.setattr(runtime, "conversation", svc, raising=False)
+    result = await chat_mode({"session_id": session})
+
+    assert result["mode"] == "normal"
+    assert result["label"] == "Normal"
+    assert result["effective_bias"] is None
+
+
+async def test_chat_mode_sets_and_echoes(
+    database: Database, make_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.rpc.handlers import chat_mode
+
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+    )
+    session = await svc.new_session()
+    await svc.send("hello", session)
+    monkeypatch.setattr(runtime, "conversation", svc, raising=False)
+    result = await chat_mode({"session_id": session, "mode": "research"})
+
+    assert result["mode"] == "research"
+    # Research reaches for a better model — but only through the bias, and
+    # only after the privacy and explicit-choice stages have had their say.
+    assert result["effective_bias"] == "quality"
+    assert result["online_required"] is True
+
+
+async def test_chat_mode_rejects_an_unknown_mode(
+    database: Database, make_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.rpc.handlers import chat_mode
+    from sidecar.rpc.protocol import RpcMethodError
+
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+    )
+    session = await svc.new_session()
+    await svc.send("hello", session)
+    monkeypatch.setattr(runtime, "conversation", svc, raising=False)
+    with pytest.raises(RpcMethodError) as raised:
+        await chat_mode({"session_id": session, "mode": "socratic"})
+
+    # Naming the allowed values beats "invalid" — the same courtesy
+    # `models.bias` already extends.
+    assert "study" in str(raised.value)
+
+
+async def test_a_mode_belongs_to_its_own_conversation(
+    database: Database, make_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole reason this is per-conversation rather than a setting: a
+    mode chosen last week must not shape today's answers."""
+    from sidecar.rpc.handlers import chat_mode
+
+    svc = make_service(
+        store=ConversationStore(database),
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+    )
+    first = await svc.new_session()
+    await svc.send("hello", first)
+    monkeypatch.setattr(runtime, "conversation", svc, raising=False)
+    await chat_mode({"session_id": first, "mode": "study"})
+
+    second = await svc.new_session()
+    await svc.send("hello again", second)
+    fresh = await chat_mode({"session_id": second})
+
+    assert fresh["mode"] == "normal", "a new chat starts back at Normal"

@@ -25,6 +25,8 @@
 
 import { useEffect, useRef } from 'react'
 
+import { RGB } from '@/styles/tokens'
+
 export type RimMode = 'listening' | 'speaking' | null
 
 interface Props {
@@ -33,11 +35,9 @@ interface Props {
   getLevel: () => number
 }
 
-/** The orb's hues, so every surface agrees about what state she is in. */
-const HUE: Record<'listening' | 'speaking', [number, number, number]> = {
-  listening: [94, 200, 232],
-  speaking: [74, 222, 128],
-}
+/** The orb's hues as triples, from the one place they are defined — see
+ *  `VoiceAura` for why these are derived rather than written out. */
+const HUE = RGB as Record<'listening' | 'speaking', [number, number, number]>
 
 const ATTACK = 0.28
 const RELEASE = 0.08

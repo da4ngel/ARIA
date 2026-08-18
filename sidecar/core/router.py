@@ -39,6 +39,28 @@ class RoutingBias(StrEnum):
     QUALITY = "quality"  # cloud unless the turn is trivial or private
 
 
+#: What each conversation mode asks of the router. `None` means "leave the
+#: user's own setting alone", which is most of them — a mode is a style, and
+#: only two genuinely imply a different class of model.
+#:
+#: Research and Code want reach: each is the user declaring that the whole
+#: conversation is the kind of turn `_DEEP_VERBS`/`_CODE_HINTS` try to infer
+#: from wording, and a declaration is a cheaper signal than more regex.
+#: Quick asks for FASTEST rather than forced-local — hard-forcing local makes
+#: it answer a hard question badly, and brevity is never worth being wrong.
+#:
+#: None of this reaches the privacy stage: `choose` has already returned by
+#: the time a bias is consulted, so **no mode can send something private to
+#: the cloud.**
+MODE_BIAS: dict[str, RoutingBias | None] = {
+    "normal": None,
+    "study": None,
+    "research": RoutingBias.QUALITY,
+    "quick": RoutingBias.FASTEST,
+    "code": RoutingBias.QUALITY,
+}
+
+
 class RouteReason(BaseModel):
     """Why this model. Surfaced in the UI so routing is never a black box."""
 
@@ -250,6 +272,7 @@ class Router:
         available: set[str] | None = None,
         step: int = 0,
         spoken: bool = False,
+        bias: RoutingBias | None = None,
     ) -> RouteDecision:
         """Pick a model.
 
@@ -293,14 +316,31 @@ class Router:
         if not any(not catalog.require(m).local for m in usable):
             return self._local(usable, "No cloud provider is available right now.")
 
-        return self._by_bias(message, usable, step)
+        return self._by_bias(message, usable, step, bias)
 
     # ── per-bias policy ─────────────────────────────────────────────────
 
-    def _by_bias(self, message: str, usable: set[str], step: int) -> RouteDecision:
-        if self._bias is RoutingBias.QUALITY:
+    def _by_bias(
+        self, message: str, usable: set[str], step: int, bias: RoutingBias | None = None
+    ) -> RouteDecision:
+        """`bias` overrides the instance setting for this call only.
+
+        **A parameter, not a save-and-restore around `self._bias`.** The bias
+        is process-global and a conversation mode is not; mutating a shared
+        field across `await` points would mean a voice turn and a typed turn
+        overlapping — which `busy` shows is a real state — could run at each
+        other's bias, silently and unreproducibly. A parameter is pure, which
+        is what the rest of this module already is.
+
+        This only reaches stage 4. Stages 0-3 — spoken-conversational, an
+        explicit model choice, the `_PRIVATE` check, and no-cloud-available —
+        have already returned by here, so **no mode can route something
+        private to the cloud**.
+        """
+        effective = bias or self._bias
+        if effective is RoutingBias.QUALITY:
             return self._quality_first(message, usable, step)
-        if self._bias is RoutingBias.BALANCED:
+        if effective is RoutingBias.BALANCED:
             return self._balanced(message, usable, step)
         return self._fastest(message, usable, step)
 

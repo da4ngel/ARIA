@@ -11,6 +11,8 @@
  */
 
 import { motion } from 'framer-motion'
+
+import { TWEEN } from '@/styles/motion'
 import { useEffect, useRef } from 'react'
 
 export function Panel({
@@ -57,11 +59,11 @@ export function Panel({
         initial={{ opacity: 0, y: 8, scale: 0.985 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 4, scale: 0.99 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        transition={TWEEN.emphasis}
         className={`glass-pop sheen relative flex max-h-full w-full flex-col overflow-hidden rounded-2xl outline-none ${width}`}
       >
         <header className="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-3">
-          <h2 className="truncate text-small font-semibold text-aria-text">{title}</h2>
+          <h2 className="truncate text-small font-strong text-aria-text">{title}</h2>
           <button
             type="button"
             aria-label="Close"

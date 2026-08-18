@@ -37,7 +37,7 @@ from pathlib import Path
 
 import structlog
 
-from sidecar.memory.indexer import DOCUMENT_EXTENSIONS, TEXT_EXTENSIONS, extract_text
+from sidecar.core import extract
 from sidecar.memory.semantic import FactSource
 
 log = structlog.get_logger(__name__)
@@ -86,10 +86,22 @@ class Attachment:
 
 
 def classify(path: Path) -> str:
+    """image / document / unsupported.
+
+    Documents use `extract.ATTACHABLE`, which is deliberately wider than the
+    background indexer's `INDEXABLE` — it adds archives. A file handed over on
+    purpose earns more effort than one found by a sweep.
+    """
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTENSIONS:
         return "image"
-    if suffix in DOCUMENT_EXTENSIONS or suffix in TEXT_EXTENSIONS:
+    # **`LEGACY_OFFICE` counts as a document even though it cannot be read.**
+    # Classifying `.ppt` as "unsupported" short-circuits to a generic "I
+    # cannot read .ppt", which is barely better than the silence it replaced.
+    # Routing it through `_read_document` gets `extract_or_raise`'s message
+    # instead — the one that says *save it as .pptx* — which is the entire
+    # point of having detected it by name.
+    if suffix in extract.ATTACHABLE or suffix in extract.LEGACY_OFFICE or not suffix:
         return "document"
     return "unsupported"
 
@@ -114,9 +126,29 @@ def _to_jpeg_b64(path: Path) -> str:
 
 
 async def _read_document(path: Path) -> Attachment:
-    # `extract_text` never raises — a corrupt PDF is a normal event — so an
-    # empty string is "nothing readable in it", not "it failed".
-    text = (await asyncio.to_thread(extract_text, path)).strip()
+    """Text out of a document, or a reason the user can act on.
+
+    **`extract_or_raise`, not `extract_text`.** The silent version is what the
+    background sweep wants — one corrupt PDF in Downloads must not stop the
+    walk. A file the user chose to hand over is the opposite case: he attached
+    a lecture `.ppt`, it was skipped, and the only trace was a log line he was
+    never going to read. Here the reason is the point.
+    """
+    try:
+        text = (await asyncio.to_thread(extract.extract_or_raise, path)).strip()
+    except extract.Unsupported as exc:
+        return Attachment(
+            path=path, kind="document", excerpt="", summary=f"{path.name} — {exc}", ok=False
+        )
+    except Exception as exc:  # noqa: BLE001 — a broken file is not a failed turn
+        log.warning("attachment.unreadable", path=str(path), error=str(exc))
+        return Attachment(
+            path=path,
+            kind="document",
+            excerpt="",
+            summary=f"{path.name} — I could not read that file ({exc}).",
+            ok=False,
+        )
     if not text:
         return Attachment(
             path=path,
@@ -208,7 +240,8 @@ async def read_one(path: Path, describe: object = None) -> Attachment:
         excerpt="",
         summary=(
             f"{path.name} — I cannot read {path.suffix or 'that kind of file'}. "
-            f"Documents, spreadsheets, plain text and images all work."
+            f"Documents, slides, spreadsheets, plain text, archives and images "
+            f"all work."
         ),
         ok=False,
     )

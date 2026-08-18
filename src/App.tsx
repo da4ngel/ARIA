@@ -27,6 +27,7 @@ import { Shortcuts } from '@/components/Shortcuts'
 import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
 import { MemoryPanel } from '@/components/MemoryPanel'
 import { FilesPanel } from '@/components/FilesPanel'
+import { ModeSelector } from '@/components/ModeSelector'
 import { PermissionModeChip } from '@/components/PermissionModeChip'
 import { ToolsPanel } from '@/components/ToolsPanel'
 import { VoicePanel } from '@/components/VoicePanel'
@@ -35,6 +36,7 @@ import { useAudio } from '@/hooks/useAudio'
 import { useConfirm } from '@/hooks/useConfirm'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
+import { useConversationMode } from '@/hooks/useConversationMode'
 import { usePermissionMode } from '@/hooks/usePermissionMode'
 import { useHandsFree } from '@/hooks/useHandsFree'
 import { usePublishVoiceLevel } from '@/hooks/usePublishVoiceLevel'
@@ -60,6 +62,8 @@ export default function App(): JSX.Element {
   // value. Three independent fetches could disagree, and a selector that
   // disagrees with what is actually enforced is worse than none.
   const permissions = usePermissionMode(connected)
+  // Per conversation, so it re-reads whenever the open chat changes.
+  const answerMode = useConversationMode(sessionId, connected)
   // Handed from the Files panel to the composer. A one-shot value rather
   // than shared state: the composer owns its own attachment list, and two
   // places holding that would eventually disagree.
@@ -121,6 +125,34 @@ export default function App(): JSX.Element {
     if (chatsInMenu) setOverlay(null)
     sidebar.toggle()
   }, [chatsInMenu, sidebar])
+
+  // **The whole window is a drop target, and a drop can never navigate.**
+  //
+  // Two problems, one handler. Chromium's default for a dropped file is to
+  // navigate to it, so a drop that missed the composer replaced the entire UI
+  // with `file:///C:/…` — and in compact mode the composer is a thin strip
+  // across the bottom of a 420×600 window, so missing it is the normal
+  // outcome rather than an edge case. Preventing the default fixes the crash;
+  // accepting the file here fixes the thing that caused it.
+  //
+  // `electron/main.ts` still refuses the navigation as a backstop, because
+  // this handler cannot run if the renderer has already been replaced.
+  useEffect(() => {
+    const over = (event: DragEvent): void => event.preventDefault()
+    const drop = (event: DragEvent): void => {
+      event.preventDefault()
+      const paths = Array.from(event.dataTransfer?.files ?? [])
+        .map((file) => (file as File & { path?: string }).path ?? '')
+        .filter(Boolean)
+      if (paths.length > 0) setPendingAttachment(paths[0])
+    }
+    window.addEventListener('dragover', over)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('drop', drop)
+    }
+  }, [])
 
   // One keyboard map, so Esc has a defined meaning at every moment: close what
   // is on top, and only cancel a turn when nothing is covering it.
@@ -294,13 +326,26 @@ export default function App(): JSX.Element {
               }}
             />
             <footer className="mt-1.5 flex items-center justify-between px-0.5 text-micro text-aria-faint">
-              <button
-                type="button"
-                onClick={() => setOverlay('shortcuts')}
-                className="interactive rounded px-1 py-0.5 hover:text-aria-muted"
-              >
-                Shortcuts
-              </button>
+              <div className="flex items-center gap-1">
+                {/* In the composer, not the header: the mode belongs to the
+                    message about to be sent, and the header already carries
+                    four controls in a 420px window. */}
+                <ModeSelector
+                  mode={answerMode.mode}
+                  label={answerMode.label}
+                  needsOnline={answerMode.needsOnline}
+                  disabled={!connected}
+                  onSelect={(next) => void answerMode.setMode(next)}
+                  onEnableOnline={() => setOverlay('settings')}
+                />
+                <button
+                  type="button"
+                  onClick={() => setOverlay('shortcuts')}
+                  className="interactive rounded px-1 py-0.5 hover:text-aria-muted"
+                >
+                  Shortcuts
+                </button>
+              </div>
               {/* The Phase 1 gate is a latency number, so it stays visible. */}
               {lastFirstTokenMs !== null && (
                 <span

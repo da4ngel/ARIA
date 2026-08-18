@@ -112,7 +112,7 @@ export function Sidebar({
       <div className={`flex items-center gap-2 pb-2 ${collapsed ? 'justify-center' : 'px-1.5'}`}>
         <Orb state={orbState} connected={connected} size={20} level={orbLevel} />
         {!collapsed && (
-          <span className="flex-1 truncate text-small font-semibold tracking-tight">Aria</span>
+          <span className="flex-1 truncate text-small font-strong tracking-tight">Aria</span>
         )}
         {!collapsed && canExpand && (
           <button

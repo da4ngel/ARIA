@@ -1369,3 +1369,60 @@ def _invalidate_finder_scan() -> None:
     from sidecar.tools.finder import invalidate_scan
 
     invalidate_scan()
+
+
+@method("chat.mode")
+async def chat_mode(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set a conversation's mode. Omit `mode` to read.
+
+    The read-or-write shape `models.bias`, `permissions.mode` and
+    `settings.online` all already use: pass the value to change it, pass
+    nothing to read it, and either way get the current state back.
+
+    **Scoped to one conversation, not global.** A new chat starts at NORMAL,
+    so a mode chosen last week cannot quietly shape today's answers — the
+    behaviour Eyaas asked for, and the one that fails safe, because a
+    forgotten global mode is invisible and changes every reply.
+
+    Research reports `online_required` rather than turning online mode on by
+    itself. The query leaves the machine, and `settings.online` is deliberate
+    for that reason; a style control silently starting to send traffic off the
+    machine would be exactly the kind of gate that should not move on its own.
+    """
+    from sidecar.core.context import ConversationMode, mode_label
+    from sidecar.core.router import MODE_BIAS
+    from sidecar.state import runtime
+
+    conversation = runtime.require_conversation()
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        session_id = await conversation.store.latest_session_id()
+    if session_id is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "There is no conversation yet.")
+
+    requested = params.get("mode")
+    if requested is not None:
+        try:
+            chosen = ConversationMode(str(requested))
+        except ValueError as exc:
+            allowed = ", ".join(m.value for m in ConversationMode)
+            raise RpcMethodError(
+                ErrorCode.INVALID_PARAMS, f"Unknown mode {requested!r}. Allowed: {allowed}."
+            ) from exc
+        conversation.set_mode(session_id, chosen)
+
+    mode = conversation.mode_for(session_id)
+    bias = MODE_BIAS[str(mode)]
+    return {
+        "session_id": session_id,
+        "mode": str(mode),
+        "label": mode_label(mode),
+        # "On" is not the same as "working" — the `settings.online` lesson.
+        # Research without a web tool is a real state and the UI has to be
+        # able to say so rather than leaving her to explain it in a refusal.
+        "online_required": mode is ConversationMode.RESEARCH,
+        "online_enabled": runtime.online_mode,
+        # So `ModelPicker`'s own bias control can say it has been overridden
+        # rather than displaying a setting that is not in force.
+        "effective_bias": str(bias) if bias else None,
+    }

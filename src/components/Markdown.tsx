@@ -42,7 +42,7 @@ function textOf(node: ReactNode): string {
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): JSX.Element {
   return (
-    <div className="space-y-2 text-small leading-relaxed [&_a]:text-sky-400 [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:m-0 [&_strong]:font-semibold">
+    <div className="space-y-2 text-small leading-relaxed [&_a]:text-sky-400 [&_a]:underline [&_li]:ml-4 [&_li]:list-disc [&_p]:m-0 [&_strong]:font-strong">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

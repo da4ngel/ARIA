@@ -41,11 +41,23 @@ function CopyTurn({ text }: { text: string }): JSX.Element {
 }
 
 function UserTurn({ turn }: { turn: Turn }): JSX.Element {
+  const failed = (turn.attachments ?? []).filter((a) => !a.ok)
   return (
-    <div className="flex justify-end">
+    <div className="flex flex-col items-end gap-1">
       <div className="raised rim max-w-[85%] rounded-2xl rounded-br-md px-3 py-2 text-small">
         <p className="whitespace-pre-wrap break-words">{turn.content}</p>
       </div>
+      {/* A file she could not read, said where he is looking.
+          Before this it went to `turn.attachments unreadable=[...]` in the
+          sidecar log and nowhere else, so a skipped `.ppt` lecture showed up
+          only as a vague answer. In the transcript rather than a toast, so a
+          week later the history still explains why she never mentioned it —
+          and the sidecar's message names the fix, not just the failure. */}
+      {failed.map((attachment) => (
+        <p key={attachment.name} className="max-w-[85%] text-right text-micro text-aria-warn">
+          {attachment.summary}
+        </p>
+      ))}
     </div>
   )
 }

@@ -18,6 +18,8 @@
 
 import { useEffect, useRef } from 'react'
 
+import { RGB } from '@/styles/tokens'
+
 export type AuraMode = 'listening' | 'speaking' | null
 
 interface Props {
@@ -26,11 +28,12 @@ interface Props {
   getLevel: () => number
 }
 
-/** Matches the orb's own hues, so the two never disagree about the state. */
-const HUE: Record<'listening' | 'speaking', [number, number, number]> = {
-  listening: [94, 200, 232], // #5ec8e8
-  speaking: [74, 222, 128], // #4ade80
-}
+/** The orb's own hues as triples, **derived rather than typed**.
+ *
+ *  Hand-converting the hex is exactly how this drifted from the config: a
+ *  recolour changed the palette and left the aura painting the old one, in a
+ *  frame loop where only sampling pixels would have shown it. */
+const HUE = RGB as Record<'listening' | 'speaking', [number, number, number]>
 
 const WAVES = 3
 /** Clear of the composer, which is ~56px of input plus its margin. Drawn any

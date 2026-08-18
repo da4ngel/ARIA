@@ -78,6 +78,18 @@ class Event(StrEnum):
     # own payload shape. Rate-limited and self-checked before this ever fires
     # (`persona/proactivity.py`); the renderer's job is only to show it.
     PROACTIVE = "proactive"
+    # One per attached file, as each is read. `{turn_id, name, ok, summary}`.
+    #
+    # **This exists because a skip had nowhere to go.** A lecture `.ppt` was
+    # attached, could not be parsed, and the only record was
+    # `turn.attachments unreadable=[...]` in the log — so the user found out
+    # from a vague reply rather than from the app. A file that was ignored has
+    # to say so where the person is actually looking.
+    #
+    # It is also the progress signal: reading is off the RPC path now, and an
+    # image is a cloud round trip, so without this the composer would sit
+    # silent for however long several of them take.
+    ATTACHMENT_READ = "attachment.read"
 
 
 class Sender(Protocol):

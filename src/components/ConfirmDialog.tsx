@@ -170,7 +170,7 @@ function TypeTargetView({ preview }: { preview: TypeTarget }): JSX.Element {
   return (
     <div className="mt-3 rounded-lg bg-black/25 p-2.5">
       <p className="text-tiny text-aria-text">
-        Into <span className="font-semibold">{preview.window}</span>
+        Into <span className="font-strong">{preview.window}</span>
       </p>
       <p className="mt-0.5 text-micro text-aria-faint">
         {preview.chars.toLocaleString()} characters,{' '}

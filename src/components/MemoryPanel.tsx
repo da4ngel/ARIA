@@ -177,7 +177,7 @@ export function MemoryPanel({ onClose }: { onClose: () => void }): JSX.Element {
       )}
 
       <section className="mt-5">
-        <h3 className="text-tiny font-semibold text-aria-text">
+        <h3 className="text-tiny font-strong text-aria-text">
           Facts{stats && ` (${stats.facts})`}
         </h3>
         <ul className="mt-1.5 space-y-1">
@@ -200,7 +200,7 @@ export function MemoryPanel({ onClose }: { onClose: () => void }): JSX.Element {
       </section>
 
       <section className="mt-5">
-        <h3 className="text-tiny font-semibold text-aria-text">
+        <h3 className="text-tiny font-strong text-aria-text">
           Conversations{stats && ` (${stats.episodes})`}
         </h3>
         <ul className="mt-1.5 space-y-1">

@@ -52,7 +52,7 @@ function DetailSheet({ entry }: { entry: ModelAvailability }): JSX.Element {
   const { model } = entry
   return (
     <div className="border-t border-white/5 bg-aria-sunk px-3 py-2.5">
-      <p className="text-tiny font-semibold text-aria-text">{model.label}</p>
+      <p className="text-tiny font-strong text-aria-text">{model.label}</p>
 
       {model.best_for ? (
         <p className="mt-0.5 text-micro leading-relaxed text-aria-muted">{model.best_for}</p>

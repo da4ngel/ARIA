@@ -241,7 +241,7 @@ export function HistoryPanel({
   if (isRail) {
     return (
       <div className="flex h-full flex-col p-3">
-        <h2 className="px-0.5 text-small font-semibold text-aria-text">Chats</h2>
+        <h2 className="px-0.5 text-small font-strong text-aria-text">Chats</h2>
         {body}
       </div>
     )

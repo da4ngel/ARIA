@@ -43,7 +43,13 @@ export function EmptyState({
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.12, duration: 0.3 }}
       >
-        <h1 className="text-lead font-semibold tracking-tight text-aria-text">Aria</h1>
+        {/* `text-hero` existed in the scale with zero uses. A 28px display line
+            is exactly what a clean empty state wants, and `font-display` is the
+            optical size Segoe UI Variable draws for that size — the reason large
+            type here used to look soft. */}
+        <h1 className="font-display text-hero font-strong tracking-tightest text-aria-text">
+          Aria
+        </h1>
         <p className="text-tiny text-aria-muted">
           {connected ? 'Running on this machine' : 'Waiting for the brain to start'}
         </p>
