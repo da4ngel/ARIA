@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { ConversationView } from '@/components/ConversationView'
 import type { ToolCall, Turn } from '@/hooks/useConversation'
@@ -265,5 +265,38 @@ describe('tool calls', () => {
     )
 
     expect(screen.queryByText(/lease.pdf/)).toBeNull()
+  })
+})
+
+function assistant(overrides: Partial<Turn> = {}): Turn {
+  return { id: 'a1', role: 'assistant', content: 'Canberra.', ...overrides }
+}
+
+describe('reading a reply aloud', () => {
+  it('offers a speak button on a finished reply', () => {
+    // Eyaas: "when an output is generated, it starts to speak, i dont want
+    // that way — there should a mic button at the end of the response."
+    // A typed turn is silent now; this is how it gets a voice on request.
+    render(<ConversationView turns={[assistant({ content: 'Canberra.' })]} />)
+
+    expect(screen.getByLabelText('Read this reply aloud')).toBeDefined()
+  })
+
+  it('asks the sidecar to say exactly what is on screen', () => {
+    const call = vi.fn(() => Promise.resolve({ ok: true }))
+    // @ts-expect-error — the button only reaches for `call`.
+    window.aria = { call }
+    render(<ConversationView turns={[assistant({ content: 'Canberra.' })]} />)
+
+    fireEvent.click(screen.getByLabelText('Read this reply aloud'))
+
+    expect(call).toHaveBeenCalledWith('voice.speak', { text: 'Canberra.' })
+  })
+
+  it('does not offer it while the reply is still arriving', () => {
+    // Half a sentence read aloud is worse than none.
+    render(<ConversationView turns={[assistant({ content: 'Canb', streaming: true })]} />)
+
+    expect(screen.queryByLabelText('Read this reply aloud')).toBeNull()
   })
 })

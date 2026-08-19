@@ -27,19 +27,23 @@ from sidecar.tools.registry import Tier, ToolContext, ToolResult, tool
 
 log = structlog.get_logger(__name__)
 
-_DESCRIPTION = """Ask him to choose, when his answer changes what you do next.
+_DESCRIPTION = """Ask him to choose, with options he clicks rather than types.
 
-Use this only when you are genuinely blocked: two or more ways forward, and
+**If he asks you to ask him something — "ask me some questions", "quiz me",
+"give me options" — call this. That is the request itself, not a hint.** Never
+write the choices out as A) B) C) in your reply: that is the thing this
+replaces, and it makes him type an answer you could have collected in a click.
+
+Also call it when you are genuinely blocked: two or more ways forward, and
 picking wrong would mean doing the work twice. Ask everything you need in one
 call — up to 4 questions, each with 2-4 options — because you get one of these
 per turn.
 
-Do NOT use it for: something you can infer from what he already said; a
+Do NOT call it for: something you can infer from what he already said; a
 question with an obvious default (pick it, do the work, say what you assumed);
-permission to do something (that already has its own confirmation); a
-preference that does not change the outcome; or anything you could simply
-answer yourself. Guessing well and saying so is almost always better than
-asking.
+permission to do something (that has its own confirmation); or anything you
+could simply answer yourself. Unprompted, guessing well and saying so is
+usually better than asking.
 
 An option's `description` should say what happens if he picks it, not restate
 the label. Do not add an "Other" option — one is always added for you."""

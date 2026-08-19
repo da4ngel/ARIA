@@ -41,6 +41,31 @@ function CopyTurn({ text }: { text: string }): JSX.Element {
   )
 }
 
+function SpeakTurn({ text }: { text: string }): JSX.Element {
+  const [state, setState] = useState<'idle' | 'speaking' | 'unavailable'>('idle')
+  return (
+    <button
+      type="button"
+      aria-label="Read this reply aloud"
+      title={state === 'unavailable' ? 'No voice model installed' : 'Read aloud'}
+      disabled={state !== 'idle'}
+      onClick={() => {
+        setState('speaking')
+        void window.aria
+          .call<{ ok: boolean }>('voice.speak', { text })
+          .then((result) => setState(result.ok ? 'idle' : 'unavailable'))
+          // The audio is already playing by the time this resolves — the call
+          // returns when synthesis finishes, not when playback does — so a
+          // failure here is about reaching the sidecar, not about the sound.
+          .catch(() => setState('idle'))
+      }}
+      className="interactive rounded px-1.5 py-0.5 text-micro text-aria-faint hover:text-aria-text disabled:opacity-40"
+    >
+      {state === 'unavailable' ? 'no voice' : state === 'speaking' ? 'speaking…' : 'speak'}
+    </button>
+  )
+}
+
 function UserTurn({ turn }: { turn: Turn }): JSX.Element {
   const failed = (turn.attachments ?? []).filter((a) => !a.ok)
   return (
@@ -178,6 +203,7 @@ function AssistantTurn({
         )}
         {!turn.streaming && turn.content && (
           <span className="opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+            <SpeakTurn text={turn.content} />
             <CopyTurn text={turn.content} />
           </span>
         )}

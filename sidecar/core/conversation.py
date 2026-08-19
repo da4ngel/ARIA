@@ -888,8 +888,18 @@ class ConversationService:
         provider = self._registry.for_model(info)
         await self._free_vram_for(info)
         first_token_ms: float | None = None
+        # **Only a turn she was *spoken to* answers aloud.** Eyaas: "when an
+        # output is generated, it starts to speak, i dont want that way."
+        # Reading a typed reply back is noise — he is looking at it — and it is
+        # the same mistake in the other direction from hands-free, where not
+        # speaking would strand him. `SpeechStream.active` already keys off a
+        # `None` engine, so this needs no branch anywhere else, and
+        # `voice.speak` is what plays a reply on request.
         speech = SpeechStream(
-            self._tts, self._bus, started, speed=await self._current_speech_speed()
+            self._tts if spoken else None,
+            self._bus,
+            started,
+            speed=await self._current_speech_speed(),
         )
 
         async for delta in provider.stream_chat(
@@ -1838,6 +1848,34 @@ class ConversationService:
             log.warning("affect.load_failed", exc_info=True)
             return None
         return affect_module.render(state, datetime.now().astimezone())
+
+    async def speak(self, text: str) -> bool:
+        """Say a reply aloud, on request. False when there is no voice engine.
+
+        The other half of not speaking every typed turn: he asked for a button
+        on the reply rather than audio he did not ask for, so this is what that
+        button calls.
+
+        **Built on `SpeechStream`, not a second synthesis path.** It already
+        chunks on clause boundaries, caps a chunk's length, numbers the pieces
+        so the renderer plays them in order, and swallows a failed chunk rather
+        than failing the caller. A simpler "synthesise the whole string" would
+        be a different-sounding voice for the same words, and a 600-word reply
+        in one breath is exactly what `FIRST_CHUNK_MAX_CHARS` exists to stop.
+        """
+        stream = SpeechStream(
+            self._tts, self._bus, time.perf_counter(), speed=await self._current_speech_speed()
+        )
+        if not stream.active:
+            return False
+
+        # Its own id, so `audio.stop` for this playback cannot cancel a turn —
+        # and so the renderer's per-turn ordering keeps working.
+        turn_id = f"say_{uuid.uuid4().hex[:12]}"
+        stream.feed(text)
+        await stream.drain(turn_id)
+        await stream.finish(turn_id)
+        return True
 
     async def _current_speech_speed(self) -> float:
         """Phase 8 voice polish's affect-driven nudge to `KokoroTTS.synthesize`.

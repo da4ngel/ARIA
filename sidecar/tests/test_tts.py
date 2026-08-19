@@ -261,7 +261,10 @@ async def test_reasoning_is_never_spoken(database: Database) -> None:
         tts=tts,
     )
     try:
-        await svc.send("what is the capital of Australia")
+        # `spoken=True`: a typed turn is deliberately silent now, and this
+        # test is about *what* is spoken, not *whether*. The rule itself has
+        # its own test below.
+        await svc.send("what is the capital of Australia", spoken=True)
         for _ in range(400):
             if not svc._tasks:  # noqa: SLF001
                 break
@@ -403,3 +406,99 @@ def test_generation_options_are_untouched_by_speech() -> None:
     """Voice must not change what the model is asked for."""
     assert GenerationOptions().num_ctx == 8192
     assert ChatMessage(role="user", content="hi").content == "hi"
+
+
+
+class EchoProvider:
+    """A provider that answers immediately. The turns below are about whether
+    speech happens at all, not about what the model said."""
+
+    name = "fake"
+
+    async def available(self) -> bool:
+        return True
+
+    async def warm(self, model: str) -> float:
+        return 1.0
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str,
+        options: GenerationOptions | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamDelta]:
+        yield StreamDelta(text="Canberra.")
+        yield StreamDelta(done=True)
+
+    async def aclose(self) -> None: ...
+
+
+async def test_a_typed_turn_does_not_read_itself_aloud(database: Database) -> None:
+    """Eyaas: *"when an output is generated, it starts to speak, i dont want
+    that way."*
+
+    Reading back a reply he is looking at is noise. Hands-free is the opposite
+    case and keeps speaking on its own, because there nobody is looking — so
+    the rule is "she answers aloud when she was spoken to", not a setting.
+    `voice.speak` is what plays a typed reply on request.
+    """
+    tts = FakeTTS()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=EchoProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+        tts=tts,
+    )
+    try:
+        await svc.send("what is the capital of Australia")
+        for _ in range(400):
+            if not svc._tasks:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await svc.shutdown()
+
+    assert tts.spoken == [], "a typed turn spoke without being asked to"
+
+
+async def test_asking_for_it_speaks_the_whole_reply(database: Database) -> None:
+    """The button's half of the bargain — and it goes through `SpeechStream`,
+    so a long reply is still chunked on clause boundaries rather than arriving
+    as one unbounded breath."""
+    tts = FakeTTS()
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=EchoProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+        tts=tts,
+    )
+    try:
+        spoke = await svc.speak("Canberra. It has been the capital since 1913.")
+    finally:
+        await svc.shutdown()
+
+    assert spoke is True
+    assert " ".join(tts.spoken).strip().startswith("Canberra.")
+    assert "1913" in " ".join(tts.spoken)
+
+
+async def test_asking_for_it_with_no_voice_says_so_rather_than_failing(
+    database: Database,
+) -> None:
+    """No weights is a real state with an honest answer — the button greys
+    itself out instead of doing nothing visible."""
+    svc = ConversationService(
+        store=ConversationStore(database),
+        provider=EchoProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+        tts=None,
+    )
+    try:
+        assert await svc.speak("Canberra.") is False
+    finally:
+        await svc.shutdown()

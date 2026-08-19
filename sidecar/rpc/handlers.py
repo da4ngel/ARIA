@@ -146,6 +146,26 @@ async def chat_cancel(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": cancelled}
 
 
+@method("voice.speak")
+async def voice_speak(params: dict[str, Any]) -> dict[str, Any]:
+    """Read one reply aloud, because he pressed the button on it.
+
+    Typed turns no longer speak by themselves. This is deliberate rather than
+    a setting: hearing a reply you are already reading is noise, and hands-free
+    still speaks on its own because there nobody is looking.
+    """
+    from sidecar.state import runtime
+
+    text = params.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "text is required.")
+
+    spoke = await runtime.require_conversation().speak(text)
+    # Not an error: no voice weights is a real state with an honest answer,
+    # and the button can grey itself out rather than failing silently.
+    return {"ok": spoke, "reason": None if spoke else "no_voice"}
+
+
 @method("question.answer")
 async def question_answer(params: dict[str, Any]) -> dict[str, Any]:
     """Answer a question she is waiting on (`core/questions.py`).

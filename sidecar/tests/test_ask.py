@@ -104,11 +104,30 @@ def test_the_description_spends_itself_on_when_not_to_ask() -> None:
     # test already carries for "spoken aloud".
     description = " ".join(ask_tool().description.lower().split())
 
-    assert "do not use it for" in description
+    assert "do not call it for" in description
     assert "infer" in description
     assert "obvious default" in description
     # And it must say the batch is the point, or it will ask four times.
     assert "one call" in description
+
+
+def test_being_asked_to_ask_is_itself_the_trigger() -> None:
+    """**The first restriction overshot, and Eyaas caught it on screen.**
+
+    Asked "can u ask me some qustions", she wrote the multiple choice out as
+    markdown — *"A) beginner  B) some algebra  C) comfortable … Reply like: 1A
+    2B 3A 4C"* — because the description said to use the tool only when
+    "genuinely blocked", and being asked to ask is not being blocked. The tool
+    was registered and offered; she read the restriction and obeyed it.
+
+    So the explicit request is now named first, and writing the options as
+    prose is named as the thing this replaces.
+    """
+    description = " ".join(ask_tool().description.lower().split())
+
+    assert "ask me some questions" in description
+    assert "quiz me" in description
+    assert "a) b) c)" in description
 
 
 # ── the schema the model has to produce ───────────────────────────────

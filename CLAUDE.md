@@ -2929,6 +2929,46 @@ Also unrun: sections 3 and 4 (an ordinary question must produce **no** question
 at all, and one set per turn). Section 3 is the one that decides whether this
 is liveable, and it is the one still unmeasured.
 
+### Two fixes from the first real use of `ask_user` (2026-08-19)
+Eyaas, with a screenshot: *"see it doesnt ask qustions in that way, and also
+when an output is generated, it starts to speak, i dont want that way, there
+should a mic button at the end of the response."*
+
+**The tool was registered, offered, and not used.** Asked *"can u ask me some
+qustions"*, she wrote the multiple choice out as markdown — *"A) beginner
+B) some algebra C) comfortable … Reply like: 1A 2B 3A 4C"* — and `tool_log`
+has no `ask_user` row for that turn. Nothing was broken; **the description
+overshot.** It said to call this only when "genuinely blocked", and being
+*asked* to ask is not being blocked, so she read the restriction and obeyed it.
+
+Written to prevent over-asking, it prevented the one case the feature exists
+for. The explicit request is now named first and in his own words — *"ask me
+some questions", "quiz me", "give me options"* — with *"never write the choices
+out as A) B) C)"* named as the thing this replaces. The restrictions stay,
+under an "unprompted" qualifier. A test carries the screenshot's own transcript.
+
+**Typed turns are silent now.** `SpeechStream` was constructed on every turn,
+so every reply was read aloud whether or not anybody had spoken. Reading back
+a reply he is looking at is noise; hands-free is the opposite case and keeps
+speaking on its own, because there nobody is looking. So the rule is **she
+answers aloud when she was spoken to** — one argument, not a setting, and
+`SpeechStream.active` already keys off a `None` engine so no branch was needed
+anywhere else.
+
+`voice.speak` and a **speak** button in each reply's footer, beside `copy` and
+the thumbs. It goes through `SpeechStream` rather than synthesising the string
+in one go: that already chunks on clause boundaries, caps a chunk, numbers the
+pieces so playback stays in order, and swallows a failed chunk rather than
+failing the caller — and a 600-word reply in one breath is exactly what
+`FIRST_CHUNK_MAX_CHARS` exists to prevent. No voice weights is answered as
+`no_voice` rather than silence, so the button greys itself out.
+
+- The playback gets **its own id** (`say_…`), so `audio.stop` for it cannot
+  cancel a turn.
+- `test_reasoning_is_never_spoken` now sends `spoken=True`. It is about *what*
+  is spoken, not *whether*, and the new rule has its own test rather than
+  quietly changing what that one measures.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
