@@ -111,6 +111,22 @@ class ProviderRateLimited(ProviderError):
         self.retry_after_s = retry_after_s
 
 
+class ProviderQuotaExhausted(ProviderRateLimited):
+    """The **account's** allowance is gone, not this model's.
+
+    A 429 usually means "this endpoint is busy, try another" — and every
+    caller that treats it that way is right to. This one means the opposite:
+    no model from this provider will answer until the quota resets, so moving
+    to the next candidate is not a workaround, it is the same request again
+    with a different name on it.
+
+    Found live on OpenRouter, where `limit_source: openrouter_free_tier_daily`
+    says exactly which of the two it is. Without the distinction
+    `AdoptionService` stepped through three candidates an hour confirming a cap
+    it had already been told about.
+    """
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     """What `core/conversation.py` and, later, `core/router.py` depend on."""

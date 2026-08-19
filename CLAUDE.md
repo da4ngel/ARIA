@@ -2793,6 +2793,39 @@ build all clean.** `test_indexer.py::test_it_does_not_run_while_she_is_answering
 failed once directly after six live model turns and passes on its own — the
 flake CLAUDE.md already records, not a regression.
 
+## Every OpenRouter model failed at once, and it was the daily cap (2026-08-19)
+Eyaas: *"can u check openrouter all models are failing"*. All 16 free models,
+same error. **Not a fault** — the account's free allowance for the day was
+gone, and the raw body says so exactly:
+
+    "Rate limit exceeded: free-models-per-day"
+    limit_source: "openrouter_free_tier_daily"
+    X-RateLimit-Limit: 50   X-RateLimit-Remaining: 0
+    X-RateLimit-Reset: 1787184000000   -> 2026-08-20 00:00 UTC
+
+**Spent by this project's own verification runs**, not by his use: the
+adoption ticks, the live provider checks and the tool-call probes came to
+roughly fifty between them. Paid cloud models and the local ones were
+unaffected throughout — the six-mode gate ran end to end on
+`gpt-5.4-nano` and `qwen2.5:7b` while OpenRouter was returning 429 to
+everything.
+
+- **`ProviderQuotaExhausted` is a new subclass of `ProviderRateLimited`**, and
+  the distinction is not cosmetic. An ordinary 429 means "this endpoint is
+  busy, try another", and every caller that steps to the next candidate is
+  right. The daily cap is **account-wide**: no other free model will answer
+  either, so stepping through them is the same request with a different name
+  on it. `AdoptionService` was doing exactly that — three candidates an hour,
+  all day, confirming a cap it had already been told about. It ends the tick
+  now. Mutation-checked against its own test.
+- **`limit_source` is what tells the two apart**, so the message can too: the
+  daily cap names the reset time and the $10-for-1000/day remedy, while an
+  upstream throttle still says it is the provider serving that one model.
+- **Sixteen requests were spent proving what the first one already said.**
+  The sweep was written before the error was read, and `free-models-per-day`
+  is account-level by definition — one failure was the whole answer. Worth
+  recording next to the finding it produced.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

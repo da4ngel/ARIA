@@ -511,3 +511,27 @@ async def test_a_general_outage_does_not_walk_the_whole_list() -> None:
     await svc.tick()
 
     assert len(ask.calls) == 3, "it kept trying past the unreachable cap"
+
+
+async def test_the_daily_cap_ends_the_tick_instead_of_walking_the_queue() -> None:
+    """**Found by every OpenRouter model failing at once, live.**
+
+    A 429 normally means "this endpoint is busy, try another", and stepping to
+    the next candidate is right. The free tier's *daily* cap is account-wide:
+    every remaining model answers with the identical 429, so stepping through
+    them is asking the same question with a different name on it — three an
+    hour, for the rest of the day, learning nothing.
+    """
+    from sidecar.providers.base import ProviderQuotaExhausted
+
+    store, clock = Store(), Clock()
+    ask = Asker(ProviderQuotaExhausted("free allowance used up"))
+    many = [a_model(f"vendor/m{i}:free", 50.0 - i) for i in range(6)]
+    svc = service(ask=ask, store=store, clock=clock, candidates=many, budget=99, per_tick=99)
+
+    await svc.tick()
+
+    assert len(ask.calls) == 1, f"kept going after the account cap: {len(ask.calls)} calls"
+    # And it is not a rejection — the models were never measured.
+    for verdict in (await svc.state()).verdicts.values():
+        assert verdict.state == "pending"

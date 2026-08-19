@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 
 from sidecar.eval.probes import GROUNDED_PROBES, Probe, universal_failures
 from sidecar.providers import catalog
+from sidecar.providers.base import ProviderQuotaExhausted
 from sidecar.providers.catalog import ModelInfo
 
 if TYPE_CHECKING:
@@ -254,7 +255,16 @@ class AdoptionService:
         for candidate in self._pending(offered, state):
             if spent >= left or skipped >= MAX_UNREACHABLE_PER_TICK:
                 break
-            used, reachable = await self._measure(candidate, state, left - spent)
+            try:
+                used, reachable = await self._measure(candidate, state, left - spent)
+            except ProviderQuotaExhausted as exc:
+                # **Stop the tick, do not step to the next candidate.** The
+                # allowance is account-wide, so every remaining model would
+                # answer with the identical 429 — three of them an hour, for
+                # the rest of the day, learning nothing.
+                log.info("adoption.quota_exhausted", error=str(exc))
+                spent += 1
+                break
             spent += used
             if not reachable:
                 skipped += 1
@@ -288,6 +298,11 @@ class AdoptionService:
             try:
                 reply = await self._ask(candidate, probe.prompt)
             except asyncio.CancelledError:
+                raise
+            except ProviderQuotaExhausted:
+                # Distinct from the outage below: nothing else will answer
+                # either, so it propagates and ends the tick rather than
+                # sending the caller on to the next candidate.
                 raise
             except Exception as exc:  # noqa: BLE001
                 # A provider error is not a failed probe. Rate limits and

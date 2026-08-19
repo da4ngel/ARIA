@@ -31,7 +31,11 @@ import httpx
 import structlog
 
 from sidecar.providers import catalog
-from sidecar.providers.base import ProviderRateLimited, ProviderUnavailable
+from sidecar.providers.base import (
+    ProviderQuotaExhausted,
+    ProviderRateLimited,
+    ProviderUnavailable,
+)
 from sidecar.providers.credentials import CredentialKey, get_key
 from sidecar.providers.openai import CONNECT_TIMEOUT_S, READ_TIMEOUT_S, OpenAIProvider
 
@@ -224,6 +228,17 @@ class OpenRouterProvider(OpenAIProvider):
                 )
             remaining = self.rate_limit.remaining
             spent = "" if remaining is None else f" ({remaining} left)"
+            # **A distinct exception, because the right response is different.**
+            # The daily cap is account-wide: no other free model will answer
+            # either, so a caller that steps to the next candidate is asking the
+            # same question again. `limit_source` says which of the two this is.
+            if "free-models-per-day" in detail or "free_tier_daily" in detail:
+                raise ProviderQuotaExhausted(
+                    f"OpenRouter's free allowance for today is used up{spent} "
+                    f"(50 a day). It resets at 00:00 UTC; $10 of credit raises "
+                    f"it to 1000/day. Paid models and local ones are unaffected.",
+                    retry_after_s=self._retry_after_s(headers),
+                )
             raise ProviderRateLimited(
                 f"OpenRouter's free-tier limit for this key is reached{spent}: "
                 f"20 requests a minute and 50 a day. Server said: {detail}",
