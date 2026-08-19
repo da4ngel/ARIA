@@ -19,6 +19,7 @@ from sidecar.memory.db import Database
 if TYPE_CHECKING:
     from sidecar.core.conversation import ConversationService
     from sidecar.core.listener import Listener
+    from sidecar.core.questions import QuestionBroker
     from sidecar.memory.indexer import Indexer
     from sidecar.memory.reflection import Reflector
     from sidecar.memory.retrieval import MemoryServices
@@ -68,6 +69,11 @@ class Runtime:
     listener: Listener | None = None
     # The tier engine. None means she has no hands this session.
     permissions: PermissionEngine | None = None
+
+    #: Puts a multiple-choice question on screen and waits for the answer
+    #: (`core/questions.py`). `ask_user` reaches it through here because
+    #: `ToolContext` carries no event bus.
+    questions: QuestionBroker | None = None
     # Reads documents in the background so they can be found by meaning.
     indexer: Indexer | None = None
     # Text to vectors, on the CPU. Shared by the indexer and memory retrieval:

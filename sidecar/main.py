@@ -21,6 +21,7 @@ from sidecar.config import Settings, get_settings
 from sidecar.core import context as ctx
 from sidecar.core.conversation import ConversationService
 from sidecar.core.listener import Listener, WakeMode
+from sidecar.core.questions import QuestionBroker
 from sidecar.core.router import Router, RoutingBias
 from sidecar.core.tasks import spawn
 from sidecar.handshake import (
@@ -249,6 +250,9 @@ async def _start_conversation(settings: Settings) -> None:
         ToolJournal(runtime.require_db()),
         allow_danger=settings.allow_danger_tools,
     )
+    # `ask_user` reaches this through `runtime`, because `ToolContext` carries
+    # no bus and a tool body cannot put anything on screen by itself.
+    runtime.questions = QuestionBroker(bus)
     stored_trusted = await settings_store.get(TRUSTED_PATHS)
     if stored_trusted:
         import json as _json
@@ -750,6 +754,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await runtime.proactivity_scheduler.stop()
         if runtime.adoption is not None:
             await runtime.adoption.stop()
+        if runtime.questions is not None:
+            runtime.questions.cancel_all()
         if runtime.embeddings is not None:
             await runtime.embeddings.aclose()
         if runtime.search is not None:

@@ -92,6 +92,21 @@ ONLINE_TOOLS = frozenset({"research"})
 #: attack vector the moment something reads pages and can also act.
 UNTRUSTED_SOURCE_TOOLS = frozenset({"research", "browser_read", "browser_navigate"})
 
+#: Tools that need somebody looking at the screen, and are therefore hidden
+#: from the model on a turn that arrived by voice.
+#:
+#: `ask_user` puts four options on screen and waits for a click. Said aloud to
+#: someone across the room that is a dead end, and it is the *same* dead end
+#: the confirmation dialog already has to work around by bringing the window
+#: forward. Hiding the tool is the honest version: she asks in words instead,
+#: which is what actually works hands-free.
+#:
+#: Same mechanism as `ONLINE_TOOLS` — named here so a second screen-bound tool
+#: cannot forget the gate — and the same lesson behind both: telling a model a
+#: tool exists and then having it not work is how "let me look that up"
+#: becomes a promise she does not keep.
+SCREEN_ONLY_TOOLS = frozenset({"ask_user"})
+
 ToolFn = Callable[..., Awaitable[ToolResult]]
 #: A tool's own arguments in, a JSON-serialisable summary of what would
 #: happen out. See `Tool.preview`.
@@ -209,7 +224,52 @@ def _json_type(annotation: Any) -> dict[str, Any]:
         if len(args) == 1:
             return _json_type(args[0])
         return {"type": "string"}
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _model_schema(annotation)
     return {"type": _JSON_TYPES.get(annotation, "string")}
+
+
+def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """A pydantic model as an inline JSON-schema object.
+
+    Without this a `list[Question]` came out as `{"type": "array", "items":
+    {"type": "object"}}` — an object with no properties, which tells the model
+    nothing about the shape it is supposed to produce, so it guesses.
+
+    **Inlined, with no `$defs` or `$ref`.** Pydantic hoists nested models into
+    `$defs` and refers to them, which several providers reject outright and the
+    rest handle unevenly. Flattening keeps one self-contained fragment per
+    argument, which is what every provider's function-calling schema expects.
+    """
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+
+    def inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                return inline(defs.get(ref.removeprefix("#/$defs/"), {"type": "object"}))
+            return {key: inline(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [inline(item) for item in node]
+        return node
+
+    def untitled(node: Any) -> Any:
+        """Drop every `title`, at every depth.
+
+        Cosmetic on the wire and worth dropping: pydantic emits one per class
+        and one per field, all of them restating the key they hang off, in a
+        block that is already ~1650 tokens. Recursive because the first version
+        only reached the top level and left the nested model's titles behind.
+        """
+        if isinstance(node, dict):
+            return {k: untitled(v) for k, v in node.items() if k != "title"}
+        if isinstance(node, list):
+            return [untitled(item) for item in node]
+        return node
+
+    resolved: dict[str, Any] = untitled(inline(schema))
+    return resolved
 
 
 def _arg_docs(doc: str) -> dict[str, str]:

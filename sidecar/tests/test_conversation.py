@@ -1584,3 +1584,58 @@ async def test_a_mode_belongs_to_its_own_conversation(
     fresh = await chat_mode({"session_id": second})
 
     assert fresh["mode"] == "normal", "a new chat starts back at Normal"
+
+
+async def test_only_one_question_is_asked_per_turn(
+    database: Database, make_service
+) -> None:
+    """**A different question is blocked, not just a repeat.**
+
+    `would_repeat` already covers the identical re-ask. The failure this
+    guards is the other one — four separate questions in a row, which is an
+    interrogation rather than a conversation, and §9's warning about
+    over-triggering applies word for word. The tool takes four questions in a
+    single call precisely so this cap costs nothing.
+    """
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="ask_user", arguments={"questions": [{"question": "A?"}]})],
+            [ToolCall(id="c2", name="ask_user", arguments={"questions": [{"question": "B?"}]})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("help me decide")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["ask_user"], "it asked twice in one turn"
+    # **And the note never becomes the reply.** Ending the turn with it put
+    # "You have already asked him a question this turn" on screen as her whole
+    # answer — seen live on the first run of `gate_ask.py`. It goes back to the
+    # model as a tool result so she can actually answer with what she has.
+    full_text = bus.of(Event.TURN_COMPLETE)[0]["full_text"]
+    assert "already asked" not in full_text.lower(), "an internal note reached the user"
+    assert full_text.strip(), "a turn that says nothing is the one outcome never allowed"
+
+
+async def test_a_second_ask_does_not_block_an_ordinary_tool(
+    database: Database, make_service
+) -> None:
+    """The cap is on questions, not on the turn. Blocking everything after one
+    would make asking a decision she pays for by giving up her tools."""
+    provider = ScriptedToolProvider(
+        [
+            [ToolCall(id="c1", name="ask_user", arguments={"questions": [{"question": "A?"}]})],
+            [ToolCall(id="c2", name="find", arguments={"query": "cv"})],
+            None,
+        ]
+    )
+    engine = OpenEngine()
+    svc, bus = tool_service(database, make_service, provider, engine)
+
+    await svc.send("ask me then find it")
+    await _drain(svc)
+
+    assert [name for name, _ in engine.ran] == ["ask_user", "find"]

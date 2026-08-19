@@ -19,6 +19,7 @@ without turning it into an unbounded one.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,16 +30,33 @@ from sidecar.tools.registry import UNTRUSTED_SOURCE_TOOLS
 #: both a silent truncation and a loop nobody bounded.
 MAX_STEPS = 8
 
+#: The one tool that is capped at one call per turn — see `LoopState.
+#: asked_already`. Named here rather than imported from `tools.ask` so
+#: `core/agent.py` stays a pure decisions module with no tool imports,
+#: which is what lets a test build a `LoopState` with nothing running.
+ASK_TOOL = "ask_user"
 
-def call_key(name: str, arguments: dict[str, Any]) -> tuple[str, tuple[tuple[str, Any], ...]]:
+
+def call_key(name: str, arguments: dict[str, Any]) -> tuple[str, str]:
     """A hashable fingerprint of one tool call, for loop detection.
 
     Sorted so argument order never matters — `{"a": 1, "b": 2}` and
-    `{"b": 2, "a": 1}` are the same call and must be seen as one. Values are
-    not deep-normalised beyond that; a dict or list argument compares by its
-    own `==`, which is exactly what "the same call twice" should mean.
+    `{"b": 2, "a": 1}` are the same call and must be seen as one.
+
+    **Serialised rather than tupled, because the tuple was not hashable.**
+    `tuple(sorted(arguments.items()))` crashed with `TypeError: unhashable
+    type: 'list'` the moment any argument was a list — and the key goes
+    straight into a `set`, so the old docstring's claim that "a dict or list
+    argument compares by its own `==`" described behaviour the code could not
+    reach. It took a turn down with it, from the loop-detection check that runs
+    before every single tool call.
+
+    Latent until `ask_user` arrived with a `list[Question]`, but never specific
+    to it: a model passing a list to *any* tool — including by mistake — hit
+    the same crash. JSON with sorted keys is hashable, order-independent, and
+    still compares structurally, which is what "the same call twice" means.
     """
-    return (name, tuple(sorted(arguments.items())))
+    return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
 @dataclass
@@ -55,7 +73,7 @@ class LoopState:
     """
 
     step: int = 0
-    seen: set[tuple[str, tuple[tuple[str, Any], ...]]] = field(default_factory=set)
+    seen: set[tuple[str, str]] = field(default_factory=set)
     #: The most recently *run* tool's name, for §11's escalation below.
     last_tool: str | None = None
     #: Whether that tool actually succeeded. §11 escalates the step after
@@ -78,6 +96,14 @@ class LoopState:
     #: below. Only ever the summary — never `data` or `display` — so nothing
     #: here can widen what §7.2 allows back into the user's sight.
     last_summary: str | None = None
+
+    #: Whether this turn has already put a question on screen. **A different
+    #: question is blocked, not just a repeat** — `would_repeat` covers the
+    #: identical re-ask, and the failure this guards is the other one: four
+    #: separate questions in a row, which is an interrogation rather than a
+    #: conversation. §9's warning about proactive messages is the same shape,
+    #: and the tool takes four questions per call so the cap costs nothing.
+    asked_already: bool = False
 
     #: What the *next* call is, once the loop knows. `should_escalate` is a
     #: property with no arguments — it reads this, set immediately before the
@@ -102,6 +128,7 @@ class LoopState:
         privacy constraint" is correct, not a shortcut.
         """
         self.seen.add(call_key(name, arguments))
+        self.asked_already = self.asked_already or name == ASK_TOOL
         self.last_tool = name
         self.sticky_local = self.sticky_local or local_only
         self.last_summary = summary
@@ -176,6 +203,21 @@ def repeat_note(name: str) -> str:
         f"That would repeat the exact {name} call already made this turn with "
         f"the same arguments, which usually means stuck rather than making "
         f"progress — so it was not run again."
+    )
+
+
+def second_question_note() -> str:
+    """Told to the model, not just logged — it should know why nothing happened.
+
+    A dropped call with no explanation is one the model makes again on the next
+    step, which is how a cap becomes a loop. The same reasoning as
+    `repeat_note` above.
+    """
+    return (
+        "You have already asked him a question this turn, and only one is "
+        "allowed — so that call was not made. Ask everything you need in one "
+        "call next time. For now, carry on with what he has already told you "
+        "and say what you assumed."
     )
 
 

@@ -26,7 +26,14 @@ from pydantic import BaseModel
 
 from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
-from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
+from sidecar.core.agent import (
+    ASK_TOOL,
+    LoopState,
+    exhausted_note,
+    repeat_note,
+    second_question_note,
+    silent_reply_note,
+)
 from sidecar.core.modes import ModePolicy, policy_for, suggest
 from sidecar.core.router import (
     RouteDecision,
@@ -60,7 +67,7 @@ from sidecar.rpc.events import AssistantState, Event, EventBus
 from sidecar.state import runtime
 from sidecar.tools import registry
 from sidecar.tools.permissions import PermissionEngine, PermissionMode
-from sidecar.tools.registry import ONLINE_TOOLS, Tier, ToolContext
+from sidecar.tools.registry import ONLINE_TOOLS, SCREEN_ONLY_TOOLS, Tier, ToolContext
 
 log = structlog.get_logger(__name__)
 
@@ -868,6 +875,8 @@ class ConversationService:
         tool_calls: list[ToolCall] | None = None,
         offer_tools: bool = True,
         policy: ModePolicy | None = None,
+        spoken: bool = False,
+        asked_already: bool = False,
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms.
 
@@ -890,7 +899,11 @@ class ConversationService:
                 num_ctx=min(self._num_ctx, info.context_tokens),
                 temperature=info.temperature,
             ),
-            tools=self._tool_schemas(policy) if offer_tools else None,
+            tools=(
+                self._tool_schemas(policy, spoken=spoken, asked_already=asked_already)
+                if offer_tools
+                else None
+            ),
         ):
             if delta.tool_calls and tool_calls is not None:
                 tool_calls.extend(delta.tool_calls)
@@ -919,7 +932,13 @@ class ConversationService:
         await speech.finish(turn_id)
         return first_token_ms
 
-    def _tool_schemas(self, policy: ModePolicy | None = None) -> list[dict[str, Any]] | None:
+    def _tool_schemas(
+        self,
+        policy: ModePolicy | None = None,
+        *,
+        spoken: bool = False,
+        asked_already: bool = False,
+    ) -> list[dict[str, Any]] | None:
         """What the model is allowed to know exists.
 
         None rather than an empty list when there is no permission engine:
@@ -954,7 +973,21 @@ class ConversationService:
             return None
         full_access = self._permissions.mode is PermissionMode.FULL_ACCESS
         ceiling = Tier.DANGER if (self._permissions.allow_danger or full_access) else Tier.CONFIRM
-        hidden = set() if runtime.online_mode else ONLINE_TOOLS
+        hidden = set() if runtime.online_mode else set(ONLINE_TOOLS)
+        # A turn that arrived by voice gets no screen-bound tool. Same
+        # mechanism, same reason: telling a model a tool exists and then
+        # having it not work is worse than not offering it.
+        if spoken:
+            hidden = set(hidden) | SCREEN_ONLY_TOOLS
+        # **Stop offering it, rather than refusing it.** One question per turn
+        # is enforced in the loop either way, but leaving the tool on the list
+        # meant the model kept calling it and being turned down — seen live,
+        # burning a step and a full model round trip each time until the step
+        # budget ran out and the turn produced no answer at all. A capability
+        # it cannot see is one it cannot spend the turn arguing about, which is
+        # the same reasoning §7.2 gives for hiding DANGER tools.
+        if asked_already:
+            hidden = set(hidden) | {ASK_TOOL}
 
         # **The mode may only lower this, never raise it.** `min` rather than a
         # replacement is the whole safety property: Quick and Study see
@@ -1043,6 +1076,8 @@ class ConversationService:
                     tool_calls=requested,
                     offer_tools=state.offer_tools,
                     policy=policy,
+                    spoken=spoken,
+                    asked_already=state.asked_already,
                 )
             except (ProviderUnavailable, ProviderRateLimited) as exc:
                 if state.step == 0:
@@ -1123,6 +1158,34 @@ class ConversationService:
                     await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
                 collected.append(repeat_note(call.name))
                 return first_token_ms, current, note
+
+            # **One question per turn.** `would_repeat` above already blocks an
+            # identical re-ask; this blocks a *different* one, which is the case
+            # that turns a helpful question into an interrogation. The tool
+            # takes up to four questions in a single call precisely so this cap
+            # costs nothing — and the note tells the model why, because a
+            # silently dropped call is one it will simply make again.
+            if call.name == ASK_TOOL and state.asked_already:
+                # **Handed back to the model, not used as the reply.**
+                # `repeat_note` ends the turn with its own text, and that was
+                # fine for a loop nobody could recover from. This one is
+                # recoverable — she still has his first answer and can just get
+                # on with it — and ending here put the raw instruction
+                # "You have already asked him a question this turn" on screen
+                # as her entire answer. Seen live on the first run.
+                state.record(call.name, call.arguments, summary=None, ok=False)
+                messages.append(
+                    ChatMessage(role=Role.ASSISTANT, content="", tool_calls=[call])
+                )
+                messages.append(
+                    ChatMessage(
+                        role=Role.TOOL,
+                        content=second_question_note(),
+                        tool_call_id=call.id,
+                        name=call.name,
+                    )
+                )
+                continue
 
             tool = registry.get(call.name)
 

@@ -2826,6 +2826,109 @@ everything.
   is account-level by definition — one failure was the whole answer. Worth
   recording next to the finding it produced.
 
+## She can ask a question you click, instead of one you type (2026-08-19)
+    pytest sidecar/tests/test_questions.py sidecar/tests/test_ask.py -v
+    python scripts/gate_ask.py     # needs the sidecar running
+
+Eyaas: *"if u are gonna ask a question and give 4 answers more like an MCQ …
+in claude i should be able to select what i want, and one by one it moves to
+next."*
+
+**Not new behaviour — a channel for behaviour BUILD_SPEC already asked for.**
+§8.1's persona block lists `asks_before_assuming: true` beside
+`disagrees_when_warranted`, and the same section warns that an agent tuned
+purely to please converges on agreement. What was missing was a mechanism:
+until now she could only ask in prose, and answering cost a full round trip.
+
+`ask_user` — **42 tools** — takes up to 4 questions with 2-4 options each,
+stepped through one at a time. Confirmed with Eyaas before building: a batch
+rather than one per turn, reached for **only when genuinely blocked**, and
+**not offered on spoken turns**.
+
+- **`QuestionBroker` (`core/questions.py`) exists because `ToolContext` carries
+  no bus.** A tool body is structurally unable to put anything on screen — the
+  constraint `Tool.preview` was invented for, and preview does not fit: it runs
+  *before* approval and cannot wait. Same pending-futures shape as
+  `PermissionEngine`, with **two deliberate differences**: the timeout is ten
+  minutes rather than two, and **it does not deny**. A confirmation that times
+  out must deny; a question has no safe default, so it resolves as *unanswered*
+  and she carries on with a stated assumption. Mutation-checked.
+- **"Other" is appended to every question by the broker, never modelled by the
+  caller.** A multiple choice you cannot escape converts "you asked the wrong
+  question" into "pick one anyway", and a confident wrong answer is what the
+  rest of this codebase spends its time preventing.
+- **The discipline lives in the tool's `description`, not the persona.** That
+  is where a model reads it while choosing, and the stable prefix is at **786
+  of its measured 800-token budget** — a paragraph in `_WITH_TOOLS` would blow
+  it, while the schema block is separate. Most of the description is spent on
+  when *not* to call it: §9's warning about over-triggering applies word for
+  word.
+- **`Tier.AUTO`.** Asking changes nothing, and a confirmation dialog in front
+  of a question would be two round trips for one decision.
+- **Hidden on spoken turns** via `SCREEN_ONLY_TOOLS`, the same mechanism
+  `ONLINE_TOOLS` already uses. Four options on screen are no use across a room.
+
+### The schema builder learned nested objects
+`_json_type` handled scalars and `list[X]` and nothing else, so `list[Question]`
+came out as `{"type": "array", "items": {"type": "object"}}` — an object with no
+properties, leaving the model to guess. It now inlines a pydantic model's
+`model_json_schema()`, resolving `$defs`/`$ref` (which several providers reject
+outright) and stripping every `title` at every depth. A capability every future
+tool inherits, not a special case. **Measured: `gpt-5` and `gpt-5.4-nano` both
+produced a correct four-question nested payload first time, including
+`multi_select`.**
+
+### Four bugs, and only one of them was in the new code
+- **`call_key` crashed on any list argument.** `tuple(sorted(arguments.items()))`
+  is not hashable when a value is a list, and the key goes straight into a
+  `set` — so `TypeError: unhashable type: 'list'` took the whole turn down, from
+  the loop-detection check that runs before *every* tool call. Its own docstring
+  claimed "a dict or list argument compares by its own `==`", describing
+  behaviour the code could not reach. **Latent since Phase 6 and never specific
+  to this feature**: any model passing a list to any tool, including by mistake,
+  hit it. Now JSON with sorted keys.
+- **Arguments arrive as plain dicts.** Type hints drive the *schema*; nothing
+  in the registry coerces what comes back, so `list[Question]` is a description
+  rather than a guarantee. The first live call died on `'dict' object has no
+  attribute 'options'`. Validated per question now, so one malformed entry costs
+  that question rather than the call.
+- **An internal note became her entire reply.** The one-per-turn cap ended the
+  turn with its own text, and *"You have already asked him a question this turn,
+  and only one is allowed"* appeared on screen as the answer. It goes back to
+  the model as a tool result instead. `repeat_note` still ends the turn with its
+  own text — correct there, because that loop is unrecoverable; this one is not.
+- **Refusing the second question was not enough — it had to stop being
+  offered.** With the tool still on the list the model called it again, was
+  turned down, called it again, burning a step and a full model round trip each
+  time until the budget ran out and the turn produced **no answer at all**.
+  Three minutes of arguing about a fifth question, live. `_tool_schemas` hides
+  it once used, the same reasoning §7.2 gives for hiding DANGER tools.
+
+### The gate, and what is and is not proven
+`scripts/gate_ask.py`. **The mechanism is proven live, twice**, on `gpt-5`:
+
+    question.asked   request_id=q_929c2ecf3b count=4
+    question.answered request_id=q_929c2ecf3b count=4
+    tool.ran         tool=ask_user ok=True
+
+Four real questions — *"What shape is your data?"*, *"What kind of workload and
+guarantees?"*, *"How big will this get?"*, *"How do you want to run it?"* — each
+with sensible options and an "Other", answered one at a time, in **2ms** of
+broker time.
+
+**What is not yet proven is the reply after it.** A turn worth asking about is
+a substantive one, so QUALITY bias routes it to the SMART class — which here
+was `gpt-5`, whose TTFT this file already records at 7116ms and which bills its
+reasoning against the same budget. Both runs timed out waiting for the answer,
+not for the question. The gate's timeout is now 420s, and it has not been
+re-run because Eyaas was using the machine at the time — running live gates
+against an app somebody is talking to is how measurements and his conversation
+both come out wrong.
+
+Also unrun: sections 3 and 4 (an ordinary question must produce **no** question
+at all, and one set per turn). Section 3 is the one that decides whether this
+is liveable, and it is the one still unmeasured.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -2948,6 +3051,10 @@ dependency**; five conversation modes ship per-conversation; the palette moved
 to warm slate with an indigo accent and now lives in one file instead of six.
 **41 tools, unchanged** — an upload is the user handing something over, and a
 mode is a style, so neither is a tool.
+
+**`ask_user` landed 2026-08-19** — she can put a decision on screen as options you click, four at a time, stepped one by one. **42 tools.** Four bugs came out of it and only one was in the new code; the worst,
+`call_key` crashing on any list argument, had been latent since Phase 6.
+See the section above for what is proven live and what is not.
 
 Remaining, in rough order:
 

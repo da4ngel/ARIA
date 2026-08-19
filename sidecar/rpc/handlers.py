@@ -146,6 +146,40 @@ async def chat_cancel(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": cancelled}
 
 
+@method("question.answer")
+async def question_answer(params: dict[str, Any]) -> dict[str, Any]:
+    """Answer a question she is waiting on (`core/questions.py`).
+
+    The turn is suspended on an `asyncio.Future`. If nothing is waiting the
+    answer is late — the ten minutes already elapsed and she carried on — and
+    saying so beats pretending it landed, which is the same call
+    `confirm.respond` makes for the same reason.
+    """
+    from sidecar.core.questions import Answer
+    from sidecar.state import runtime
+
+    request_id = params.get("request_id")
+    if not isinstance(request_id, str):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "request_id is required.")
+
+    broker = runtime.questions
+    if broker is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR, "Questions are not available in this session."
+        )
+
+    raw = params.get("answers")
+    if not isinstance(raw, list):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "answers must be a list.")
+    try:
+        answers = [Answer.model_validate(item) for item in raw]
+    except ValidationError as exc:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"Bad answer: {exc}") from exc
+
+    delivered = broker.respond(request_id, answers)
+    return {"ok": delivered, "expired": not delivered}
+
+
 @method("chat.new")
 async def chat_new(_params: dict[str, Any]) -> dict[str, Any]:
     """Start a fresh conversation. The previous one stays in SQLite."""

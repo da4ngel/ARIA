@@ -8,6 +8,7 @@
  */
 
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import type { ReactNode } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Markdown } from '@/components/Markdown'
@@ -201,10 +202,22 @@ export function ConversationView({
   turns,
   state = 'idle',
   onRate,
+  question,
 }: {
   turns: Turn[]
   state?: AssistantState
   onRate?: (messageId: number, rating: 1 | -1) => void
+  /**
+   * A question she is blocked on, rendered at the end of the flow.
+   *
+   * A slot rather than the props themselves: this component has no business
+   * knowing what a question is, and `QuestionCard` stays independently
+   * testable. It sits *inside* the scroller so it scrolls with the reply it
+   * interrupts — a modal would be the `ConfirmDialog` treatment, and that
+   * scrim exists because a permission lock is held, which is not the case
+   * here.
+   */
+  question?: ReactNode
 }): JSX.Element {
   const still = useReducedMotion()
   const scroller = useRef<HTMLDivElement>(null)
@@ -264,6 +277,7 @@ export function ConversationView({
             </div>
           ),
         )}
+        {question}
       </div>
 
       <AnimatePresence>

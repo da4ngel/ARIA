@@ -98,6 +98,12 @@ class Event(StrEnum):
     #: faster. Confirmed with Eyaas before building it.
     MODE_SUGGESTED = "mode.suggested"
 
+    #: She needs a decision before she can carry on, and is offering the
+    #: choices rather than a paragraph. Answered over the `question.answer`
+    #: RPC; the turn is genuinely waiting, unlike `MODE_SUGGESTED`, which is
+    #: an offer nobody has to respond to.
+    QUESTION_ASK = "question.ask"
+
 
 class Sender(Protocol):
     """Minimal transport surface — a Starlette WebSocket satisfies this."""

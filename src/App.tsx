@@ -28,6 +28,7 @@ import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
 import { MemoryPanel } from '@/components/MemoryPanel'
 import { FilesPanel } from '@/components/FilesPanel'
 import { ModeSelector } from '@/components/ModeSelector'
+import { QuestionCard } from '@/components/QuestionCard'
 import { PermissionModeChip } from '@/components/PermissionModeChip'
 import { ToolsPanel } from '@/components/ToolsPanel'
 import { VoicePanel } from '@/components/VoicePanel'
@@ -36,6 +37,7 @@ import { useAudio } from '@/hooks/useAudio'
 import { useConfirm } from '@/hooks/useConfirm'
 import { useConversation } from '@/hooks/useConversation'
 import { useModels } from '@/hooks/useModels'
+import { useAskQuestion } from '@/hooks/useAskQuestion'
 import { useConversationMode } from '@/hooks/useConversationMode'
 import { usePermissionMode } from '@/hooks/usePermissionMode'
 import { useHandsFree } from '@/hooks/useHandsFree'
@@ -64,6 +66,7 @@ export default function App(): JSX.Element {
   const permissions = usePermissionMode(connected)
   // Per conversation, so it re-reads whenever the open chat changes.
   const answerMode = useConversationMode(sessionId, connected)
+  const ask = useAskQuestion()
   // Handed from the Files panel to the composer. A one-shot value rather
   // than shared state: the composer owns its own attachment list, and two
   // places holding that would eventually disagree.
@@ -289,7 +292,21 @@ export default function App(): JSX.Element {
           </AnimatePresence>
 
           {started ? (
-            <ConversationView turns={turns} state={orbState} onRate={rate} />
+            <ConversationView
+              turns={turns}
+              state={orbState}
+              onRate={rate}
+              question={
+                ask.pending ? (
+                  <QuestionCard
+                    pending={ask.pending}
+                    index={ask.index}
+                    onAnswer={ask.answer}
+                    onDismiss={ask.dismiss}
+                  />
+                ) : null
+              }
+            />
           ) : (
             <EmptyState state={orbState} connected={connected} onPick={send} level={orbLevel} />
           )}
