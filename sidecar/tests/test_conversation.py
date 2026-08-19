@@ -1586,17 +1586,11 @@ async def test_a_mode_belongs_to_its_own_conversation(
     assert fresh["mode"] == "normal", "a new chat starts back at Normal"
 
 
-async def test_only_one_question_is_asked_per_turn(
+async def test_a_quiz_can_keep_asking(
     database: Database, make_service
 ) -> None:
-    """**A different question is blocked, not just a repeat.**
-
-    `would_repeat` already covers the identical re-ask. The failure this
-    guards is the other one — four separate questions in a row, which is an
-    interrogation rather than a conversation, and §9's warning about
-    over-triggering applies word for word. The tool takes four questions in a
-    single call precisely so this cap costs nothing.
-    """
+    """"Test with set of mcqs one after the other" is a real request, and a
+    one-per-turn cap turned every question after the first into markdown."""
     provider = ScriptedToolProvider(
         [
             [ToolCall(id="c1", name="ask_user", arguments={"questions": [{"question": "A?"}]})],
@@ -1607,24 +1601,17 @@ async def test_only_one_question_is_asked_per_turn(
     engine = OpenEngine()
     svc, bus = tool_service(database, make_service, provider, engine)
 
-    await svc.send("help me decide")
+    await svc.send("quiz me, one after the other")
     await _drain(svc)
 
-    assert [name for name, _ in engine.ran] == ["ask_user"], "it asked twice in one turn"
-    # **And the note never becomes the reply.** Ending the turn with it put
-    # "You have already asked him a question this turn" on screen as her whole
-    # answer — seen live on the first run of `gate_ask.py`. It goes back to the
-    # model as a tool result so she can actually answer with what she has.
-    full_text = bus.of(Event.TURN_COMPLETE)[0]["full_text"]
-    assert "already asked" not in full_text.lower(), "an internal note reached the user"
-    assert full_text.strip(), "a turn that says nothing is the one outcome never allowed"
+    assert [name for name, _ in engine.ran] == ["ask_user", "ask_user"]
 
 
-async def test_a_second_ask_does_not_block_an_ordinary_tool(
+async def test_asking_does_not_cost_her_the_rest_of_her_tools(
     database: Database, make_service
 ) -> None:
-    """The cap is on questions, not on the turn. Blocking everything after one
-    would make asking a decision she pays for by giving up her tools."""
+    """Asking a question must not be a decision she pays for by giving up
+    everything else she can do in that turn."""
     provider = ScriptedToolProvider(
         [
             [ToolCall(id="c1", name="ask_user", arguments={"questions": [{"question": "A?"}]})],

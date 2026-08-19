@@ -2969,6 +2969,40 @@ failing the caller — and a 600-word reply in one breath is exactly what
   is spoken, not *whether*, and the new rule has its own test rather than
   quietly changing what that one measures.
 
+### The one-question-per-turn cap was wrong, and a quiz proved it (2026-08-19)
+Eyaas: *"first question it asked in selecting ways but after that other
+questions dfoesnt seems fine"* — with a screenshot of *"test with set of mcqs
+one after the other"*. The first question came through as clickable options.
+Every one after it was markdown: *"A) Identify devices inside your home
+network  B) …"*.
+
+**The cap did that.** `ask_user` was hidden from the model for the rest of the
+turn once used, so after the first question she had no tool left and wrote the
+rest out as prose. **A quiz is asking repeatedly** — it is the case the feature
+exists for, and the cap forbade exactly it.
+
+It was added against an interrogation nobody had seen, and three things were
+already guarding that: the description says not to ask unprompted,
+`would_repeat` blocks an identical re-ask, and `MAX_STEPS` bounds the turn —
+Quick mode's 2 bounds it hard. **The observed failure has consistently been the
+opposite**: she under-asks, and had to be argued into using the tool at all.
+So the cap, its `LoopState.asked_already` flag and its note are gone, and the
+step budget is the only limit. That is a real trade and worth stating: an
+8-step turn can now hold up to eight questions.
+
+### `[object Object]`, on screen, in the tool card
+`ask_user` is the first tool whose argument is a list of objects, and
+`ToolCallCard`'s header did `String(args[0][1])` — which renders exactly the
+text `[object Object]`. The expanded body was worse: `JSON.stringify` put five
+lines of escaped quotes into a `break-all` column.
+
+Both are generic fixes rather than a special case for this tool. The header
+describes a non-scalar instead of stringifying it, preferring the first item's
+own `question`/`label` over a count — *"Which of the following is a valid IPv4
+address? +1"* says more than *"2 items"*. The body lays a list out as lines,
+falling back to JSON for anything unrecognised, because showing something beats
+showing nothing.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

@@ -50,7 +50,7 @@ export function ToolCallCard({
             story for most calls and costs no extra row. */}
         {args.length > 0 && (
           <span className="min-w-0 flex-1 truncate text-aria-faint">
-            {String(args[0][1])}
+            {inline(args[0][1])}
             {args.length > 1 && ` +${args.length - 1}`}
           </span>
         )}
@@ -71,8 +71,8 @@ export function ToolCallCard({
               {args.map(([key, value]) => (
                 <div key={key} className="flex gap-2">
                   <dt className="shrink-0 text-aria-faint">{key}</dt>
-                  <dd className="min-w-0 flex-1 break-all font-mono text-aria-muted">
-                    {typeof value === 'string' ? value : JSON.stringify(value)}
+                  <dd className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-aria-muted">
+                    {readable(value)}
                   </dd>
                 </div>
               ))}
@@ -91,6 +91,59 @@ export function ToolCallCard({
       )}
     </div>
   )
+}
+
+/**
+ * One argument, in a few words, for the collapsed header.
+ *
+ * `String(value)` on an object renders the literal text `[object Object]`,
+ * which is what `ask_user` put on screen — its argument is a list of
+ * questions, and the header read `ask_user [object Object]`. Anything that is
+ * not a scalar is described rather than stringified.
+ */
+function inline(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    const first = value[0]
+    // A list of objects is almost always a list of *things* with a name — the
+    // first one's own label says far more than "4 items" does.
+    if (first && typeof first === 'object') {
+      const named = (first as Record<string, unknown>).question ?? (first as Record<string, unknown>).label
+      const rest = value.length > 1 ? ` +${value.length - 1}` : ''
+      if (typeof named === 'string') return named + rest
+    }
+    return `${value.length} item${value.length === 1 ? '' : 's'}`
+  }
+  return value === null || value === undefined ? '' : '…'
+}
+
+/**
+ * The same argument in the expanded body, where there is room for the detail
+ * but not for a single unbroken line of JSON.
+ *
+ * `JSON.stringify` on `ask_user`'s questions produced a five-line wall of
+ * escaped quotes in a `break-all` column. Structured values are laid out as
+ * lines instead; anything unrecognised still falls back to JSON, because
+ * showing something is better than showing nothing.
+ */
+function readable(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    const lines = value.map((item) => {
+      if (item && typeof item === 'object') {
+        const row = item as Record<string, unknown>
+        const label = row.question ?? row.label
+        const options = Array.isArray(row.options)
+          ? ` — ${row.options.map((o) => (o as Record<string, unknown>).label).join(', ')}`
+          : ''
+        if (typeof label === 'string') return `• ${label}${options}`
+      }
+      return `• ${typeof item === 'string' ? item : JSON.stringify(item)}`
+    })
+    return lines.join('\n')
+  }
+  return JSON.stringify(value)
 }
 
 /** Colour carries meaning here, so it is one of the few places saturation is

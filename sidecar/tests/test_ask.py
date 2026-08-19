@@ -227,15 +227,19 @@ async def test_a_missing_broker_costs_the_question_not_the_turn(
     assert result.error == "unavailable"
 
 
-def test_it_stops_being_offered_once_a_turn_has_used_it() -> None:
-    """**Refusing it was not enough — it had to stop being offered.**
+def test_it_stays_available_for_a_quiz() -> None:
+    """**There was a one-question-per-turn cap here, and it was wrong.**
 
-    The cap is enforced in the loop either way, but leaving the tool on the
-    list meant the model called it again, was turned down, called it again…
-    burning a step and a full model round trip each time until the budget ran
-    out and the turn produced no answer at all. Seen live on the second run of
-    `gate_ask.py`: four questions answered correctly, then three minutes of
-    arguing about a fifth.
+    Asked to "test with set of mcqs one after the other", she asked the first
+    through the tool and then wrote every following question out as A) B) C)
+    markdown — because the cap had taken the tool away from her. A quiz *is*
+    asking repeatedly; it is the case the feature exists for.
+
+    What the cap guarded — an unprompted interrogation — was already covered
+    three times over: the description says not to ask unprompted,
+    `would_repeat` blocks an identical re-ask, and `MAX_STEPS` bounds the turn
+    (Quick mode's 2 bounds it hard). And the observed failure has consistently
+    been the opposite one: she under-asks.
     """
     from sidecar.core.conversation import ConversationService
     from sidecar.tools.permissions import PermissionMode
@@ -248,13 +252,13 @@ def test_it_stops_being_offered_once_a_turn_has_used_it() -> None:
 
     service._permissions = _Engine()  # type: ignore[assignment]  # noqa: SLF001
 
-    before = {s["function"]["name"] for s in service._tool_schemas() or []}  # noqa: SLF001
-    after = {
-        s["function"]["name"]
-        for s in service._tool_schemas(asked_already=True) or []  # noqa: SLF001
-    }
+    offered = {s["function"]["name"] for s in service._tool_schemas() or []}  # noqa: SLF001
+    assert "ask_user" in offered
 
-    assert "ask_user" in before
-    assert "ask_user" not in after
-    # And nothing else went with it — the cap is on questions, not on the turn.
-    assert before - after == {"ask_user"}
+    # And it is still gone the moment the turn is spoken, which is the one
+    # condition that genuinely makes it useless.
+    silent = {
+        s["function"]["name"]
+        for s in service._tool_schemas(spoken=True) or []  # noqa: SLF001
+    }
+    assert "ask_user" not in silent

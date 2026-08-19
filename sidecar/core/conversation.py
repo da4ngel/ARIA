@@ -26,14 +26,7 @@ from pydantic import BaseModel
 
 from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
-from sidecar.core.agent import (
-    ASK_TOOL,
-    LoopState,
-    exhausted_note,
-    repeat_note,
-    second_question_note,
-    silent_reply_note,
-)
+from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
 from sidecar.core.modes import ModePolicy, policy_for, suggest
 from sidecar.core.router import (
     RouteDecision,
@@ -876,7 +869,6 @@ class ConversationService:
         offer_tools: bool = True,
         policy: ModePolicy | None = None,
         spoken: bool = False,
-        asked_already: bool = False,
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms.
 
@@ -909,11 +901,7 @@ class ConversationService:
                 num_ctx=min(self._num_ctx, info.context_tokens),
                 temperature=info.temperature,
             ),
-            tools=(
-                self._tool_schemas(policy, spoken=spoken, asked_already=asked_already)
-                if offer_tools
-                else None
-            ),
+            tools=self._tool_schemas(policy, spoken=spoken) if offer_tools else None,
         ):
             if delta.tool_calls and tool_calls is not None:
                 tool_calls.extend(delta.tool_calls)
@@ -947,7 +935,6 @@ class ConversationService:
         policy: ModePolicy | None = None,
         *,
         spoken: bool = False,
-        asked_already: bool = False,
     ) -> list[dict[str, Any]] | None:
         """What the model is allowed to know exists.
 
@@ -989,15 +976,19 @@ class ConversationService:
         # having it not work is worse than not offering it.
         if spoken:
             hidden = set(hidden) | SCREEN_ONLY_TOOLS
-        # **Stop offering it, rather than refusing it.** One question per turn
-        # is enforced in the loop either way, but leaving the tool on the list
-        # meant the model kept calling it and being turned down — seen live,
-        # burning a step and a full model round trip each time until the step
-        # budget ran out and the turn produced no answer at all. A capability
-        # it cannot see is one it cannot spend the turn arguing about, which is
-        # the same reasoning §7.2 gives for hiding DANGER tools.
-        if asked_already:
-            hidden = set(hidden) | {ASK_TOOL}
+        # **The step budget is the only cap on asking.** There was a
+        # one-question-per-turn rule here and it was wrong: asked to "test with
+        # set of mcqs one after the other", she asked the first through the
+        # tool and then wrote every following question out as A) B) C) markdown,
+        # because the tool had been taken away from her. A quiz *is* asking
+        # repeatedly, and it is the case the feature exists for.
+        #
+        # What that rule was guarding — an unprompted interrogation — is
+        # handled by three things that were already there: the description says
+        # not to ask unprompted, `would_repeat` blocks an identical re-ask, and
+        # `MAX_STEPS` bounds the whole turn (Quick mode's 2 bounds it much
+        # harder). The observed failure has been the opposite one anyway: she
+        # under-asks, and had to be argued into using the tool at all.
 
         # **The mode may only lower this, never raise it.** `min` rather than a
         # replacement is the whole safety property: Quick and Study see
@@ -1087,7 +1078,6 @@ class ConversationService:
                     offer_tools=state.offer_tools,
                     policy=policy,
                     spoken=spoken,
-                    asked_already=state.asked_already,
                 )
             except (ProviderUnavailable, ProviderRateLimited) as exc:
                 if state.step == 0:
@@ -1168,34 +1158,6 @@ class ConversationService:
                     await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
                 collected.append(repeat_note(call.name))
                 return first_token_ms, current, note
-
-            # **One question per turn.** `would_repeat` above already blocks an
-            # identical re-ask; this blocks a *different* one, which is the case
-            # that turns a helpful question into an interrogation. The tool
-            # takes up to four questions in a single call precisely so this cap
-            # costs nothing — and the note tells the model why, because a
-            # silently dropped call is one it will simply make again.
-            if call.name == ASK_TOOL and state.asked_already:
-                # **Handed back to the model, not used as the reply.**
-                # `repeat_note` ends the turn with its own text, and that was
-                # fine for a loop nobody could recover from. This one is
-                # recoverable — she still has his first answer and can just get
-                # on with it — and ending here put the raw instruction
-                # "You have already asked him a question this turn" on screen
-                # as her entire answer. Seen live on the first run.
-                state.record(call.name, call.arguments, summary=None, ok=False)
-                messages.append(
-                    ChatMessage(role=Role.ASSISTANT, content="", tool_calls=[call])
-                )
-                messages.append(
-                    ChatMessage(
-                        role=Role.TOOL,
-                        content=second_question_note(),
-                        tool_call_id=call.id,
-                        name=call.name,
-                    )
-                )
-                continue
 
             tool = registry.get(call.name)
 
