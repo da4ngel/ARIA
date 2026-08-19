@@ -2950,48 +2950,62 @@ to warm slate with an indigo accent and now lives in one file instead of six.
 mode is a style, so neither is a tool.
 
 Remaining, in rough order:
-- **No free model has been *adopted* yet.** `google/gemma-4-26b-a4b-it:free`
-  reached 12 of 20 probes before the 50-a-day allowance ran out, and
-  `nemotron-3-ultra` was correctly rejected on `ground-continents`. Everything
-  up to the promotion step is proven live. **The scheduler only starts at
-  startup**, so ARIA needs a restart with the key in place before it runs on
-  its own.
-- **Half the free models are throttled upstream at any given moment**, which is
-  not the account's limit and comes and goes. `z-ai/glm-5.2:free` — the best of
-  them by benchmark — was unreachable for an entire session. Whatever ends up
-  adopted, free models are a fallback tier and the router already treats them
-  as one.
-- **Every `grounded` score in this file predates the clock fix.** Three of the
-  twenty probes were measuring whether a model would invent a time. Re-running
-  `eval_quality.py --suite hallucination` on the adopted models would say
-  whether any recorded number moves.
-- **The UI has still not been looked at.** The renderer now builds and mounts
-  (the blank-window bug above is fixed), but nobody has seen the new palette,
-  the mode control or the attachment chips on screen. **Restart `npm run dev`
-  fully** — main and preload never hot-reload — then check every panel, both
-  window sizes, all five orb states, and the window over a bright white
-  editor, which is the case the 0.62 glass alpha was chosen for.
+
+**Phase 9 — packaging is the only unbuilt phase in BUILD_SPEC §9.** Everything
+before it is written. What it still wants:
+- `electron-builder` `extraResources` wiring (sidecar dist, `resources/bin`,
+  `resources/models`), the NSIS installer and the auto-start option.
+- The first-run wizard: check Ollama → pull models with progress → check
+  Everything → mic permission → optional API key → wake word calibration.
+- Crash reporting to a local file, and an "Export diagnostics" button.
 - **Speech does not load in the packaged bundle.** `ctranslate2` raises
   `cannot load module more than once per process`, so `faster-whisper` and the
   wake word are dead there; everything else in the bundle works. Three
   hypotheses tested and disproven — see the section above, so the next attempt
   starts from what is already ruled out.
-- **The rest of Phase 9**: electron-builder `extraResources`, the NSIS
-  installer, the first-run wizard, crash reporting, "Export diagnostics". Its
-  gate needs a clean Windows 11 VM; code signing needs a certificate this
-  project does not have.
-- **The `type_text` rewrite has not been exercised on a real desktop.** Unit
-  tests and a mutation check cover the window claim, the paste path and the
-  clipboard restore, but no automated test opens a real Notepad — the same
-  limit `gate_browser.py` and the original `SendInput` struct bug both hit.
-- **`gate_proactivity.py`'s live delivery round-trip has not been
-  *observed* landing end to end** — and the reason is now exact rather than
-  vague: `focus.RECENT_ACTIVITY_S` is 20 minutes and any tool call driving
-  the gate counts as system input, so the focus check correctly suppresses
-  delivery every time the gate runs. Needs 20 real minutes of an untouched
-  machine; the mechanism itself is unit-tested on an injected clock.
+- Its acceptance gate needs a **clean Windows 11 VM**, and code signing needs a
+  certificate this project does not have.
+
+**The three deep mode features**, designed with Eyaas and deliberately deferred
+when `ModePolicy` was built — each is a session, and each hangs off it:
+- **Study's knowledge map**: per-topic mastery, a migration, and a panel. The
+  one piece here that is a new subsystem rather than a policy, so it lands with
+  its writer wired and a test that fails if nothing writes to it — this project
+  has shipped four tables nobody wrote to.
+- **Research's evidence pipeline**: decompose → gather → cross-check →
+  synthesise, with source labels **derived rather than scored**. No number out
+  of ten: what is checkable is whether a source is old, vendor-published, a
+  single study, and whether its URL resolves.
+- **Code's self-review loop**: a second model pass over its own output before
+  showing it. Typed only — it must never touch the voice path, and it doubles
+  free-tier consumption.
+
+**Measurement debts** — things built and unproven, not things unbuilt:
+- **`READ_ONLY` in Quick and Study is unmeasured.** Per-mode tool sets are
+  argued to be safe where relevance filtering was not, and that argument has
+  not been tested. `gate_tool_selection.py` is the instrument.
+- **No free model has been *adopted* yet.** `gemma-4-26b` reached 12 of 20
+  probes before the 50-a-day allowance ran out. **The scheduler only starts at
+  startup**, so ARIA needs a restart with the key in place.
+- **Every `grounded` score in this file predates the clock fix.** Three of the
+  twenty probes were measuring whether a model would invent a time.
 - The Gemini half of `measure_models.py` and of the tool scoreboard, both still
   blocked on that quota.
+
+**Not observed working, for reasons that are not code:**
+- **The UI has still not been looked at.** The renderer builds and mounts, but
+  nobody has seen the new palette, the mode control, the Critic option, the
+  suggestion chip or the attachment chips on screen. **Restart `npm run dev`
+  fully** — main and preload never hot-reload — then check every panel, both
+  window sizes, all five orb states, and the window over a bright white editor,
+  which is the case the 0.62 glass alpha was chosen for.
+- **`type_text` has not been exercised on a real desktop** since the rewrite.
+  Unit tests and a mutation check cover the window claim, the paste path and
+  the clipboard restore, but no automated test opens a real Notepad.
+- **`gate_proactivity.py`'s live delivery round-trip.** `focus.RECENT_ACTIVITY_S`
+  is 20 minutes and any tool call driving the gate counts as system input, so
+  the focus check correctly suppresses delivery every time the gate runs. Needs
+  20 real minutes of an untouched machine.
 
 **Two Phase 4 gate lines that cannot be measured on this machine**, recorded so
 neither is mistaken for a pass or for a bug:
