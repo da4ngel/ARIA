@@ -132,6 +132,11 @@ export function useConversation(connected: boolean): UseConversation {
   const [activeSession, setActiveSession] = useState<string | null>(null)
   const sessionId = useRef<string | null>(null)
   const activeTurnId = useRef<string | null>(null)
+  //: Stop pressed during the window between `setBusy(true)` and `chat.send`
+  //: returning the turn id. There is nothing to cancel yet, so the intent is
+  //: remembered and applied the moment the id lands — otherwise the click is
+  //: silently dropped and the only feedback is that nothing happens.
+  const cancelWanted = useRef(false)
 
   // Reload from the sidecar whenever the connection is (re)established.
   useEffect(() => {
@@ -280,8 +285,19 @@ export function useConversation(connected: boolean): UseConversation {
 
       if (event.method === 'turn.complete') {
         const payload = event.params as unknown as TurnCompletePayload
-        if (payload.turn_id !== activeTurnId.current) return
+        // **`busy` is cleared even when the id does not match**, and that is
+        // the whole fix. It used to sit behind this guard, so any unmatched
+        // completion left the composer showing Stop forever with nothing to
+        // cancel — clicking it did nothing, which is exactly what Eyaas hit.
+        //
+        // The id can legitimately be unknown here: the RPC reply and the event
+        // stream are two different Electron IPC channels with no ordering
+        // between them, so a fast turn can complete before `chat.send`
+        // resolves. Only one turn is ever in flight, so an unmatched
+        // completion while busy is this turn's.
+        if (activeTurnId.current !== null && payload.turn_id !== activeTurnId.current) return
         activeTurnId.current = null
+        cancelWanted.current = false
         setBusy(false)
         setLastFirstTokenMs(payload.first_token_ms ?? null)
         setTurns((prev) => finalise(prev, payload))
@@ -330,6 +346,10 @@ export function useConversation(connected: boolean): UseConversation {
           : trimmed
 
       setBusy(true)
+      // Cleared per turn, not per click: a stop meant for the previous turn
+      // must not cancel this one.
+      activeTurnId.current = null
+      cancelWanted.current = false
       setTurns((prev) => [
         ...prev,
         { id: `u${Date.now()}`, role: 'user', content: shown },
@@ -358,6 +378,11 @@ export function useConversation(connected: boolean): UseConversation {
         activeTurnId.current = started.turn_id
         sessionId.current = started.session_id
         setActiveSession(started.session_id)
+        // The stop that arrived too early, honoured now.
+        if (cancelWanted.current) {
+          cancelWanted.current = false
+          await window.aria.call('chat.cancel', { turn_id: started.turn_id })
+        }
       } catch (cause) {
         activeTurnId.current = null
         setBusy(false)
@@ -370,7 +395,12 @@ export function useConversation(connected: boolean): UseConversation {
 
   const cancel = useCallback(async () => {
     const turnId = activeTurnId.current
-    if (!turnId) return
+    if (!turnId) {
+      // Pressed before the turn id came back. Remembered rather than dropped
+      // — `send` applies it as soon as it knows what to cancel.
+      cancelWanted.current = true
+      return
+    }
     try {
       await window.aria.call('chat.cancel', { turn_id: turnId })
     } catch {

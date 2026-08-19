@@ -115,13 +115,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "sidecar/core/context.py": {
-    "mtime": 1787051927.3279552,
-    "ast_hash": "0800c0eb9cb59f56db50b2f60fd95126",
+    "mtime": 1787124446.119637,
+    "ast_hash": "647ea0fd07a995cb7951c3e6b76db207",
     "semantic_hash": ""
   },
   "sidecar/core/conversation.py": {
-    "mtime": 1787106168.4870856,
-    "ast_hash": "ee53df237bba3e0fe6ae9a8dc7e9d4bf",
+    "mtime": 1787139828.9505959,
+    "ast_hash": "462644905355a5e8c06bb3b4bdb8e785",
     "semantic_hash": ""
   },
   "sidecar/core/listener.py": {
@@ -280,13 +280,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "sidecar/rpc/events.py": {
-    "mtime": 1787051394.6602247,
-    "ast_hash": "19289c2797e0324cd80c9d25bdc4efc8",
+    "mtime": 1787139828.9505959,
+    "ast_hash": "d8fe83f8dc35715da4012eb2e50f07c7",
     "semantic_hash": ""
   },
   "sidecar/rpc/handlers.py": {
-    "mtime": 1787107127.8476603,
-    "ast_hash": "44fbeb395c9deecb073e20d6ba53f3c4",
+    "mtime": 1787139764.0022004,
+    "ast_hash": "f62173ecb9e617272eef2e1916b70a20",
     "semantic_hash": ""
   },
   "sidecar/rpc/protocol.py": {
@@ -320,8 +320,8 @@
     "semantic_hash": "9ea9f305bbd35de2074f623852cb2d3d"
   },
   "sidecar/tests/test_context.py": {
-    "mtime": 1787052025.6878495,
-    "ast_hash": "59fa1b7ce54dffe114657aab68a740ae",
+    "mtime": 1787124446.1206377,
+    "ast_hash": "588ca3b451f2575ea10209a031a327e6",
     "semantic_hash": ""
   },
   "sidecar/tests/test_conversation.py": {
@@ -425,8 +425,8 @@
     "semantic_hash": "d2df210b82e86372b182b31200860fd0"
   },
   "src/App.tsx": {
-    "mtime": 1787052886.2083738,
-    "ast_hash": "683b3369d7e0c8e1e6832886be533e8d",
+    "mtime": 1787140093.6889844,
+    "ast_hash": "ad2880873e3153f492ed052076faf9f2",
     "semantic_hash": ""
   },
   "src/components/ComposerBar.tsx": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1787118301.3717868,
-    "ast_hash": "c4b490147968467d9ab569768babbba7",
+    "mtime": 1787140406.3113534,
+    "ast_hash": "ade02af53f157ebe6cd24602b70cae46",
     "semantic_hash": ""
   },
   "README.md": {
@@ -770,9 +770,9 @@
     "semantic_hash": ""
   },
   "sidecar/memory/retrieval.py": {
-    "mtime": 1786553068.6035948,
-    "ast_hash": "ad4dc5e86c1053e0190d0a1d1d8b98e0",
-    "semantic_hash": "ad4dc5e86c1053e0190d0a1d1d8b98e0"
+    "mtime": 1787124002.5597217,
+    "ast_hash": "3f113ecc3fa08dadeda76968081144c3",
+    "semantic_hash": ""
   },
   "sidecar/memory/scheduler.py": {
     "mtime": 1786534556.8767047,
@@ -905,8 +905,8 @@
     "semantic_hash": ""
   },
   "sidecar/core/agent.py": {
-    "mtime": 1787016242.9859962,
-    "ast_hash": "60ce6231fdd46a78be3890e3c794b918",
+    "mtime": 1787124031.029934,
+    "ast_hash": "9f12d4983ca6e281e650102cafe5eb01",
     "semantic_hash": ""
   },
   "scripts/gate_browser.py": {
@@ -1085,18 +1085,18 @@
     "semantic_hash": ""
   },
   "src/components/ModeSelector.test.tsx": {
-    "mtime": 1787052914.2526972,
-    "ast_hash": "58a3c786ad1a72f09a0f1bd6b436ffd6",
+    "mtime": 1787140216.4115064,
+    "ast_hash": "ba84f798d5b04d9a7e4e74fc0537a044",
     "semantic_hash": ""
   },
   "src/components/ModeSelector.tsx": {
-    "mtime": 1787052831.7001617,
-    "ast_hash": "eed086ce5668cb56a542a33cc7e8bc3a",
+    "mtime": 1787140062.4925377,
+    "ast_hash": "195b561e0c2166c620e65575cb1369c3",
     "semantic_hash": ""
   },
   "src/hooks/useConversationMode.ts": {
-    "mtime": 1787052811.3419452,
-    "ast_hash": "c7a36a01240060c3e1ea8f017d7efbd8",
+    "mtime": 1787140120.0381098,
+    "ast_hash": "37f5d081b31fde46ef07f00d1777b420",
     "semantic_hash": ""
   },
   "src/styles/acrylic.test.ts": {
@@ -1177,6 +1177,16 @@
   "sidecar/tests/test_probes.py": {
     "mtime": 1787114505.6146097,
     "ast_hash": "5012a7c3bc2afd89c2e39ac84fc6f5d4",
+    "semantic_hash": ""
+  },
+  "sidecar/core/modes.py": {
+    "mtime": 1787123935.4616165,
+    "ast_hash": "47390f930cbe2b2a36e8fc91d2f1ed7f",
+    "semantic_hash": ""
+  },
+  "sidecar/tests/test_modes.py": {
+    "mtime": 1787124731.09329,
+    "ast_hash": "e734bf9bb9e9b167649a68f6bff9af7f",
     "semantic_hash": ""
   }
 }

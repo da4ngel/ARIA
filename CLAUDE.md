@@ -2716,6 +2716,83 @@ renderer build all clean.** Not yet looked at on screen, and the six policies
 have not been measured against real turns — `gate_tool_selection.py` on Quick
 is the first thing worth running.
 
+## Stop did nothing, and the modes got their first live test (2026-08-19)
+    python scripts/gate_modes.py     # needs the sidecar running
+
+Eyaas: *"im trying to click the stop, but when its still processing, i cant
+stop it."*
+
+**The sidecar was never at fault**, and measuring that first is what stopped
+this being a long hunt. Driven directly against the running one: `chat.send`
+returns in **4ms**, `chat.cancel` in **2ms**, **zero** tokens arrive after it,
+and `turn.complete` carries `cancelled: true`. Both bugs were in
+`useConversation.ts`, and both are the same shape — **the hook knows a turn is
+running before it knows which turn it is**, and treated knowing which as a
+precondition for stopping it *and* for noticing it had ended.
+
+- **`setBusy(false)` sat inside the `payload.turn_id !== activeTurnId.current`
+  guard.** Any completion the hook could not match left `busy` true **forever**
+  — the composer showing Stop with nothing left to cancel, clicking it doing
+  nothing. That is the reported symptom exactly. The ids can legitimately
+  disagree: the RPC reply and the event stream are two different Electron IPC
+  channels with no ordering between them, so a fast turn can complete before
+  `chat.send` resolves. Only one turn is ever in flight, so an unmatched
+  completion while busy is this turn's.
+- **A stop pressed in the first few milliseconds was dropped silently.**
+  `setBusy(true)` runs *before* the `chat.send` await, so the button says Stop
+  while `activeTurnId` is still null — and `cancel()` returned early. It is
+  remembered now and applied the moment the id lands, and cleared per turn so
+  it cannot leak into the next one.
+- **There was no test file for this hook at all.** That is how a button which
+  silently does nothing survived. Five tests now, mutation-checked: putting
+  both bugs back fails exactly the two written for them.
+
+### The six modes, run live for the first time
+`scripts/gate_modes.py`. All six answered, on real models, with visibly
+different shapes — and Critic reproduced its own policy almost word for word,
+opening *"What would have to be true for microservices to pay off"*.
+
+| mode | words | model | ms |
+|---|---|---|---|
+| quick | **16** | qwen2.5:7b (local) | 7605 |
+| code | 56 | gpt-5.4-nano | 5828 |
+| normal | 64 | gpt-5.4-nano | 8150 |
+| study | 78 | gpt-5.4-nano | 8038 |
+| research | 98 | gpt-5.4-nano | 9587 |
+| critic | **293** | gpt-5.4-nano | 24765 |
+
+Quick routed **local** off its `FASTEST` bias while every other mode went
+cloud, which is the routing lever working rather than a coincidence of the
+question. No read-only mode reached a tool that changes anything.
+
+### Three faults in the gate itself, all found by running it
+None of them were in the product, and each is the kind that makes a green run
+meaningless rather than red.
+
+- **Asking all six modes the same question contaminated the measurement.**
+  `chat.new` closes the previous session, which writes an episode
+  *immediately*, and `Retriever` is deliberately cross-session — so by the
+  fourth mode there were three episodes about that exact question. Quick opened
+  with *"Earlier you said to use an array"* and Critic with *"We talked about
+  this before, Eyaas"*. **Both were memory working correctly**; the gate was
+  what was broken, because modes four to six had context modes one to three did
+  not. Six parallel questions now, sharing no vocabulary.
+- **It could not answer a confirmation, so it hung** — `gate_research.py`'s own
+  recorded lesson, walked into again by the next script to reach for
+  `research`. It approves a named read-only set and denies everything else.
+- **`asyncio.wait_for(ws.recv(), …)` in a loop loses frames.** `wait_for`
+  cancels the pending `recv()` on every timeout, and a frame arriving during
+  that cancellation is gone. It cost three runs of "timed out after 240s" for
+  turns the database showed answering in 12-35 seconds. One long-lived reader
+  task filling a queue now; cancelling a `Queue.get()` is safe in a way
+  cancelling `recv()` is not. **The reader also reports its own death** — dying
+  silently is what made this take three runs instead of one.
+
+**1277 sidecar tests, 134 renderer (+5), ruff, mypy, typecheck and the renderer
+build all clean.** `test_indexer.py::test_it_does_not_run_while_she_is_answering`
+failed once directly after six live model turns and passes on its own — the
+flake CLAUDE.md already records, not a regression.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
