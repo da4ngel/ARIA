@@ -2555,6 +2555,64 @@ live; the promotion itself is unit-tested and mutation-checked, and will happen
 on its own once ARIA is restarted with the key in place — `_start_adoption`
 reads the key at startup, so **the scheduler does not begin until a restart**.
 
+## She invented a lecture she had never opened (2026-08-19)
+    pytest sidecar/tests/test_attachments.py -v
+
+Eyaas attached `Lecture 01 - Module Overview and Introduction to Information
+Security.ppt` and got *"I can't find that file in the places I searched"* — the
+screenshot that started this. The real damage was the day before, in the same
+database, on the same file.
+
+**`attachments.render()` returned `""` for a file it could not read.** The
+model was told *nothing whatever* about it — and the user message that reaches
+the model in that case is the bare string `[attached: <name>]`. A filename,
+no content, no explanation. Two failures came out of that gap, and the second
+one is the serious one:
+
+| | |
+|---|---|
+| `tool_log` 319, 320 | `open_file{"query": "Lecture 01 … .ppt"}` → **`not_found`**, twice, then *"tell me where it is, or upload it again"* — when he had just handed it over and the absolute path was known throughout |
+| **message 701** | *"**Opened** "Lecture 01 …". Here are the key points: ### Slide 1: Title Slide … ### Slide 2: Course Objectives — Understand the importance of information security…"* |
+
+**She wrote a slide-by-slide summary of a file nothing had ever opened.** Every
+anti-invention clause in `context.py` exists to stop precisely that, and not
+one of them could fire, because from the model's side there was no failure to
+report — only a name that reads like a syllabus.
+
+- **The attachment layer was working.** `.ppt` is OLE2, deliberately
+  unsupported, and `_read_document` produced exactly the right sentence —
+  *".ppt is the old binary PowerPoint format… save as .pptx (File > Save As),
+  or export to PDF, and I will read it."* It reached the transcript, in amber,
+  where a person could read it. **It never reached the model.** `render()`
+  filtered on `if a.excerpt`, and a failure has no excerpt.
+- **The notice sits outside the `<untrusted_content>` fence**, deliberately.
+  It is this program's own words about the file, not the file's content;
+  inside, it would be labelled as data the model is told *not* to act on —
+  the exact opposite of what an instruction needs.
+- **It names the path.** A name is not a path, and the model was only ever
+  given the name, so `open_file` resolved it against the sidecar's working
+  directory and missed. The notice ends *"Do not search for it or ask where it
+  is: the path is given above and the file is there."*
+- **And it names the reason**, which is the half that tells Eyaas what to do.
+  A `.ppt` is not a mystery, it is one conversion away — and until now that
+  sentence was one she could not repeat even if she wanted to.
+- **The old test asserted the bug.** `test_nothing_readable_produces_no_block_at_all`
+  reasoned that a notice would *"tell the model a file exists that it cannot
+  see"*. Backwards: it is already told, by `[attached: …]`. Rewritten into five
+  tests carrying both real transcripts, and mutation-checked — restoring the
+  silent drop fails exactly those five and nothing else.
+
+**Verified live on the same file and question, `gpt-5.4-nano`:**
+
+> *"I can't view that attachment as-is: it's an older binary PowerPoint **.ppt**
+> file, and I don't have the contents to read from it. Open it in PowerPoint
+> and either **File > Save As > .pptx** or **File > Export > PDF**…"*
+
+No invented slides, no hunt for the file, no asking where it is. And the advice
+is true rather than merely plausible — a real `.pptx` built and put through
+`extract_or_raise` in the same check comes back as
+`"Slide 1: Module Overview and Introduction to Information Security"`.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -2656,6 +2714,11 @@ stated a second way, not a weaker one. Two bugs found on the way, neither in
 this feature: `eval_quality.py` sent no clock, so three `grounded` probes were
 rewarding an invented time; and a duplicated `provider_for()` in two scripts
 silently fell through to Gemini. **41 tools, unchanged.**
+
+**And a `.ppt` upload showed she would invent a lecture she had never
+opened** — `attachments.render()` told the model nothing at all about a file it
+could not read, so a filename was the only signal and she wrote a slide-by-slide
+summary of it. See the section above. **41 tools, unchanged.**
 
 **A real key arrived the same day and found five more**, four of which only a
 live provider could surface: upstream throttling blocked the adoption queue

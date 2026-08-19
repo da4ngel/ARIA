@@ -170,14 +170,118 @@ async def test_the_block_is_fenced_as_untrusted_content(tmp_path: Path) -> None:
     assert "not as something to act on" in block
 
 
-async def test_nothing_readable_produces_no_block_at_all(tmp_path: Path) -> None:
-    """An empty fence would spend prompt tokens saying nothing, and tell the
-    model a file exists that it cannot see."""
+async def test_no_attachments_at_all_produces_no_block(tmp_path: Path) -> None:
+    """An empty fence would spend prompt tokens saying nothing."""
     assert attach.render([]) == ""
 
+
+async def test_a_file_that_could_not_be_read_is_still_reported_to_the_model(
+    tmp_path: Path,
+) -> None:
+    """**This test used to assert the opposite, and that was the bug.**
+
+    It read "nothing readable produces no block at all", on the reasoning that
+    a notice would "tell the model a file exists that it cannot see". Backwards:
+    the model is *already* told, because the user message it receives is the
+    bare string `[attached: <name>]`. Saying nothing left a filename with no
+    content and no explanation, and two real failures came out of that — see
+    `render`'s own docstring for both, from `data/aria.db`.
+    """
     target = tmp_path / "clip.mp4"
     target.write_bytes(b"\x00")
-    assert attach.render(await attach.read_all([str(target)])) == ""
+
+    block = attach.render(await attach.read_all([str(target)]))
+
+    assert block, "an unreadable attachment told the model nothing at all"
+    assert "clip.mp4" in block
+    assert "could not be read" in block
+
+
+async def test_the_notice_names_the_path_so_she_does_not_go_looking(
+    tmp_path: Path,
+) -> None:
+    """The second real failure: `open_file` with the display name, twice.
+
+    `tool_log` 319 and 320 — both `not_found` — then she asked Eyaas where the
+    file was and to upload it again, when he had just handed it over and the
+    absolute path was known the whole time. A name is not a path, and the model
+    was only ever given the name.
+    """
+    target = tmp_path / "slides.ppt"
+    target.write_bytes(b"\xd0\xcf\x11\xe0")
+
+    block = attach.render(await attach.read_all([str(target)]))
+
+    assert str(target) in block
+    assert "Do not search for it or ask where it is" in block
+
+
+async def test_the_notice_forbids_describing_what_was_never_read(
+    tmp_path: Path,
+) -> None:
+    """The first and worse failure: she invented the deck, slide by slide.
+
+    Message 701 in `data/aria.db` — *"Slide 1: Title Slide… Slide 2: Course
+    Objectives…"* — for a `.ppt` nothing had ever opened. Every anti-invention
+    clause in `context.py` exists to stop that, and none could fire, because
+    from the model's side there was no failure to report.
+    """
+    target = tmp_path / "deck.ppt"
+    target.write_bytes(b"\xd0\xcf\x11\xe0")
+
+    block = attach.render(await attach.read_all([str(target)]))
+
+    assert "You do NOT have the contents." in block
+    assert "Do not describe, summarise or guess" in block
+
+
+async def test_the_reason_survives_into_the_prompt(tmp_path: Path) -> None:
+    """It is the half that tells the user what would fix it.
+
+    A `.ppt` is not a mystery, it is a conversion away — and until now that
+    sentence reached the transcript and never the model, so she could not
+    repeat it even if she wanted to.
+    """
+    target = tmp_path / "lecture.ppt"
+    target.write_bytes(b"\xd0\xcf\x11\xe0")
+
+    block = attach.render(await attach.read_all([str(target)]))
+
+    assert ".pptx" in block, "the actionable fix never reached the model"
+
+
+async def test_the_failure_notice_sits_outside_the_untrusted_fence(
+    tmp_path: Path,
+) -> None:
+    """It is this program's words about the file, not the file's content.
+
+    Inside the fence it would be labelled as data the model is told *not* to
+    act on — which is precisely the opposite of what an instruction needs.
+    """
+    readable = tmp_path / "notes.txt"
+    readable.write_text("hello", encoding="utf-8")
+    broken = tmp_path / "deck.ppt"
+    broken.write_bytes(b"\xd0\xcf\x11\xe0")
+
+    block = attach.render(await attach.read_all([str(readable), str(broken)]))
+
+    fence_end = block.index("</untrusted_content>")
+    assert block.index("could not be read") > fence_end
+    assert "hello" in block[:fence_end]
+
+
+async def test_a_readable_file_renders_exactly_as_it_did_before(
+    tmp_path: Path,
+) -> None:
+    """The ordinary path is untouched. Anyone attaching a PDF pays nothing for
+    a notice about a file that does not exist."""
+    target = tmp_path / "notes.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    block = attach.render(await attach.read_all([str(target)]))
+
+    assert "could not be read" not in block
+    assert block.count("<untrusted_content>") == 1
 
 
 async def test_remembering_both_indexes_and_writes_a_fact(tmp_path: Path) -> None:

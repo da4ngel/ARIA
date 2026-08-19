@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1787114884.2598698,
-    "ast_hash": "2ce7bfb542d1ed551af82d5e1abffcfe",
+    "mtime": 1787118301.3717868,
+    "ast_hash": "c4b490147968467d9ab569768babbba7",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1055,13 +1055,13 @@
     "semantic_hash": ""
   },
   "sidecar/core/attachments.py": {
-    "mtime": 1787051732.8648043,
-    "ast_hash": "3e9f2d356d953f00fd9457fd25a38212",
+    "mtime": 1787117945.7164097,
+    "ast_hash": "2c580d28ad8d2fbcadaf0bf51f77a2af",
     "semantic_hash": ""
   },
   "sidecar/tests/test_attachments.py": {
-    "mtime": 1787038281.1350524,
-    "ast_hash": "c9bda60676477d951c3db6e1ed328562",
+    "mtime": 1787117847.3286095,
+    "ast_hash": "0e656c0fc093355a0015b44c68ba36e3",
     "semantic_hash": ""
   },
   "src/components/FilesPanel.test.tsx": {
@@ -1170,8 +1170,8 @@
     "semantic_hash": ""
   },
   "image.png": {
-    "mtime": 1787053923.0493834,
-    "ast_hash": "55d9a168cd5f7615bbb249f1cd2e2168",
+    "mtime": 1787117563.0115316,
+    "ast_hash": "295af31d5f01dd648fb1a62caf098b07",
     "semantic_hash": ""
   },
   "sidecar/tests/test_probes.py": {
