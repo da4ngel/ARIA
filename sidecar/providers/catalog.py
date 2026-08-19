@@ -26,6 +26,11 @@ class ProviderName(StrEnum):
     OLLAMA = "ollama"
     OPENAI = "openai"
     GEMINI = "gemini"
+    #: One key, many vendors — and the free tier this project actually wants.
+    #: Adding a member here obliges four other places to learn about it;
+    #: `providers/factory.py` builds its dict from this enum so a forgotten
+    #: registration is an error rather than a silently missing provider.
+    OPENROUTER = "openrouter"
 
 
 # `str.capitalize()` would render these "Openai" and "Ollama". They appear in
@@ -34,6 +39,7 @@ PROVIDER_LABELS: dict[ProviderName, str] = {
     ProviderName.OLLAMA: "Ollama",
     ProviderName.OPENAI: "OpenAI",
     ProviderName.GEMINI: "Gemini",
+    ProviderName.OPENROUTER: "OpenRouter",
 }
 
 
@@ -84,6 +90,20 @@ class ModelInfo(BaseModel):
     # and the other reasoning models reject any value but 1.0, and `openai.py`
     # forwards whatever it is given. Set this only where it was measured.
     temperature: float | None = None
+    # A third party's published score for this model (Artificial Analysis'
+    # intelligence index, as OpenRouter reports it), carried verbatim.
+    #
+    # **Not a measurement made here, and it must never stand in for one.** It
+    # orders the adoption queue — which candidate is worth spending scarce
+    # free-tier quota on first — and nothing else. `tool_score` and
+    # `ttft_ms_seed` stay `None` until this machine has actually measured them.
+    benchmark_index: float | None = None
+    # Whether the endpoint may train on what is sent to it. A property of the
+    # *endpoint*, not of the model: OpenRouter's free tier can route to
+    # providers that do, and while the account holder can opt out, this code
+    # cannot assert that they have. `core/router.py` keeps turns carrying the
+    # user's own files away from these — see `carries_user_content`.
+    trains_on_data: bool = False
     # Found by asking the provider what it sells, rather than written down here
     # after being measured. A discovered model can be chosen by hand but is
     # never routed to automatically — see `by_class`.
@@ -319,9 +339,49 @@ def discovered() -> list[ModelInfo]:
     return list(_DISCOVERED.values())
 
 
+#: Models this machine has measured *itself*, at runtime, and which passed.
+#:
+#: The middle ground between `CATALOG` and `_DISCOVERED`, and the only reason
+#: it can exist: `providers/adoption.py` runs the same `grounded` probes that
+#: rejected `gpt-5.6-luna` and `o4-mini`, and only a clean sweep lands a model
+#: here. So this is not "discovered models the router is allowed to use after
+#: all" — it is the measurement requirement being met by a scheduler instead of
+#: by a person reading a transcript. A model that fails, or has not been
+#: measured yet, stays in `_DISCOVERED` and stays unroutable.
+_ADOPTED: dict[str, ModelInfo] = {}
+
+
+def adopt(info: ModelInfo) -> None:
+    """Record a model as measured-and-passed, making it routable.
+
+    Curated ids still win: an entry already in `CATALOG` carries measurements
+    this cannot improve on.
+    """
+    if info.id in _BY_ID:
+        return
+    _ADOPTED[info.id] = info
+
+
+def unadopt(model_id: str) -> None:
+    """Drop an adoption — used when a free model expires or disappears."""
+    _ADOPTED.pop(model_id, None)
+
+
+def adopted() -> list[ModelInfo]:
+    return list(_ADOPTED.values())
+
+
+def clear_adopted() -> None:
+    """Tests only. The overlay is process-global, like `_DISCOVERED`."""
+    _ADOPTED.clear()
+
+
 def all_models() -> list[ModelInfo]:
-    """Everything selectable: measured first, then found."""
-    return [*CATALOG, *_DISCOVERED.values()]
+    """Everything selectable: measured first, then adopted, then found."""
+    seen = {m.id for m in CATALOG}
+    adopted_only = [m for m in _ADOPTED.values() if m.id not in seen]
+    seen |= {m.id for m in adopted_only}
+    return [*CATALOG, *adopted_only, *(m for m in _DISCOVERED.values() if m.id not in seen)]
 
 
 class ModelAvailability(BaseModel):
@@ -344,8 +404,11 @@ class ModelListing(BaseModel):
 
 
 def get(model_id: str) -> ModelInfo | None:
-    """Curated first, then discovered — so an explicit choice always resolves."""
-    return _BY_ID.get(model_id) or _DISCOVERED.get(model_id)
+    """Curated first, then adopted, then discovered.
+
+    So an explicit choice always resolves, whichever tier it came from.
+    """
+    return _BY_ID.get(model_id) or _ADOPTED.get(model_id) or _DISCOVERED.get(model_id)
 
 
 def require(model_id: str) -> ModelInfo:
@@ -357,13 +420,20 @@ def require(model_id: str) -> ModelInfo:
 
 
 def by_class(klass: ModelClass) -> list[ModelInfo]:
-    """The router's pool, and **curated only**.
+    """The router's pool: **measured only** — curated, or adopted after passing.
 
-    Reading `all_models()` here would let Smart mode route a turn to a model
-    whose speed, cost and honesty nobody has measured. `test_catalog.py` holds
-    this line; changing it to `all_models()` must fail that test.
+    The property has not been weakened by adoption, it has been restated. What
+    must never happen is Smart routing a turn to a model whose honesty nobody
+    has checked, and `_ADOPTED` is populated by exactly one thing: a clean
+    sweep of the `grounded` probes, the control group that has already rejected
+    two models outright. A merely *discovered* model is still unreachable from
+    here, and so is a rejected one.
+
+    Reading `all_models()` here would undo all of it. `test_catalog.py` holds
+    the line three ways — discovered, rejected, and adopted — and changing this
+    to `all_models()` must fail the first two.
     """
-    return [m for m in CATALOG if m.klass is klass]
+    return [m for m in (*CATALOG, *_ADOPTED.values()) if m.klass is klass]
 
 
 def local_models() -> list[ModelInfo]:

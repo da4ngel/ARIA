@@ -36,6 +36,7 @@ import asyncio
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -51,7 +52,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from probes import (
+from sidecar.core import context as ctx
+from sidecar.eval.probes import (
     SUITES,
     Expect,
     Probe,
@@ -61,9 +63,7 @@ from probes import (
     refused,
     universal_failures,
 )
-
-from sidecar.core import context as ctx
-from sidecar.providers import catalog
+from sidecar.providers import catalog, factory
 from sidecar.providers.base import (
     ChatMessage,
     GenerationOptions,
@@ -72,9 +72,7 @@ from sidecar.providers.base import (
     ProviderRateLimited,
     Role,
 )
-from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.ollama import OllamaProvider
-from sidecar.providers.openai import OpenAIProvider
 
 
 @dataclass
@@ -142,13 +140,28 @@ def _is_reasoning(info: catalog.ModelInfo) -> bool:
 def build_messages(
     probe: Probe, info: catalog.ModelInfo, level: ctx.PersonaLevel | None = None
 ) -> list[ChatMessage]:
-    """Exactly what the app would send: stable prefix first, then the turns."""
+    """Exactly what the app would send: stable prefix first, then the turns.
+
+    **Including the clock**, which this did not do until 2026-08-19. Three
+    `grounded` probes ask the time, the date and the weekday — they are in the
+    control group *because* `machine_context()` puts the answer in the prompt,
+    and this sent `machine=None`. So they were scoring whether a model would
+    invent a plausible time, which is the opposite of what `grounded` measures:
+    a model that correctly said it could not know was marked down, and one that
+    made up "3:45 PM" was marked up. Found while building the adoption gate,
+    which runs the same probes from inside the sidecar.
+    """
     turns: list[ChatMessage] = []
     for user, assistant in probe.history:
         turns.append(ChatMessage(role=Role.USER, content=user))
         turns.append(ChatMessage(role=Role.ASSISTANT, content=assistant))
     turns.append(ChatMessage(role=Role.USER, content=probe.prompt))
-    return ctx.assemble(turns, level=level or info.persona)
+    machine = ctx.MachineContext(
+        now=datetime.now().astimezone(),
+        model_label=info.label,
+        model_is_local=info.local,
+    )
+    return ctx.assemble(turns, level=level or info.persona, machine=machine)
 
 
 async def run_probe(
@@ -205,11 +218,15 @@ async def run_probe(
 
 
 def provider_for(info: catalog.ModelInfo) -> LLMProvider:
-    if info.provider is catalog.ProviderName.OLLAMA:
-        return OllamaProvider()
-    if info.provider is catalog.ProviderName.OPENAI:
-        return OpenAIProvider()
-    return GeminiProvider()
+    """One line, because the hand-written version here was a trap.
+
+    It mapped Ollama and OpenAI explicitly and let *everything else* fall
+    through to `GeminiProvider()` — so measuring an OpenRouter model would
+    have measured Gemini and printed the score under the wrong id. A
+    measurement naming the wrong model is worse than no measurement, because
+    it looks like evidence. `providers/factory.py` raises instead.
+    """
+    return factory.for_model(info)
 
 
 async def run_model(

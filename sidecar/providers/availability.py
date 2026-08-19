@@ -36,6 +36,7 @@ DISCOVERY_MAX_AGE = timedelta(hours=24)
 _KEY_FOR: dict[ProviderName, CredentialKey] = {
     ProviderName.OPENAI: CredentialKey.OPENAI,
     ProviderName.GEMINI: CredentialKey.GEMINI,
+    ProviderName.OPENROUTER: CredentialKey.OPENROUTER,
 }
 
 

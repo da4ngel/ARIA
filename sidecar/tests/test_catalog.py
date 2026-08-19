@@ -206,10 +206,81 @@ def test_smart_never_routes_to_a_discovered_model(discovered) -> None:
     `by_class` is the router's only way to reach for a model. If it ever reads
     `all_models()`, Smart mode starts choosing models with no measured latency,
     no known cost and no caveat — silently, on the user's next turn.
+
+    **Adoption did not weaken this.** `by_class` now also reads `_ADOPTED`,
+    which holds only models that passed the `grounded` gate on this machine —
+    a *measured* model, by the same standard `CATALOG` is held to. A merely
+    discovered one is still unreachable from here, which is what this asserts,
+    and the two tests below hold the rejected and adopted cases.
     """
     for klass in catalog.ModelClass:
         assert discovered.id not in {m.id for m in catalog.by_class(klass)}
     assert discovered.id not in {m.id for m in catalog.local_models()}
+
+
+@pytest.fixture
+def adopted():
+    """A model this machine measured itself, and which passed.
+
+    Built exactly the way `AdoptionService._promote` builds one: a discovered
+    entry, unchanged, moved into the adopted overlay. It carries no
+    `tool_score` and no `ttft_ms_seed`, because passing `grounded` says nothing
+    about either.
+    """
+    info = catalog.ModelInfo(
+        id="free-vendor/measured-and-passed:free",
+        provider=catalog.ProviderName.OPENROUTER,
+        label="Measured And Passed",
+        klass=catalog.ModelClass.BALANCED,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.FREE,
+        best_for="",
+        trains_on_data=True,
+        discovered=True,
+    )
+    catalog.adopt(info)
+    yield info
+    catalog.clear_adopted()
+
+
+def test_smart_never_routes_to_a_model_that_failed_measurement(discovered) -> None:
+    """A **rejected** model is as unroutable as an unmeasured one.
+
+    Adoption's whole point is that measurement decides, so the failure mode to
+    guard is a candidate reaching the router by any route other than passing.
+    A rejection is recorded in `adoption.Verdict` and *nothing* calls
+    `catalog.adopt` for it — so it stays in the discovered overlay, which is
+    exactly where this asserts it stays put.
+    """
+    catalog.clear_adopted()
+    for klass in catalog.ModelClass:
+        assert discovered.id not in {m.id for m in catalog.by_class(klass)}
+
+
+def test_smart_does_route_to_a_model_that_passed(adopted) -> None:
+    """The other direction, and the point of the whole feature.
+
+    Without this, `_ADOPTED` could be an overlay nothing ever reads — the
+    "table nobody writes to" shape this project keeps finding, inverted.
+    """
+    assert adopted.id in {m.id for m in catalog.by_class(catalog.ModelClass.BALANCED)}
+    assert catalog.get(adopted.id) is adopted
+
+
+def test_adoption_never_overwrites_a_curated_entry() -> None:
+    """A `CATALOG` id carries measurements adoption cannot improve on.
+
+    Same rule `set_discovered` already applies, for the same reason: `gpt-5`
+    appearing in a listing must not lose its caveat and its measured latency.
+    """
+    curated = catalog.CATALOG[0]
+    catalog.adopt(curated.model_copy(update={"best_for": "overwritten"}))
+    try:
+        resolved = catalog.get(curated.id)
+        assert resolved is curated
+        assert resolved.best_for != "overwritten"
+    finally:
+        catalog.clear_adopted()
 
 
 def test_a_discovered_model_can_still_be_chosen_by_hand(discovered) -> None:

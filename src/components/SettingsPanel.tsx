@@ -18,6 +18,7 @@ import type { CredentialStatus } from '@/types/bridge'
 const KEY_LABEL: Record<string, string> = {
   openai_api_key: 'OpenAI',
   gemini_api_key: 'Gemini',
+  openrouter_api_key: 'OpenRouter',
   brave_api_key: 'Brave Search',
   tavily_api_key: 'Tavily',
 }
@@ -25,6 +26,7 @@ const KEY_LABEL: Record<string, string> = {
 const KEY_HELP: Record<string, string> = {
   openai_api_key: 'platform.openai.com → API keys',
   gemini_api_key: 'aistudio.google.com/apikey',
+  openrouter_api_key: 'openrouter.ai/keys — free models, 50 requests a day',
   brave_api_key: 'brave.com/search/api — free tier',
   tavily_api_key: 'tavily.com — free tier, built for this',
 }
@@ -367,6 +369,17 @@ export function SettingsPanel({
             <KeyRow key={status.key} status={status} onSave={save} />
           ))}
       </div>
+
+      {/* Said plainly, and it stops at what can honestly be claimed. The
+          account-level opt-out and Zero Data Retention are real, and they are
+          Eyaas's to set — implying ARIA has done it for him would be worse
+          than saying nothing. */}
+      <p className="mt-2 text-micro leading-relaxed text-aria-muted">
+        OpenRouter's free models may route to providers that train on what you send. Attachments
+        are never routed to them, and a free model only enters Smart mode after passing the same
+        honesty probes every other model here was measured on. Your training and retention
+        settings live in your OpenRouter account, not here.
+      </p>
 
       {error && <p className="mt-2 text-tiny text-aria-bad">{error}</p>}
 

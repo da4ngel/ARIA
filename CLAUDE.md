@@ -2303,6 +2303,166 @@ the honest half is the build.
   `write_handshake`'s docstring claimed it ran "after the server is listening"
   — the false premise the whole guard rested on.
 
+## OpenRouter, and Smart mode learning a model instead of being told (2026-08-19)
+    pytest sidecar/tests -v      # 1200
+    npm test                     # 125
+
+Eyaas: *"im going to connect the openrouter api and use the top best free
+models and when a new free model release it should aria also should be updated,
+and smart mode also should learn them."*
+
+**"Smart mode should learn them" runs straight into this project's most
+deliberate invariant, and the answer was to automate the measurement, not to
+lift the invariant.** `catalog.by_class` — the router's only way to reach a
+model — has never read the discovered overlay, and
+`test_smart_never_routes_to_a_discovered_model` calls itself "the load-bearing
+test of the whole feature". It exists because of a real result: when
+`gpt-5.6-luna` and `o4-mini` were measured, **the newest model lost** — both
+failed `grounded`, the plain-facts control group, and neither was adopted.
+
+So a free model is discovered, queued, measured against those same probes, and
+only then routable. `by_class` now reads `CATALOG + _ADOPTED`, which is the
+same standard stated a second way rather than a weaker one: everything it can
+reach has passed measurement on this machine. The guard is held three ways now
+(discovered, rejected, adopted) and mutation-checked — pointing `by_class` at
+`all_models()` fails exactly the first two and nothing else.
+
+### The tier is a fallback, and the whole design says so
+**20 requests a minute, 50 a day** on the free tier (1000/day only with $10 of
+credit ever added). Eyaas chose to design for 50. That is roughly fifty turns,
+so nothing here treats free models as a foundation:
+
+- **Measurement is rationed to ~10 requests a day** and spread 4 per hourly
+  tick, so a candidate takes two days. Progress is a settings row, so a restart
+  resumes rather than restarting — at ten a day, re-running answered probes is
+  the same as never finishing.
+- **A rejection is permanent**, recorded with the failing probe and what the
+  model actually said. A model that fabricates does not improve because a day
+  passed, and re-measuring the worst candidate forever is how the rest of the
+  queue never gets reached.
+- **A provider error is not a failed probe.** Rate limits are routine at 50/day
+  and say nothing about honesty; recording one as a rejection would blacklist a
+  good model for a network blip. Mutation-checked — treating the exception as a
+  failure breaks exactly its own test.
+- **`benchmarks.artificial_analysis.intelligence_index` orders the queue**, so
+  the most promising candidate is measured first. It is carried verbatim and is
+  **never** a measurement: `tool_score` and `ttft_ms_seed` stay `None`.
+
+### What the live listing actually contains
+The plan assumed four free models. Measured against the live endpoint on
+2026-08-19: **414 models, 19 free, 16 of those tool-capable, 15 offered.**
+
+- **Free means free on both sides of the meter.** `pricing.prompt == "0"` alone
+  would admit a model that is free to send to and charged to hear back from.
+  Nothing is currently shaped that way, which is exactly why it is worth a test.
+- **Tool-capable is a hard filter.** ARIA offers 41 tools; a model without them
+  fails most of what it would be asked, and measuring one spends scarce quota to
+  learn something `supported_parameters` already stated. It also removes two
+  music generators — the job Gemini's `generateContent` flag failed to do.
+- **`openrouter/free` is not a model.** It is a meta-endpoint that forwards to
+  whichever free model it likes, so a score for it is attributable to nothing —
+  and adopting it would put an unmeasured model into Smart's pool through the
+  back door, the exact thing `by_class` exists to prevent. This is the 16th.
+- **`expiration_date` is real and near**: one model in today's listing expires
+  in five days. An expired id 404s mid-turn, which reads as ARIA being broken
+  rather than as a model having been retired, so expired entries are dropped —
+  and an adoption is *withdrawn* when the model leaves the listing, while the
+  verdict is kept, because a measurement that happened should not have to be
+  re-earned out of a 50-a-day budget.
+- **`Cost.FREE` here does not breach "nothing invents a measurement".** The API
+  states the price; reading it is not guessing it. It is the only discovered
+  field in that file allowed to be a real value.
+
+### Free models are a lower tier of trust, and the router had a real gap
+OpenRouter's free endpoints may route to providers that train on what is sent.
+The account-level opt-out and Zero Data Retention are real and they are Eyaas's
+to set — **ARIA cannot assert on his behalf that they are on**, so Settings says
+so plainly instead of implying a guarantee.
+
+- **`_PRIVATE` structurally could not cover attachments, and nobody had noticed.**
+  It reads the *words* of the message, and an attached PDF is not in `user_text`
+  at all — the excerpt is assembled later, in `_build_context`. So a turn whose
+  entire payload is a private document looked, to stage 2, exactly like
+  "summarise this". Router **stage 2b** takes `carries_user_content` and drops
+  every `trains_on_data` model from the pool.
+- **It narrows the pool rather than forcing local.** A paid cloud model is a
+  fine place to send a document; forcing local would make every attachment turn
+  answerable only by a 7B, which is a much worse answer than the constraint
+  needs. If it empties the cloud side, stage 3 falls back to local anyway.
+- **Placed after stage 1, matching what stage 2 already does.** Picking a model
+  by hand is the consent (§9.7 stage 1).
+- **True while the read is still in flight, not only once it lands.** Routing
+  happens before `_build_context` awaits the excerpt, and a check that waited
+  would put a file read in front of the first token. Erring towards "yes" costs
+  a free model for one turn; erring the other way sends his document somewhere
+  it should not go.
+
+### Two bugs found on the way, neither in this feature
+- **`eval_quality.py` sent no clock, so three `grounded` probes were scoring the
+  opposite of what they measure.** `build_messages` called `ctx.assemble(...)`
+  with `machine=None`, and three probes ask the time, the date and the weekday.
+  They are in the control group *because* `machine_context()` puts the answer in
+  the prompt. Without it, a model that correctly said it could not know was
+  marked down and one that invented "3:45 PM" was marked up. Found only by
+  building a gate that runs the same probes from inside the sidecar, where the
+  clock obviously had to be there. **Every `grounded` number recorded in this
+  file predates the fix**, so those three probes were measuring the wrong thing
+  when `gpt-5.4-nano`, `gpt-5.4-mini`, `gpt-5.6-luna` and `o4-mini` were scored.
+- **`provider_for()` was duplicated in two scripts and both ended
+  `return GeminiProvider()`.** A silent fall-through: the moment a fourth
+  provider existed, measuring one of its models would have measured Gemini and
+  printed the score under the wrong id. **A measurement that names the wrong
+  model is worse than no measurement, because it looks like evidence.** Now one
+  `providers/factory.py` that raises on an unknown provider — and `main.py`'s
+  own provider dict, which was a hand-written literal with the same shape of
+  hole, is built by iterating `ProviderName` instead.
+
+### Smaller, and the fourth-provider checklist
+- `sidecar/providers/openrouter.py` **subclasses `OpenAIProvider`** rather than
+  copying it. The endpoint is OpenAI-compatible down to the SSE framing and the
+  fragmented tool-call deltas, and two copies of a fragment-accumulating
+  tool-call assembler is two things to fix when one of them is wrong. What
+  differs is the base URL, two attribution headers, and a 429 that carries
+  information. `_raise_for_detail` stopped being a `@staticmethod` so the
+  override is natural.
+- **A 429 is a normal operating condition here, not an incident**, and it says
+  how much quota is left. `X-RateLimit-*` is read off responses rather than
+  counted locally — OpenRouter's figure accounts for the key being used from
+  anywhere, and a local counter would drift the moment Eyaas ran a script.
+  `models.adoption` surfaces it, because a cap discovered by hitting it
+  mid-conversation is the *"on is not the same as working"* failure
+  `settings.online` already exists to avoid.
+- **`GET /models` is asked without a key**, so the picker can show what a key
+  *would* reach — the difference between "OpenRouter is empty" and "OpenRouter
+  needs a key".
+- **`scripts/probes.py` moved to `sidecar/eval/probes.py`.** The sidecar cannot
+  import from `scripts/`, and a copy would have given the two paths different
+  definitions of "grounded" — the one thing that must not drift, since it is the
+  control group that has already rejected two models. Both scripts import it
+  from there now.
+- The checklist, all load-bearing: `ProviderName.OPENROUTER`, `PROVIDER_LABELS`
+  (a `KeyError` in `_verdict` without it), `CredentialKey.OPENROUTER`, `_KEY_FOR`
+  in `availability.py` (omit it and every OpenRouter model is greyed out
+  forever), `main.py` registration, `discovery.discover_all`'s `strict=True`
+  zip — restructured so the names and the coroutines are **one sequence**, and
+  the mismatch it was catching after the fact cannot happen — and
+  `ModelPicker.tsx`'s `PROVIDER_ORDER`, which rendering maps over, so a provider
+  missing from it is invisible with no fallback.
+
+### Verified live, and what could not be
+**Live against the real endpoint**: `discover_openrouter()` returns 15 models
+with real context windows and benchmarks, and `discover_all()` returns
+32 OpenAI + 14 Gemini + 15 OpenRouter with the strict zip intact.
+
+**No OpenRouter key is stored yet** — Eyaas said he was *going to* connect it —
+so three things are built, unit-tested and **not** live-verified: a real
+conversation through the provider, the adoption loop spending real quota against
+a real model, and the `X-RateLimit-*` headers coming back from a real 429. The
+adoption scheduler itself is driven across a simulated fortnight on an injected
+clock (21 tests), and both safety-critical decisions are mutation-checked. The
+first thing to do with a key is hold one conversation on a hand-picked free
+model — that path works immediately and needs no measurement.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -2396,6 +2556,16 @@ PyInstaller bundle that builds and runs. **41 tools** (`type_text` and the
 upload path add none — an upload is the user handing something over, not a
 tool). See the section above.
 
+**OpenRouter landed 2026-08-19** — a fourth provider, 15 free tool-capable
+models discovered live, and `providers/adoption.py`, which measures a free
+model against the `grounded` control group before Smart mode may route to it.
+`by_class` reads `CATALOG + _ADOPTED`, which is the same "measured only" rule
+stated a second way, not a weaker one. Two bugs found on the way, neither in
+this feature: `eval_quality.py` sent no clock, so three `grounded` probes were
+rewarding an invented time; and a duplicated `provider_for()` in two scripts
+silently fell through to Gemini. **41 tools, unchanged.** See the section
+above — including what a missing key means could not be verified live.
+
 **Uploads, modes and a retheme landed 2026-08-18** — see the section above.
 Uploads read Office, OpenDocument, epub, RTF and archives with **no new
 dependency**; five conversation modes ship per-conversation; the palette moved
@@ -2404,6 +2574,15 @@ to warm slate with an indigo accent and now lives in one file instead of six.
 mode is a style, so neither is a tool.
 
 Remaining, in rough order:
+- **OpenRouter has no key stored, so three things are unverified live**: a real
+  conversation through the provider, the adoption loop spending real quota, and
+  a real 429's `X-RateLimit-*` headers. Add the key in Settings and hold one
+  conversation on a hand-picked free model first — that path needs no
+  measurement and proves the provider end to end.
+- **Every `grounded` score in this file predates the clock fix.** Three of the
+  twenty probes were measuring whether a model would invent a time. Re-running
+  `eval_quality.py --suite hallucination` on the adopted models would say
+  whether any recorded number moves.
 - **The UI has still not been looked at.** The renderer now builds and mounts
   (the blank-window bug above is fixed), but nobody has seen the new palette,
   the mode control or the attachment chips on screen. **Restart `npm run dev`

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -17,6 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
+from sidecar.core import context as ctx
 from sidecar.core.conversation import ConversationService
 from sidecar.core.listener import Listener, WakeMode
 from sidecar.core.router import Router, RoutingBias
@@ -50,17 +52,24 @@ from sidecar.memory.settings_store import (
 from sidecar.memory.tool_log import ToolJournal
 from sidecar.persona import focus
 from sidecar.persona import proactivity as proactivity_module
-from sidecar.providers import catalog
+from sidecar.providers import catalog, factory
+from sidecar.providers.adoption import SETTINGS_KEY as ADOPTION_STATE
+from sidecar.providers.adoption import AdoptionService
 from sidecar.providers.availability import AvailabilityService
-from sidecar.providers.base import LLMProvider, ProviderError
+from sidecar.providers.base import (
+    ChatMessage,
+    GenerationOptions,
+    LLMProvider,
+    ProviderError,
+    Role,
+)
 from sidecar.providers.connectivity import connectivity
+from sidecar.providers.credentials import CredentialKey, get_key
 from sidecar.providers.embeddings import MODEL as EMBEDDING_MODEL
 from sidecar.providers.embeddings import OllamaEmbeddings
-from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.health import tracker
 from sidecar.providers.ollama import OllamaProvider
 from sidecar.providers.ollama_supervisor import OllamaSupervisor
-from sidecar.providers.openai import OpenAIProvider
 from sidecar.providers.search import WebSearch
 from sidecar.providers.search import available as search_backend
 from sidecar.providers.stt import TranscriptionUnavailable, WhisperSTT
@@ -75,6 +84,11 @@ from sidecar.tools.files import known_folder
 from sidecar.tools.permissions import PermissionEngine, PermissionMode
 
 log = structlog.get_logger(__name__)
+
+#: A probe answer is a sentence or two. Capping it stops a rambling model
+#: from spending a scarce day's budget on tokens nobody reads — and every
+#: `grounded` check reads the opening, not the tail.
+ADOPTION_MAX_TOKENS = 200
 
 # Set once at startup, compared against every /rpc upgrade.
 _AUTH_TOKEN: str = ""
@@ -139,11 +153,10 @@ async def _start_conversation(settings: Settings) -> None:
     the UI should show rather than a crash.
     """
     ollama = OllamaProvider(settings.ollama_url)
-    providers: dict[str, LLMProvider] = {
-        str(catalog.ProviderName.OLLAMA): ollama,
-        str(catalog.ProviderName.OPENAI): OpenAIProvider(),
-        str(catalog.ProviderName.GEMINI): GeminiProvider(),
-    }
+    # From `ProviderName` itself, not a literal: this dict *was* a literal, and
+    # a provider missing from it does not error anywhere — `ProviderRegistry`
+    # simply reports "no provider is configured" for every one of its models.
+    providers: dict[str, LLMProvider] = factory.build_all(ollama=ollama)
 
     runtime.provider = ollama
     runtime.providers = providers
@@ -301,6 +314,7 @@ async def _start_conversation(settings: Settings) -> None:
 
     _start_memory_scheduler(settings, settings_store, providers, availability)
     _start_proactivity_scheduler(settings, ollama, local_default.id)
+    await _start_adoption(settings_store, providers)
 
     await _build_listener(settings, settings_store)
     _build_indexer(settings)
@@ -502,6 +516,75 @@ def _build_memory(
     return runtime.memory
 
 
+async def _start_adoption(
+    settings_store: SettingsStore, providers: dict[str, LLMProvider]
+) -> None:
+    """Free-model measurement, and putting past adoptions back in the pool.
+
+    `restore()` runs whether or not the scheduler does. An adoption is a
+    measurement that was already paid for out of a 50-a-day budget; losing it
+    on restart and re-earning it would mean, in practice, never adopting
+    anything.
+    """
+    openrouter = providers.get(str(catalog.ProviderName.OPENROUTER))
+    if openrouter is None:
+        return
+
+    async def _ask(info: catalog.ModelInfo, prompt: str) -> str:
+        """One probe, assembled exactly as a real turn would be.
+
+        `eval_quality.py`'s `build_messages` does the same and its docstring
+        says why: a probe measures how the model behaves *here*, and here is
+        behind this prompt. **Plus the clock, which that script omits** — three
+        `grounded` probes ask the time, the date and the weekday, and they are
+        in that category precisely because `machine_context()` puts the answer
+        in the prompt. Sent without it they measure nothing about honesty; a
+        model would have to invent a time to pass, which is the opposite of
+        what the control group is for.
+        """
+        collected: list[str] = []
+        machine = ctx.MachineContext(
+            now=datetime.now().astimezone(),
+            model_label=info.label,
+            model_is_local=False,
+        )
+        messages = ctx.assemble(
+            [ChatMessage(role=Role.USER, content=prompt)],
+            level=info.persona,
+            machine=machine,
+        )
+        async for delta in openrouter.stream_chat(
+            messages,
+            model=info.id,
+            options=GenerationOptions(max_tokens=ADOPTION_MAX_TOKENS),
+        ):
+            if delta.text:
+                collected.append(delta.text)
+        return "".join(collected)
+
+    async def _candidates() -> list[catalog.ModelInfo]:
+        # Only what is discovered *now*: a free model that has disappeared from
+        # OpenRouter's listing should stop being measured, not keep spending
+        # budget on requests that 404.
+        return [m for m in catalog.discovered() if m.provider is catalog.ProviderName.OPENROUTER]
+
+    service = AdoptionService(
+        load=lambda: settings_store.get(ADOPTION_STATE),
+        save=lambda value: settings_store.set(ADOPTION_STATE, value),
+        candidates=_candidates,
+        ask=_ask,
+        is_busy=lambda: bool(runtime.conversation and runtime.conversation.busy),
+    )
+    runtime.adoption = service
+    await service.restore()
+
+    if not get_key(CredentialKey.OPENROUTER):
+        # Discovery works without a key — measurement does not.
+        log.info("adoption.idle", reason="no OpenRouter key stored")
+        return
+    service.start()
+
+
 def _start_memory_scheduler(
     settings: Settings,
     settings_store: SettingsStore,
@@ -652,6 +735,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await runtime.memory_scheduler.stop()
         if runtime.proactivity_scheduler is not None:
             await runtime.proactivity_scheduler.stop()
+        if runtime.adoption is not None:
+            await runtime.adoption.stop()
         if runtime.embeddings is not None:
             await runtime.embeddings.aclose()
         if runtime.search is not None:

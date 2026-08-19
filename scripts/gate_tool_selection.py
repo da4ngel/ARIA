@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import sidecar.tools  # noqa: F401  — importing registers the tools
 from sidecar.core.context import PersonaLevel, stable_prefix
-from sidecar.providers import catalog
+from sidecar.providers import catalog, factory
 from sidecar.providers.base import (
     ChatMessage,
     GenerationOptions,
@@ -53,9 +53,7 @@ from sidecar.providers.base import (
     Role,
 )
 from sidecar.providers.embeddings import OllamaEmbeddings
-from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.ollama import OllamaProvider
-from sidecar.providers.openai import OpenAIProvider
 from sidecar.tools import registry
 
 MODEL = "qwen2.5:7b"
@@ -226,11 +224,15 @@ async def measure_per_model(model_ids: list[str]) -> None:
 
 
 def provider_for(info: catalog.ModelInfo) -> LLMProvider:
-    if info.provider is catalog.ProviderName.OLLAMA:
-        return OllamaProvider()
-    if info.provider is catalog.ProviderName.OPENAI:
-        return OpenAIProvider()
-    return GeminiProvider()
+    """One line, because the hand-written version here was a trap.
+
+    It mapped Ollama and OpenAI explicitly and let *everything else* fall
+    through to `GeminiProvider()` — so measuring an OpenRouter model would
+    have measured Gemini and printed the score under the wrong id. A
+    measurement naming the wrong model is worse than no measurement, because
+    it looks like evidence. `providers/factory.py` raises instead.
+    """
+    return factory.for_model(info)
 
 
 async def measure_choice() -> None:

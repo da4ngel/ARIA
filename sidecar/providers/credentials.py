@@ -27,6 +27,8 @@ class CredentialKey(StrEnum):
 
     OPENAI = "openai_api_key"
     GEMINI = "gemini_api_key"
+    #: One key reaching many vendors, and the only source of free models here.
+    OPENROUTER = "openrouter_api_key"
     #: Web search, for `research`. Either one is enough — see
     #: `providers/search.py` for why there are two rather than a choice.
     BRAVE = "brave_api_key"

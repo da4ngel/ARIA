@@ -42,7 +42,7 @@ export type RoutingBias = 'fastest' | 'balanced' | 'quality'
 /** One entry from `providers/catalog.py`. Everything the tooltip shows. */
 export interface ModelInfo {
   id: string
-  provider: 'ollama' | 'openai' | 'gemini'
+  provider: 'ollama' | 'openai' | 'gemini' | 'openrouter'
   label: string
   klass: 'fast' | 'balanced' | 'smart' | 'vision'
   persona: 'minimal' | 'full'
@@ -55,6 +55,18 @@ export interface ModelInfo {
   context_tokens: number
   /** Found by asking the provider, rather than measured and written down. */
   discovered: boolean
+  /**
+   * A third party's published score (Artificial Analysis' intelligence index),
+   * carried verbatim. **Never a measurement made here** — it decides which
+   * candidate is measured first and nothing else.
+   */
+  benchmark_index: number | null
+  /**
+   * Whether the endpoint may train on what is sent to it. A property of the
+   * endpoint, not the model: OpenRouter's free tier can route to providers
+   * that do, and the opt-out is the account holder's to set.
+   */
+  trains_on_data: boolean
 }
 
 /** A catalog entry plus whether it can be used right now (`models.list`). */

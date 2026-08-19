@@ -249,6 +249,17 @@ def needs_deep_model(message: str, step: int = 0) -> bool:
     )
 
 
+def _trains_on_data(model_id: str) -> bool:
+    """Whether this endpoint may train on what is sent to it.
+
+    Unknown ids read as False: this filter narrows an otherwise-usable pool,
+    and treating an unrecognised id as unsafe would silently shrink routing
+    every time the catalog and the availability set disagreed.
+    """
+    info = catalog.get(model_id)
+    return bool(info and info.trains_on_data)
+
+
 class Router:
     """Chooses a model for a turn."""
 
@@ -273,6 +284,7 @@ class Router:
         step: int = 0,
         spoken: bool = False,
         bias: RoutingBias | None = None,
+        carries_user_content: bool = False,
     ) -> RouteDecision:
         """Pick a model.
 
@@ -282,6 +294,8 @@ class Router:
         which is only correct in tests.
         `step` is the agent-loop step (Phase 6); >=3 implies a hard task.
         `spoken` marks a turn that arrived by voice and will be answered aloud.
+        `carries_user_content` marks a turn carrying the user's own files —
+        see stage 2b.
         """
         usable = self._usable(available)
 
@@ -311,6 +325,22 @@ class Router:
             return self._local(
                 usable, "This mentions your files or screen, so it stayed on this machine."
             )
+
+        # Stage 2b — his own files never reach an endpoint that may train on
+        # them. `_PRIVATE` reads the *words* of the message, which is why it
+        # cannot cover this: an attached PDF is not mentioned in `user_text` at
+        # all — the excerpt is assembled later, in `_build_context` — so a turn
+        # whose whole payload is a private document looks, to stage 2, like
+        # "summarise this".
+        #
+        # This narrows the pool rather than forcing local: a paid cloud model
+        # is fine here, and only the free tier carries `trains_on_data`. If it
+        # empties the cloud side, stage 3 below falls back to local anyway.
+        #
+        # Deliberately **after** stage 1, matching what stage 2 already does:
+        # picking a model by hand is the consent (§9.7 stage 1).
+        if carries_user_content:
+            usable = {i for i in usable if not _trains_on_data(i)}
 
         # Stage 3 — no cloud reachable.
         if not any(not catalog.require(m).local for m in usable):

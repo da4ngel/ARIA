@@ -300,10 +300,14 @@ class OpenAIProvider:
             return
         self._raise_for_detail(response.status_code, response.text[:300], response.headers)
 
-    @staticmethod
-    def _raise_for_detail(status_code: int, detail: str, headers: httpx.Headers) -> None:
+    # Not a `@staticmethod`: `OpenRouterProvider` overrides this to add its own
+    # rate-limit handling, and an instance method is the shape that overrides
+    # cleanly.
+    def _raise_for_detail(
+        self, status_code: int, detail: str, headers: httpx.Headers | None = None
+    ) -> None:
         if status_code == 429:
-            retry = headers.get("retry-after")
+            retry = headers.get("retry-after") if headers else None
             raise ProviderRateLimited(
                 f"OpenAI rate limit or quota reached: {detail}",
                 retry_after_s=float(retry) if retry and retry.isdigit() else None,

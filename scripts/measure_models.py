@@ -31,9 +31,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval_quality import provider_for, run_probe
-from probes import SUITES, Probe
 
 from sidecar.core import context as ctx
+from sidecar.eval.probes import SUITES, Probe
 from sidecar.providers import catalog, discovery
 from sidecar.providers.base import (
     ChatMessage,

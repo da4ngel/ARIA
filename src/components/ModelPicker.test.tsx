@@ -19,6 +19,8 @@ function model(overrides: Partial<ModelInfo> = {}): ModelInfo {
     local: false,
     context_tokens: 32768,
     discovered: false,
+    benchmark_index: null,
+    trains_on_data: false,
     ...overrides,
   }
 }

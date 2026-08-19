@@ -737,6 +737,9 @@ class ConversationService:
             # It cannot reach past the privacy or explicit-choice stages —
             # `_by_bias` runs after both.
             bias=MODE_BIAS[str(self.mode_for(session_id))],
+            # Router stage 2b. The attachment is not in `user_text` — the
+            # excerpt is assembled later — so the privacy regex cannot see it.
+            carries_user_content=self._turn_has_attachments(turn_id),
         )
         log.info(
             "turn.routed",
@@ -979,6 +982,11 @@ class ConversationService:
                     step=state.step,
                     spoken=spoken,
                     bias=MODE_BIAS[str(self.mode_for(session_id))],
+                    # Still true on step 4 as it was on step 0: the excerpt is
+                    # in the message history the whole turn, so a later step
+                    # re-routing away from the constraint would hand the file
+                    # to exactly the endpoint it was kept from.
+                    carries_user_content=self._turn_has_attachments(turn_id),
                 )
                 current = decision.model
             just_degraded = False
@@ -1609,6 +1617,18 @@ class ConversationService:
         if block:
             messages.append(ChatMessage(role=Role.SYSTEM, content=block))
         return messages
+
+    def _turn_has_attachments(self, turn_id: str) -> bool:
+        """Whether this turn is carrying files the user handed over.
+
+        True while the read is still in flight, not only once it lands: the
+        routing decision happens before `_build_context` awaits the excerpt,
+        and a check that waits for the content would put a file read in front
+        of the first token. Erring towards "yes" costs at most a free model not
+        being used for one turn; erring the other way sends his document
+        somewhere it should not go.
+        """
+        return turn_id in self._attachment_reads or bool(self._attachments.get(turn_id))
 
     async def _read_attachments(
         self, turn_id: str, paths: list[str], describe: object

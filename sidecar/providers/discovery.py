@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import date
 from typing import Any
 
 import httpx
@@ -35,6 +36,8 @@ from sidecar.providers.credentials import CredentialKey, get_key
 log = structlog.get_logger(__name__)
 
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
+#: Public -- no key needed, so the picker can show what a key *would* reach.
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 FETCH_TIMEOUT_S = 15.0
 
@@ -251,6 +254,148 @@ def parse_gemini(payload: dict[str, Any]) -> list[ModelInfo]:
     return sorted(found, key=lambda m: m.id)
 
 
+# ── OpenRouter ────────────────────────────────────────────────────
+# The richest payload of the three, and the only one that states a price. That
+# matters: `Cost.FREE` here is read, not guessed, which is why it does not
+# breach "nothing invents a measurement" the way a hand-assigned cost would.
+#
+# Measured against the live endpoint on 2026-08-19: **414 models, 19 free, 16
+# of those tool-capable.** The plan for this work assumed four, so the filters
+# below are doing considerably more work than expected.
+
+#: A meta-endpoint, not a model: it forwards to whichever free model it likes
+#: at the time. Measuring it would produce a score attributable to nothing, and
+#: adopting it would put an unmeasured model into Smart's pool through the back
+#: door -- the exact property `by_class` exists to prevent.
+_OPENROUTER_REJECT_IDS = frozenset({"openrouter/free"})
+
+
+def _openrouter_is_free(entry: dict[str, Any]) -> bool:
+    """Free on **both** sides of the meter.
+
+    `pricing.prompt == "0"` alone would admit a model that is free to send to
+    and charged to hear back from, which is not free in any sense the user
+    means. Nothing in the live listing is currently shaped that way; the check
+    costs nothing and stops it becoming a surprise on a bill.
+    """
+    pricing = entry.get("pricing") or {}
+    return str(pricing.get("prompt")) == "0" and str(pricing.get("completion")) == "0"
+
+
+def _openrouter_benchmark(entry: dict[str, Any]) -> float | None:
+    """Artificial Analysis' published intelligence index, if OpenRouter has one.
+
+    A third party's number about the model, carried verbatim -- never treated
+    as a measurement made here. It orders the adoption queue so scarce free-tier
+    quota is spent on the most promising candidate first, and it is *not* a
+    substitute for the gate: the queue decides what is measured, the `grounded`
+    probes decide what is adopted.
+    """
+    benchmarks = entry.get("benchmarks") or {}
+    aa = benchmarks.get("artificial_analysis") or {}
+    raw = aa.get("intelligence_index")
+    return float(raw) if isinstance(raw, int | float) else None
+
+
+def _openrouter_expired(entry: dict[str, Any], today: date) -> bool:
+    """Free models come and go, and OpenRouter says when.
+
+    An expired id 404s mid-turn, which reads as ARIA being broken rather than
+    as a model having been retired. One in the live listing expires five days
+    from today.
+    """
+    raw = entry.get("expiration_date")
+    if not isinstance(raw, str):
+        return False
+    try:
+        return date.fromisoformat(raw) < today
+    except ValueError:
+        return False
+
+
+#: Bucketing a published index, not measuring anything. The boundaries come
+#: from where the live free listing actually clusters -- the nano/lightning end
+#: sits at 14-24, the mid-size open weights at 25-38, and only `glm-5.2` (52.6)
+#: reaches what this project would call SMART.
+_BENCHMARK_FAST_BELOW = 25.0
+_BENCHMARK_SMART_FROM = 45.0
+
+
+def _openrouter_class(model_id: str, benchmark: float | None) -> ModelClass:
+    """Prefer the number; fall back to what the vendor called it.
+
+    The other two parsers have only the name to go on. Here a stated benchmark
+    is better evidence than the word "nano", so it wins where it exists.
+    """
+    if benchmark is not None:
+        if benchmark < _BENCHMARK_FAST_BELOW:
+            return ModelClass.FAST
+        if benchmark >= _BENCHMARK_SMART_FROM:
+            return ModelClass.SMART
+        return ModelClass.BALANCED
+
+    name = model_id.lower()
+    if any(word in name for word in ("nano", "mini", "lite", "flash", "-xs", "small")):
+        return ModelClass.FAST
+    if any(word in name for word in ("ultra", "-pro", "max", "large", "opus")):
+        return ModelClass.SMART
+    return ModelClass.BALANCED
+
+
+def parse_openrouter(payload: dict[str, Any], *, today: date | None = None) -> list[ModelInfo]:
+    """Free, tool-capable chat models from a `GET /api/v1/models` body.
+
+    **Tool-capable is a hard filter, not a preference.** ARIA offers 41 tools
+    and a model that cannot call them fails most of what it would be asked to
+    do here -- and measuring one would spend scarce daily quota to learn
+    something the payload already stated. The live listing has three free
+    models without tools, and two of them are music generators, so this filter
+    is also doing the job Gemini's `generateContent` flag failed to do.
+    """
+    now = today or date.today()
+    found: list[ModelInfo] = []
+    for entry in payload.get("data", []):
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if not isinstance(model_id, str) or model_id in _OPENROUTER_REJECT_IDS:
+            continue
+        if not _openrouter_is_free(entry):
+            continue
+        if "tools" not in (entry.get("supported_parameters") or []):
+            continue
+        if _openrouter_expired(entry, now):
+            continue
+
+        benchmark = _openrouter_benchmark(entry)
+        found.append(
+            ModelInfo(
+                id=model_id,
+                provider=ProviderName.OPENROUTER,
+                label=str(entry.get("name") or model_id),
+                klass=_openrouter_class(model_id, benchmark),
+                # Unmeasured here, exactly like every other discovered model.
+                persona=PersonaLevel.MINIMAL,
+                # Read off the payload rather than assumed -- the one
+                # discovered field in this file allowed to be a real value.
+                cost=Cost.FREE,
+                best_for=str(entry.get("description") or "").split(".")[0][:160],
+                ttft_ms_seed=None,
+                context_tokens=int(entry.get("context_length") or ASSUMED_CONTEXT_TOKENS),
+                temperature=None,
+                benchmark_index=benchmark,
+                # A property of the endpoint, not of the model. OpenRouter's
+                # free tier may route to providers that train on what is sent;
+                # the opt-out is the account holder's to set and this code
+                # cannot assert it is on.
+                trains_on_data=True,
+                discovered=True,
+            )
+        )
+    # Best first, so the adoption queue is already in the order it wants.
+    return sorted(found, key=lambda m: (-(m.benchmark_index or 0.0), m.id))
+
+
 # ── fetching ──────────────────────────────────────────────────────────
 # Never on the turn path. §10 budgets ~1000ms end to end for voice and this is
 # a network round-trip; callers run it at startup or from the refresh button.
@@ -279,18 +424,35 @@ async def discover_gemini() -> list[ModelInfo]:
     return parse_gemini(payload)
 
 
+async def discover_openrouter() -> list[ModelInfo]:
+    """No key required -- `/models` is public.
+
+    So the picker can show what a key would reach *before* one is stored,
+    which is the difference between "OpenRouter is empty" and "OpenRouter
+    needs a key".
+    """
+    payload = await _fetch(OPENROUTER_MODELS_URL, {})
+    return parse_openrouter(payload)
+
+
 async def discover_all() -> list[ModelInfo]:
     """Everything both providers will answer with, or as much as is reachable.
 
     One provider being down, rate-limited or keyless must not cost the other
     its listing — a failure here degrades the picker, it does not break it.
     """
-    results = await asyncio.gather(
-        discover_openai(), discover_gemini(), return_exceptions=True
+    sources = (
+        (ProviderName.OPENAI, discover_openai()),
+        (ProviderName.GEMINI, discover_gemini()),
+        (ProviderName.OPENROUTER, discover_openrouter()),
     )
+    # One sequence, so a provider cannot be added to the coroutines and
+    # forgotten in the names -- the mismatch `strict=True` was catching after
+    # the fact, moved to somewhere it cannot happen.
+    results = await asyncio.gather(*(c for _, c in sources), return_exceptions=True)
 
     found: list[ModelInfo] = []
-    for provider, result in zip((ProviderName.OPENAI, ProviderName.GEMINI), results, strict=True):
+    for (provider, _), result in zip(sources, results, strict=True):
         if isinstance(result, BaseException):
             log.warning("discovery.failed", provider=str(provider), error=str(result))
             continue

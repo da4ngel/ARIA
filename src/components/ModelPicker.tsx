@@ -15,9 +15,14 @@ const PROVIDER_LABEL: Record<string, string> = {
   ollama: 'On this machine',
   openai: 'OpenAI',
   gemini: 'Gemini',
+  openrouter: 'OpenRouter (free tier)',
 }
 
-const PROVIDER_ORDER = ['ollama', 'openai', 'gemini']
+// Rendering maps over this array, so a provider missing from it is **invisible**
+// — there is no fallback that lists the leftovers. OpenRouter goes last: it is
+// the fallback tier, 50 requests a day, and nothing in it is routed to until it
+// has passed measurement.
+const PROVIDER_ORDER = ['ollama', 'openai', 'gemini', 'openrouter']
 
 const BIAS_LABEL: Record<RoutingBias, string> = {
   fastest: 'Fastest',
@@ -74,6 +79,16 @@ function DetailSheet({ entry }: { entry: ModelAvailability }): JSX.Element {
         <span>{model.local ? 'private' : 'leaves this machine'}</span>
         {model.discovered && <span>{(model.context_tokens / 1000).toFixed(0)}k context</span>}
       </div>
+
+      {/* Stated plainly rather than implied by the word "free". Smart mode
+          keeps files away from these on its own (router stage 2b), but which
+          tier answered should never be a surprise. */}
+      {model.trains_on_data && (
+        <p className="mt-1.5 text-micro text-aria-warn">
+          Free tier: this endpoint may train on what is sent to it. Files you attach are never
+          routed here.
+        </p>
+      )}
 
       {model.caveat && <p className="mt-1.5 text-micro text-aria-warn">{model.caveat}</p>}
       {!entry.available && entry.reason && (

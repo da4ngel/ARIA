@@ -539,3 +539,99 @@ def test_a_model_that_is_visibly_worse_still_loses() -> None:
     ranked = router.rank([quick, capable], tool_shaped=True)
 
     assert ranked[0].id == "capable"
+
+
+# ── stage 2b: his files, and endpoints that may train on them ─────────
+
+
+@pytest.fixture
+def free_model():
+    """A free OpenRouter model, adopted so the router can actually reach it.
+
+    `trains_on_data` only means something for a model in the routing pool —
+    testing the flag on something `by_class` never returns would prove nothing.
+    """
+    info = catalog.ModelInfo(
+        id="vendor/free-and-fast:free",
+        provider=catalog.ProviderName.OPENROUTER,
+        label="Free And Fast",
+        # SMART, because "summarise this" is a `_DEEP_VERBS` match and QUALITY
+        # ranks that class — a FAST free model would never be in the running
+        # and the test would pass without testing anything.
+        klass=ModelClass.SMART,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.FREE,
+        best_for="",
+        ttft_ms_seed=120,
+        trains_on_data=True,
+        discovered=True,
+    )
+    catalog.adopt(info)
+    yield info
+    catalog.clear_adopted()
+
+
+def _usable_with(free: catalog.ModelInfo) -> set[str]:
+    return ALL_MODELS | {free.id}
+
+
+def test_a_turn_carrying_his_files_never_reaches_a_training_endpoint(
+    health, free_model
+) -> None:
+    """The gap `_PRIVATE` structurally cannot cover.
+
+    That regex reads the *words* of the message. An attached PDF is not in
+    `user_text` at all — the excerpt is assembled later, in `_build_context` —
+    so a turn whose entire payload is a private document looks, to stage 2,
+    exactly like "summarise this".
+    """
+    r = Router(health, RoutingBias.QUALITY)
+    usable = _usable_with(free_model)
+
+    ordinary = r.choose("summarise this", available=usable)
+    assert ordinary.model.id == free_model.id, (
+        "the free model should win on latency when nothing is attached"
+    )
+
+    with_file = r.choose("summarise this", available=usable, carries_user_content=True)
+    assert with_file.model.id != free_model.id
+    assert not with_file.model.trains_on_data
+
+
+def test_it_narrows_the_pool_rather_than_forcing_local(health, free_model) -> None:
+    """A paid cloud model is a fine place to send a document.
+
+    Forcing local would make every attachment turn answerable only by a 7B,
+    which is a much worse answer than the one the constraint actually needs.
+    """
+    r = Router(health, RoutingBias.QUALITY)
+    decision = r.choose(
+        "what does this document say", available=_usable_with(free_model), carries_user_content=True
+    )
+    assert not decision.model.local
+
+
+def test_picking_the_model_by_hand_is_still_the_consent(health, free_model) -> None:
+    """Stage 1 already works this way for privacy, and this sits after it.
+
+    Overriding a deliberate choice would be a surprise, and §9.7 stage 1 is
+    explicit that choosing a cloud model *is* the consent.
+    """
+    r = Router(health, RoutingBias.QUALITY)
+    decision = r.choose(
+        "summarise this",
+        selected=free_model.id,
+        available=_usable_with(free_model),
+        carries_user_content=True,
+    )
+    assert decision.model.id == free_model.id
+
+
+def test_an_ordinary_paid_model_is_unaffected(health) -> None:
+    """The flag must not quietly shrink routing when nothing is at stake."""
+    r = Router(health, RoutingBias.QUALITY)
+    without = r.choose("compare Postgres and SQLite", available=ALL_MODELS)
+    with_file = r.choose(
+        "compare Postgres and SQLite", available=ALL_MODELS, carries_user_content=True
+    )
+    assert without.model.id == with_file.model.id

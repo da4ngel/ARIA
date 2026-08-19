@@ -233,6 +233,40 @@ async def models_refresh(_params: dict[str, Any]) -> dict[str, Any]:
     return listing.model_dump(mode="json")
 
 
+@method("models.adoption")
+async def models_adoption(_params: dict[str, Any]) -> dict[str, Any]:
+    """How free-model measurement is going, and what quota is left today.
+
+    Two things the user otherwise has no way to see: why a free model they can
+    see in the picker is not being routed to yet (it has not passed), and how
+    much of a 50-a-day allowance is left. A cap discovered by hitting it
+    mid-conversation is the "on is not the same as working" failure
+    `settings.online` already exists to avoid.
+    """
+    from sidecar.providers.openrouter import OpenRouterProvider
+    from sidecar.state import runtime
+
+    report: dict[str, Any] = {
+        "running": False,
+        "budget": 0,
+        "left_today": 0,
+        "spent_today": 0,
+        "probe_count": 0,
+        "models": [],
+        "quota": {"limit": None, "remaining": None, "reset_at": None},
+    }
+    if runtime.adoption is not None:
+        report.update(await runtime.adoption.report())
+        report["running"] = True
+
+    provider = runtime.providers.get("openrouter")
+    if isinstance(provider, OpenRouterProvider):
+        # Read off the last response rather than counted here: OpenRouter's own
+        # figure accounts for the key being used from anywhere.
+        report["quota"] = provider.rate_limit.as_dict()
+    return report
+
+
 @method("models.bias")
 async def models_bias(params: dict[str, Any]) -> dict[str, Any]:
     """Read or set what Smart mode optimises for.

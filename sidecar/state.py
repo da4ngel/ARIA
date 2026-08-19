@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from sidecar.memory.scheduler import MemoryScheduler
     from sidecar.memory.settings_store import SettingsStore
     from sidecar.persona.proactivity import ProactivityScheduler
+    from sidecar.providers.adoption import AdoptionService
     from sidecar.providers.availability import AvailabilityService
     from sidecar.providers.base import LLMProvider
     from sidecar.providers.embeddings import OllamaEmbeddings
@@ -93,6 +94,11 @@ class Runtime:
     memory_scheduler: MemoryScheduler | None = None
     # Phase 8: unprompted messages. None when `proactivity_enabled` is off.
     proactivity_scheduler: ProactivityScheduler | None = None
+
+    #: Free-model measurement (`providers/adoption.py`). Present even with
+    #: no OpenRouter key — `restore()` still has to put past adoptions back
+    #: into the routing pool — but only *started* when a key exists.
+    adoption: AdoptionService | None = None
 
     @property
     def db_ready(self) -> bool:
