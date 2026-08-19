@@ -19,6 +19,8 @@ const BASE = {
   disabled: false,
   onSelect: () => {},
   onEnableOnline: () => {},
+      suggestion: null,
+      onDismissSuggestion: () => {},
 }
 
 describe('ModeSelector', () => {
@@ -64,6 +66,8 @@ describe('ModeSelector', () => {
         mode="research"
         label="Research"
         needsOnline
+        suggestion={null}
+        onDismissSuggestion={() => {}}
         onEnableOnline={onEnableOnline}
       />,
     )
@@ -80,5 +84,92 @@ describe('ModeSelector', () => {
     const dots = container.querySelectorAll('span.rounded-full')
 
     expect(dots.length).toBe(0)
+  })
+})
+
+describe('the mode suggestion', () => {
+  const offer = { mode: 'research' as const, label: 'Research' }
+
+  it('offers rather than switches', () => {
+    // The property confirmed with Eyaas before this was built: modes reset to
+    // Normal per conversation so one cannot silently shape an answer, and a
+    // mode ARIA applied itself is that same shaping arriving faster.
+    const onSelect = vi.fn()
+    render(
+      <ModeSelector
+        mode="normal"
+        label="Normal"
+        needsOnline={false}
+        disabled={false}
+        suggestion={offer}
+        onSelect={onSelect}
+        onEnableOnline={() => {}}
+        onDismissSuggestion={() => {}}
+      />,
+    )
+
+    expect(screen.getByText('Switch to Research?')).toBeDefined()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('applies the mode only when the offer is taken', () => {
+    const onSelect = vi.fn()
+    render(
+      <ModeSelector
+        mode="normal"
+        label="Normal"
+        needsOnline={false}
+        disabled={false}
+        suggestion={offer}
+        onSelect={onSelect}
+        onEnableOnline={() => {}}
+        onDismissSuggestion={() => {}}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Switch to Research?'))
+
+    expect(onSelect).toHaveBeenCalledWith('research')
+  })
+
+  it('can be dismissed without changing anything', () => {
+    const onSelect = vi.fn()
+    const onDismiss = vi.fn()
+    render(
+      <ModeSelector
+        mode="normal"
+        label="Normal"
+        needsOnline={false}
+        disabled={false}
+        suggestion={offer}
+        onSelect={onSelect}
+        onEnableOnline={() => {}}
+        onDismissSuggestion={onDismiss}
+      />,
+    )
+
+    fireEvent.click(screen.getByLabelText('Dismiss mode suggestion'))
+
+    expect(onDismiss).toHaveBeenCalled()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('yields to the online warning, which is the more urgent thing to say', () => {
+    // A mode that cannot work yet outranks a mode that might suit better.
+    render(
+      <ModeSelector
+        mode="research"
+        label="Research"
+        needsOnline
+        disabled={false}
+        suggestion={{ mode: 'study', label: 'Study' }}
+        onSelect={() => {}}
+        onEnableOnline={() => {}}
+        onDismissSuggestion={() => {}}
+      />,
+    )
+
+    expect(screen.queryByText('Switch to Study?')).toBeNull()
+    expect(screen.getByText(/needs online mode/)).toBeDefined()
   })
 })

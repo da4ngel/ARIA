@@ -108,9 +108,15 @@ class LoopState:
         self.last_ok = ok
         self.step += 1
 
+    #: This turn's ceiling, from the conversation's `ModePolicy`. Defaults to
+    #: `MAX_STEPS` so every existing caller and test is unchanged — Quick mode
+    #: lowers it to 2, because a turn that quietly ran six tools has broken
+    #: that mode's only promise whatever the answer was.
+    max_steps: int = MAX_STEPS
+
     @property
     def exhausted(self) -> bool:
-        return self.step >= MAX_STEPS
+        return self.step >= self.max_steps
 
     @property
     def offer_tools(self) -> bool:
@@ -173,9 +179,16 @@ def repeat_note(name: str) -> str:
     )
 
 
-def exhausted_note() -> str:
+def exhausted_note(max_steps: int = MAX_STEPS) -> str:
+    """The budget is per-turn now, so the number has to be passed in.
+
+    It reads as a plain sentence to the model, and Quick mode's "more than 2
+    steps" is a very different claim from Normal's "more than 8" — a note that
+    named the wrong ceiling would be telling it something untrue about its own
+    limits.
+    """
     return (
-        f"That took more than {MAX_STEPS} steps in one turn, which is the "
+        f"That took more than {max_steps} steps in one turn, which is the "
         f"most allowed at once, so it stopped there rather than continue "
         f"indefinitely. Ask again to pick up where it left off."
     )

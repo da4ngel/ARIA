@@ -335,8 +335,10 @@ export default function App(): JSX.Element {
                   label={answerMode.label}
                   needsOnline={answerMode.needsOnline}
                   disabled={!connected}
+                  suggestion={answerMode.suggestion}
                   onSelect={(next) => void answerMode.setMode(next)}
                   onEnableOnline={() => setOverlay('settings')}
+                  onDismissSuggestion={answerMode.dismissSuggestion}
                 />
                 <button
                   type="button"

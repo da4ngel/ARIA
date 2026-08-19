@@ -296,15 +296,15 @@ class Retriever:
 
     # ── the turn path ────────────────────────────────────────────────────
 
-    def prefetch(self, query: str) -> asyncio.Task[Retrieved]:
+    def prefetch(self, query: str, *, deep: bool = False) -> asyncio.Task[Retrieved]:
         """Start retrieval now, await it later.
 
         Called from `send()` so the embed overlaps the message write, the router
         decision and the history read — all of which the turn does anyway.
         """
-        return asyncio.create_task(self.retrieve(query))
+        return asyncio.create_task(self.retrieve(query, deep=deep))
 
-    async def retrieve(self, query: str) -> Retrieved:
+    async def retrieve(self, query: str, *, deep: bool = False) -> Retrieved:
         """Facts and episodes worth injecting. Never raises, never over budget."""
         started = time.perf_counter()
 
@@ -314,7 +314,11 @@ class Retriever:
         if not await self._has_anything():
             return self._record(Retrieved(took_ms=self._elapsed(started)), empty=True)
 
-        recall = bool(_RECALL_QUESTION.search(query))
+        # `deep` is a mode asking for the same longer deadline a recall
+        # question already earns — not a second budget. Study, Research and
+        # Critic build on what came before, and at 60ms most retrievals fall
+        # back to word matching, which loses paraphrase.
+        recall = deep or bool(_RECALL_QUESTION.search(query))
         vector, embed_ms, degraded = await self._vector_for(query, recall=recall)
 
         if vector is not None:

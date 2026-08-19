@@ -1423,8 +1423,8 @@ async def chat_mode(params: dict[str, Any]) -> dict[str, Any]:
     for that reason; a style control silently starting to send traffic off the
     machine would be exactly the kind of gate that should not move on its own.
     """
-    from sidecar.core.context import ConversationMode, mode_label
-    from sidecar.core.router import MODE_BIAS
+    from sidecar.core.context import ConversationMode
+    from sidecar.core.modes import policy_for
     from sidecar.state import runtime
 
     conversation = runtime.require_conversation()
@@ -1446,11 +1446,11 @@ async def chat_mode(params: dict[str, Any]) -> dict[str, Any]:
         conversation.set_mode(session_id, chosen)
 
     mode = conversation.mode_for(session_id)
-    bias = MODE_BIAS[str(mode)]
+    policy = policy_for(mode)
     return {
         "session_id": session_id,
         "mode": str(mode),
-        "label": mode_label(mode),
+        "label": policy.label,
         # "On" is not the same as "working" — the `settings.online` lesson.
         # Research without a web tool is a real state and the UI has to be
         # able to say so rather than leaving her to explain it in a refusal.
@@ -1458,5 +1458,11 @@ async def chat_mode(params: dict[str, Any]) -> dict[str, Any]:
         "online_enabled": runtime.online_mode,
         # So `ModelPicker`'s own bias control can say it has been overridden
         # rather than displaying a setting that is not in force.
-        "effective_bias": str(bias) if bias else None,
+        "effective_bias": str(policy.bias) if policy.bias else None,
+        # What this mode actually *does*, so the control can say so rather
+        # than leaving the user to infer it from the answers. These are the
+        # levers, not a description of them.
+        "done_when": policy.done_when,
+        "max_steps": policy.max_steps,
+        "tools": str(policy.tools),
     }

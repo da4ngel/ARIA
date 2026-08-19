@@ -237,6 +237,11 @@ class ConversationMode(StrEnum):
     RESEARCH = "research"
     QUICK = "quick"
     CODE = "code"
+    #: *"Destroy my idea before reality does."* The persona already carries
+    #: "agreeing with everything is not warmth; it is nobody being there",
+    #: with a test pinning it — this is that dial turned up rather than a new
+    #: character bolted on.
+    CRITIC = "critic"
 
 
 #: One preamble for every mode rather than four copies, because the sentence
@@ -249,42 +254,95 @@ _MODE_PREAMBLE = (
     "otherwise. Anything he asks for explicitly still outranks it."
 )
 
-#: Label and body per mode. NORMAL is empty **on purpose**: it resolves to
-#: today's prompt byte-for-byte, so a user who never opens the control pays
-#: nothing and the KV cache is untouched. There is a test for exactly that.
-_MODE_TEXT: dict[ConversationMode, tuple[str, str]] = {
-    ConversationMode.NORMAL: ("Normal", ""),
+#: Label, body, and **definition of done** per mode.
+#:
+#: The third element is Eyaas's own framing and the reason these are policies
+#: rather than tones: *"give every mode its own definition of done — that's the
+#: secret."* It is the standard the answer is held to, so it is stated last,
+#: closest to the conversation, and in the second person like everything else
+#: here.
+#:
+#: **NORMAL is no longer empty**, and that is a deliberate reversal. It used to
+#: resolve byte-for-byte to the pre-modes prompt so nobody paid for a feature
+#: they had not switched on — but Normal is where most turns happen, and Eyaas
+#: asked for it specifically: *"Normal mode should occasionally say 'there's a
+#: problem with that assumption' rather than blindly agreeing."* Making the
+#: default better is the opposite concern to not degrading it. Measured cost:
+#: see the `overhead_tokens` assertion in `test_context.py`.
+_MODE_TEXT: dict[ConversationMode, tuple[str, str, str]] = {
+    ConversationMode.NORMAL: (
+        "Normal",
+        "",
+        "Answer the problem behind the question, not only its wording. If it "
+        "rests on an assumption that will not hold, say so first.",
+    ),
     ConversationMode.STUDY: (
         "Study",
-        "Teach rather than answer. Give the idea in plain words, one worked "
-        "example, then a single question back that checks it landed. Define a "
-        "term the first time you use it. Do not hand over a final answer he "
-        "asked to work through — but if he asks for it outright, give it. "
-        "Full paragraphs are right here: the short-sentences guidance is "
-        "about being spoken aloud and does not apply in this mode.",
+        "Teach so he stops needing you. Find out what he already knows before "
+        "explaining, and name a misconception rather than talking past it. "
+        "Build from first principles, in layers, and say what the layers are "
+        "before starting. End on a question or a small problem he has to work, "
+        "and do not answer it in the same message. When he is wrong, say which "
+        "step failed, not the whole thing again. Bring back an earlier mistake "
+        "when it becomes relevant. If he asks outright for the answer, give "
+        "it. Full paragraphs are right here — the short-sentences guidance is "
+        "about being spoken aloud and does not apply.",
+        "You are done when he could reproduce the idea without you, not when "
+        "you have finished explaining.",
     ),
     ConversationMode.RESEARCH: (
         "Research",
-        "Gather before concluding. Prefer current sources over memory, name "
-        "what you used, and say plainly where sources disagree or where you "
-        "found nothing. Never fill a gap with a plausible guess — an "
-        "uncertain answer said clearly is worth more than a confident one "
-        "that is wrong. Length follows the evidence; the short-sentences "
-        "guidance is about being spoken aloud and does not apply here.",
+        "Produce a defensible answer, not an opinion. Break the question into "
+        "the parts that decide it, then gather — current over remembered, "
+        "primary over commentary. Do not stop at the first source that agrees; "
+        "look for one that disagrees and say what you found. Give each claim "
+        "with its evidence, your confidence and why, and what would change it. "
+        "Mark which parts are your inference rather than the source's. Flag a "
+        "source that is old, vendor-published or a single study. Never score "
+        "one out of ten — say what it is. "
+        "Length follows the evidence; the short-sentences guidance is about "
+        "being spoken aloud and does not apply.",
+        "You are done when the conclusion names its evidence and carries its "
+        "own uncertainty.",
     ),
     ConversationMode.QUICK: (
         "Quick",
-        "Answer in as few words as the question allows, often one line. No "
-        "preamble, no restating the question, no offer to elaborate. If a "
-        "correct answer genuinely needs more room, take it — being brief is "
-        "never worth being wrong.",
+        "Fastest path to a reliable answer — not the same as a short one, and "
+        "never the same as a careless one. Answer first, then at most one line "
+        "of why. No preamble, no restating the question, no offer to "
+        "elaborate. Use what is already in the conversation instead of asking "
+        "what he has effectively told you. Do the arithmetic yourself rather "
+        "than describing how. If unsure, say so in a clause and answer anyway.",
+        "You are done when he has the correct answer in the fewest words it "
+        "can be said in.",
     ),
     ConversationMode.CODE: (
         "Code",
-        "Code first, prose second. One complete runnable block with its "
-        "language tagged, then at most two lines on what to watch for. Do not "
-        "walk through code he can read. If the language or version was not "
-        "given, state the assumption you made.",
+        "Work like a senior engineer, not a snippet generator. Settle the "
+        "language, framework and existing conventions first — read the "
+        "surrounding code when you can, state the assumption when you cannot, "
+        "and match what is there. Check your own work before showing it: bad "
+        "input, a missing record, a null, an expired token, two requests at "
+        "once, anything concatenated into a query. Code first, prose second — "
+        "one runnable block, tagged, then what to watch for. Do not walk "
+        "through code he can read. When the bug is architectural, say so "
+        "instead of patching the line he pointed at.",
+        "You are done when it runs, survives its edge cases, and someone else "
+        "could maintain it.",
+    ),
+    ConversationMode.CRITIC: (
+        "Critic",
+        "He has asked you to attack this, so attack it. Go after the "
+        "assumption the whole thing rests on before anything smaller. Name "
+        "what would have to be true for it to work and which of those is least "
+        "likely. Look for the thing that is easy to build and hard to defend, "
+        "the step needing someone else's cooperation, the cost that arrives "
+        "later, the evidence that is missing rather than weak. Give the "
+        "strongest objection, not the easiest to answer, and say how to test "
+        "it cheaply. Do not invent problems: if a part holds, say which part "
+        "you attacked hardest.",
+        "You are done when the weakest point is named along with what would "
+        "prove you wrong. Agreement is not an outcome here.",
     ),
 }
 
@@ -293,11 +351,29 @@ def mode_label(mode: ConversationMode) -> str:
     return _MODE_TEXT[mode][0]
 
 
+def mode_done_when(mode: ConversationMode) -> str:
+    """This mode's standard for a finished answer.
+
+    Public because `core/modes.py` reads it: the mechanical levers live there
+    and the prose lives here, one source each, and `modes` importing `context`
+    is the direction that already exists. The reverse would be a cycle.
+    """
+    return _MODE_TEXT[mode][2]
+
+
 def _mode_block(mode: ConversationMode) -> str:
-    label, body = _MODE_TEXT[mode]
-    if not body:
+    """The mode's own paragraph, with its definition of done last.
+
+    **Last on purpose.** Everything before it says how to answer; this says
+    when to stop, which is the thing that has to survive a long reply — the
+    same reasoning that puts `research.py`'s untrusted-content warning after
+    the content as well as before it.
+    """
+    label, body, done = _MODE_TEXT[mode]
+    if not body and not done:
         return ""
-    return f"{_MODE_PREAMBLE.format(label=label)} {body}"
+    lead = _MODE_PREAMBLE.format(label=label)
+    return " ".join(part for part in (lead, body, done) if part)
 
 
 def _persona(

@@ -27,8 +27,8 @@ from pydantic import BaseModel
 from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
 from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
+from sidecar.core.modes import ModePolicy, policy_for, suggest
 from sidecar.core.router import (
-    MODE_BIAS,
     RouteDecision,
     Router,
     RoutingBias,
@@ -533,8 +533,30 @@ class ConversationService:
         # the message insert, the router decision and the history read, all of
         # which the turn pays for anyway. §9's 80ms budget is tight enough that
         # this overlap is worth having.
+        # A mode this turn would suit better, offered once and never applied.
+        # Patterns rather than a model call: the same settled position that took
+        # salience off the model after it returned 0.0 for fifteen of eighteen
+        # episodes, and that matches a plain yes/no with a table. Silence is the
+        # answer for almost every message, which is the design — §9's own
+        # warning is that over-triggering is the fastest route to a feature
+        # being switched off.
+        better = suggest(text, self.mode_for(resolved_session))
+        if better is not None:
+            await self._bus.broadcast(
+                Event.MODE_SUGGESTED,
+                {
+                    "session_id": resolved_session,
+                    "mode": str(better),
+                    "label": policy_for(better).label,
+                },
+            )
+
         if self._memory is not None:
-            retrieval = self._memory.retriever.prefetch(text)
+            # Study, Research and Critic build on what came before, so they get
+            # the longer deadline a recall question already earns rather than
+            # falling back to word matching most of the time.
+            deep = policy_for(self.mode_for(resolved_session)).retrieval_deadline_s is not None
+            retrieval = self._memory.retriever.prefetch(text, deep=deep)
             self._retrievals[turn_id] = retrieval
             retrieval.add_done_callback(lambda _: None)
 
@@ -725,6 +747,11 @@ class ConversationService:
     ) -> None:
         started = time.perf_counter()
         collected: list[str] = []
+        # This conversation's operating system: step budget, tool ceiling,
+        # routing bias and retrieval depth. Looked up once per turn rather than
+        # per call site, so every part of the turn is answering to the same
+        # policy even if the user changes mode mid-generation.
+        policy = policy_for(self.mode_for(session_id))
         # A spoken turn ignores the quality bias and stays on this machine.
         # Measured in stage 1: routed to Gemini, first audio landed at 1707ms
         # against 872ms locally — the network hop alone eats the budget.
@@ -736,7 +763,7 @@ class ConversationService:
             # The conversation's mode may ask for a different class of model.
             # It cannot reach past the privacy or explicit-choice stages —
             # `_by_bias` runs after both.
-            bias=MODE_BIAS[str(self.mode_for(session_id))],
+            bias=policy.bias,
             # Router stage 2b. The attachment is not in `user_text` — the
             # excerpt is assembled later — so the privacy regex cannot see it.
             carries_user_content=self._turn_has_attachments(turn_id),
@@ -761,7 +788,7 @@ class ConversationService:
 
             for attempt, info in enumerate(chain):
                 messages = await self._build_context(session_id, info, turn_id)
-                state = LoopState()
+                state = LoopState(max_steps=policy.max_steps)
                 try:
                     first_token_ms, final_info, loop_note = await self._agent_loop(
                         turn_id,
@@ -774,6 +801,7 @@ class ConversationService:
                         selected=selected,
                         spoken=spoken,
                         state=state,
+                        policy=policy,
                     )
                 except (ProviderUnavailable, ProviderRateLimited) as exc:
                     self._health.record_failure(
@@ -839,6 +867,7 @@ class ConversationService:
         *,
         tool_calls: list[ToolCall] | None = None,
         offer_tools: bool = True,
+        policy: ModePolicy | None = None,
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms.
 
@@ -861,7 +890,7 @@ class ConversationService:
                 num_ctx=min(self._num_ctx, info.context_tokens),
                 temperature=info.temperature,
             ),
-            tools=self._tool_schemas() if offer_tools else None,
+            tools=self._tool_schemas(policy) if offer_tools else None,
         ):
             if delta.tool_calls and tool_calls is not None:
                 tool_calls.extend(delta.tool_calls)
@@ -890,7 +919,7 @@ class ConversationService:
         await speech.finish(turn_id)
         return first_token_ms
 
-    def _tool_schemas(self) -> list[dict[str, Any]] | None:
+    def _tool_schemas(self, policy: ModePolicy | None = None) -> list[dict[str, Any]] | None:
         """What the model is allowed to know exists.
 
         None rather than an empty list when there is no permission engine:
@@ -926,6 +955,17 @@ class ConversationService:
         full_access = self._permissions.mode is PermissionMode.FULL_ACCESS
         ceiling = Tier.DANGER if (self._permissions.allow_danger or full_access) else Tier.CONFIRM
         hidden = set() if runtime.online_mode else ONLINE_TOOLS
+
+        # **The mode may only lower this, never raise it.** `min` rather than a
+        # replacement is the whole safety property: Quick and Study see
+        # read-only tools, and no mode can hand itself a tier the permission
+        # engine would not have allowed. A one-click header control that could
+        # reach the tier system is the `allow_danger_tools` drift again.
+        if policy is not None:
+            mode_ceiling = policy.tools.ceiling()
+            if mode_ceiling is None:
+                return None
+            ceiling = min(ceiling, mode_ceiling)
         return registry.schemas(tier_max=ceiling, exclude=hidden) or None
 
     async def _agent_loop(
@@ -941,6 +981,7 @@ class ConversationService:
         selected: str,
         spoken: bool,
         state: LoopState,
+        policy: ModePolicy,
     ) -> tuple[float | None, ModelInfo, str | None]:
         """Run steps until a text answer, loop detection, or the step budget
         ends it (BUILD_SPEC §9 Phase 6). Returns `(first_token_ms, model that
@@ -981,7 +1022,7 @@ class ConversationService:
                     available=self._usable_models() if self._usable_models else None,
                     step=state.step,
                     spoken=spoken,
-                    bias=MODE_BIAS[str(self.mode_for(session_id))],
+                    bias=policy.bias,
                     # Still true on step 4 as it was on step 0: the excerpt is
                     # in the message history the whole turn, so a later step
                     # re-routing away from the constraint would hand the file
@@ -1001,6 +1042,7 @@ class ConversationService:
                     started,
                     tool_calls=requested,
                     offer_tools=state.offer_tools,
+                    policy=policy,
                 )
             except (ProviderUnavailable, ProviderRateLimited) as exc:
                 if state.step == 0:
@@ -1177,7 +1219,8 @@ class ConversationService:
                 # (surfaced via `TURN_COMPLETE`), the same channel a
                 # provider failover already uses — never smuggled into the
                 # model's own words as if it had said this itself.
-                note = f"{note} {exhausted_note()}".strip() if note else exhausted_note()
+                ended = exhausted_note(state.max_steps)
+                note = f"{note} {ended}".strip() if note else ended
                 log.warning("turn.agent_exhausted", turn_id=turn_id, step=state.step)
 
             # This tool's own local-only-ness, or a prior step's, sticks for

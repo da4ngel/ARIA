@@ -2613,6 +2613,109 @@ is true rather than merely plausible — a real `.pptx` built and put through
 `extract_or_raise` in the same check comes back as
 `"Slide 1: Module Overview and Introduction to Information Security"`.
 
+## Modes became operating systems, not personalities (2026-08-19)
+    pytest sidecar/tests/test_modes.py -v     # 44
+
+Eyaas, after using the first version: *"Don't make them just different
+personalities. Make them genuinely different reasoning policies, tool
+strategies, context handling, and output standards. The modes should feel like
+the same AI with different operating systems underneath."*
+
+**He was right, and the gap was more literal than it sounds.** Mode reached
+exactly three call sites — `stable_prefix`, `fit_to_budget`, and one `bias`
+argument to `Router.choose`. Prompt text and a routing hint. Nothing else a
+mode ought to change had a hook to hang on.
+
+`core/modes.py` is that hook: one frozen `ModePolicy` per mode, and **every
+field is read by something**, because a field nothing consumes is the
+`affect_state`/`procedures`/`record_new_offers` pattern this file keeps
+rediscovering.
+
+| mode | steps | tools | bias | retrieval |
+|---|---|---|---|---|
+| normal | 8 | all | — | 60ms |
+| study | 4 | read-only | — | 400ms |
+| research | 8 | all | quality | 400ms |
+| quick | **2** | read-only | fastest | 60ms |
+| code | 8 | all | quality | 60ms |
+| critic | 4 | read-only | quality | 400ms |
+
+**Critic is new** — *"destroy my idea before reality does"*, and it fits rather
+than fights: the persona already carries *"agreeing with everything is not
+warmth; it is nobody being there"* with a test pinning it. This is that dial
+turned up. **41 tools, unchanged** — a mode is a policy, not a tool.
+
+### Where his spec collided with things already measured here
+Five, and four changed the design. Worth recording because each is a case
+where the obvious build would have been wrong.
+
+- **Per-mode tool sets are safe where relevance filtering was not**, and the
+  distinction is what makes Quick's read-only ceiling defensible at all.
+  Relevance selection is closed on evidence — filtering 23 tools to 8 took
+  choice from 21/24 to **9/24**. But that *guessed* per message. A mode's set
+  is declared, and stable for the whole conversation, so the schemas stay
+  byte-identical inside the KV-cached prefix — where a per-message set would
+  spend prefill every time the topic moved. Still unmeasured: run
+  `gate_tool_selection.py` before trusting `READ_ONLY` in Quick.
+- **Research mode's `Source quality: 9/10` was not built, deliberately.** It
+  would be the most authoritative-looking thing on screen and the least real,
+  against this project's hardest rule. The prompt says *"never score one out of
+  ten — say what it is"*, and asks instead for what is checkable: whether a
+  source is old, vendor-published, or a single study, and **which parts are her
+  inference rather than the source's**.
+- **Auto-switching contradicted a decision already recorded.** Modes reset to
+  Normal per conversation so *"a mode set last week cannot silently shape
+  today's answers"* — and a mode ARIA picks for itself is that shaping arriving
+  faster. Confirmed with Eyaas: it **suggests**, once, dismissible, and never
+  applies. `mode.suggested` is an event; the chip yields to the online warning,
+  because a mode that cannot work yet outranks one that might suit better.
+- **Study withholding answers has a hard floor.** `_INSTRUCTION_PRIORITY`
+  exists because "reply with only the number 7" once produced a 662-character
+  refusal. Socratic by default, and *"if he asks outright for the answer, give
+  it"* stays in the text.
+- **The knowledge map, the evidence pipeline and Code's self-review loop are
+  not built**, by his own scoping. They are the deep features of three modes
+  and each is a session. `ModePolicy` is what they hang off.
+
+### Two budget failures and a tautological test, all found by running it
+- **The first draft blew both caps.** Study through Critic ran 155–197 tokens
+  against a 130 per-mode ceiling, and FULL persona reached **823 against a
+  measured 800**. Trimmed hard, then the cap was raised to 150 *with its
+  arithmetic stated* — ≈70ms of prefill at 480ms/1000, paid once on the turn
+  the mode changes, because the block is in the stable prefix.
+- **The 800-token budget was being applied to a persona no local model uses.**
+  It asserted both levels, but the figure comes from prefill measured on this
+  machine's Ollama and **every local model in the catalog carries MINIMAL** —
+  now asserted rather than assumed, so a local model marked FULL fails the test
+  instead of silently escaping the budget. FULL is cloud-only and gets its own
+  looser ceiling.
+- **`test_normal_mode_is_byte_identical_to_no_modes_at_all` proved nothing.**
+  It compared `stable_prefix(mode=NORMAL)` against `stable_prefix()`, whose
+  default *is* NORMAL — the same shape as the `type_text` test that echoed its
+  own subject. The property is now stated as mechanism: Normal's step budget,
+  tools, bias and retrieval depth must not move. Its **prompt** did gain a
+  definition of done, deliberately, because Eyaas asked for Normal specifically.
+- A trim also silently dropped **"spoken aloud"** from Study and Research, which
+  is the phrase that releases the persona's short-sentences clause *by name*.
+  Its own test caught it; restored.
+
+### The one lever that touches safety, mutation-checked
+`_tool_schemas` takes `min(engine ceiling, mode ceiling)`. **A mode may only
+narrow.** Replacing that `min` with the mode's own value breaks exactly
+`test_a_mode_cannot_raise_its_own_ceiling` and nothing else — reverted after
+confirming. Without it a one-click header control could hand DANGER tools to a
+model whose permission engine never allowed them: `allow_danger_tools` drift
+arriving through a second door.
+
+`READ_ONLY` stops at `Tier.SAFE` and leans on rule 5's own invariant — every
+destructive operation is CONFIRM or above — rather than a second hand-written
+list free to drift from it.
+
+**1277 sidecar tests (+49), 129 renderer (+4), ruff, mypy, typecheck and the
+renderer build all clean.** Not yet looked at on screen, and the six policies
+have not been measured against real turns — `gate_tool_selection.py` on Quick
+is the first thing worth running.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

@@ -17,16 +17,24 @@ export function ModeSelector({
   label,
   needsOnline,
   disabled,
+  suggestion,
   onSelect,
   onEnableOnline,
+  onDismissSuggestion,
 }: {
   mode: ConversationMode
   label: string
   /** Research chosen while online mode is off. */
   needsOnline: boolean
   disabled: boolean
+  /** A mode this turn would suit better. **An offer, never applied** — modes
+   *  reset to Normal per conversation precisely so one cannot silently shape
+   *  an answer, and a mode ARIA switched to itself is that same invisible
+   *  shaping arriving faster. */
+  suggestion: { mode: ConversationMode; label: string } | null
   onSelect: (next: ConversationMode) => void
   onEnableOnline: () => void
+  onDismissSuggestion: () => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
@@ -100,6 +108,32 @@ export function ModeSelector({
           `settings.online` already draws. Research with the web switched off
           would otherwise behave like Normal and leave her to explain why in a
           refusal, which is how the user ends up debugging by asking. */}
+      {/* One offer at a time, and the online warning outranks it: a mode that
+          cannot work yet is a more urgent thing to say than a mode that might
+          suit better. */}
+      {suggestion && !needsOnline && !open && (
+        <div className="absolute bottom-full left-0 mb-1 flex items-center gap-1 whitespace-nowrap rounded-md bg-aria-sunk px-1.5 py-0.5 text-micro">
+          <button
+            type="button"
+            onClick={() => {
+              onDismissSuggestion()
+              choose(suggestion.mode)
+            }}
+            className="interactive text-aria-accent"
+          >
+            Switch to {suggestion.label}?
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss mode suggestion"
+            onClick={onDismissSuggestion}
+            className="interactive text-aria-faint hover:text-aria-muted"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {needsOnline && !open && (
         <button
           type="button"

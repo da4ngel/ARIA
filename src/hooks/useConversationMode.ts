@@ -1,5 +1,11 @@
 /**
- * How she should answer this conversation — Study, Research, Quick, Code.
+ * How she should answer this conversation — Study, Research, Quick, Code,
+ * Critic.
+ *
+ * **These are policies, not personalities.** The sidecar's `ModePolicy`
+ * carries a step budget, a tool ceiling, a routing bias and a retrieval
+ * depth per mode; what arrives here is the readable half of that, so the
+ * control can say what a mode does rather than only what it is called.
  *
  * A pure mirror of the sidecar (CLAUDE.md rule 1): `ConversationService` owns
  * the mode and `core/context.py` turns it into prompt text. This only caches
@@ -14,7 +20,13 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-export type ConversationMode = 'normal' | 'study' | 'research' | 'quick' | 'code'
+export type ConversationMode =
+  | 'normal'
+  | 'study'
+  | 'research'
+  | 'quick'
+  | 'code'
+  | 'critic'
 
 export interface ModeState {
   mode: ConversationMode
@@ -26,6 +38,16 @@ export interface ModeState {
    *  control has been overridden rather than showing a setting that is not in
    *  force. */
   effective_bias: string | null
+  /** What this mode holds an answer to, in her own words. Shown in the
+   *  control, because "what does Study actually do" should be answerable
+   *  without switching to it and seeing. */
+  done_when: string
+  /** The agent-loop ceiling. Quick's 2 against Normal's 8 is the clearest
+   *  evidence a mode is a policy rather than a tone. */
+  max_steps: number
+  /** 'all' | 'read_only' | 'none' — how much of the registry the model is
+   *  told about. */
+  tools: string
 }
 
 export const MODE_OPTIONS: Array<{
@@ -44,8 +66,13 @@ export const MODE_OPTIONS: Array<{
     label: 'Research',
     hint: 'Reads several sources and cites them. Needs online mode.',
   },
-  { value: 'quick', label: 'Quick', hint: 'One line where one line will do.' },
-  { value: 'code', label: 'Code', hint: 'Runnable code first, explanation second.' },
+  { value: 'quick', label: 'Quick', hint: 'Fastest reliable answer. Read-only tools, 2 steps.' },
+  { value: 'code', label: 'Code', hint: 'Reads the code first, then writes. Checks its own edge cases.' },
+  {
+    value: 'critic',
+    label: 'Critic',
+    hint: 'Attacks the idea. Names the weakest assumption and how to test it.',
+  },
 ]
 
 export interface UseConversationMode {
@@ -55,6 +82,17 @@ export interface UseConversationMode {
    *  able to show, rather than leaving her to explain it in a refusal. */
   needsOnline: boolean
   effectiveBias: string | null
+  /** The mode's definition of done, from the sidecar. */
+  doneWhen: string
+  /** Agent-loop ceiling, so the control can show that a mode really is a
+   *  different policy rather than a different voice. */
+  maxSteps: number
+  tools: string
+  /** A mode this turn would suit better, offered once. Cleared when it is
+   *  taken or dismissed, and by a mode change — an offer that outlived the
+   *  message that prompted it would be advice about the wrong turn. */
+  suggestion: { mode: ConversationMode; label: string } | null
+  dismissSuggestion: () => void
   setMode: (next: ConversationMode) => Promise<void>
   error: string | null
 }
@@ -65,6 +103,9 @@ const NORMAL: ModeState = {
   online_required: false,
   online_enabled: false,
   effective_bias: null,
+  done_when: '',
+  max_steps: 8,
+  tools: 'all',
 }
 
 export function useConversationMode(
@@ -73,11 +114,24 @@ export function useConversationMode(
 ): UseConversationMode {
   const [state, setState] = useState<ModeState>(NORMAL)
   const [error, setError] = useState<string | null>(null)
+  const [suggestion, setSuggestion] = useState<{
+    mode: ConversationMode
+    label: string
+  } | null>(null)
+
+  useEffect(() => {
+    return window.aria.onEvent((event) => {
+      if (event.method !== 'mode.suggested') return
+      const params = event.params as { mode: ConversationMode; label: string }
+      setSuggestion({ mode: params.mode, label: params.label })
+    })
+  }, [])
 
   useEffect(() => {
     if (!connected || !sessionId) {
       // No conversation yet means Normal, not a stale mode from the last one.
       setState(NORMAL)
+      setSuggestion(null)
       return
     }
     let cancelled = false
@@ -97,6 +151,8 @@ export function useConversationMode(
   const setMode = useCallback(
     async (next: ConversationMode) => {
       setError(null)
+      // Taking or ignoring an offer both end it.
+      setSuggestion(null)
       const previous = state
       // Optimistic, with the label filled in locally so the chip does not
       // flicker through a stale name on the way to the real answer.
@@ -126,6 +182,11 @@ export function useConversationMode(
     label: state.label,
     needsOnline: state.online_required && !state.online_enabled,
     effectiveBias: state.effective_bias,
+    suggestion,
+    dismissSuggestion: () => setSuggestion(null),
+    doneWhen: state.done_when,
+    maxSteps: state.max_steps,
+    tools: state.tools,
     setMode,
     error,
   }

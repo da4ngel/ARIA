@@ -91,6 +91,13 @@ class Event(StrEnum):
     # silent for however long several of them take.
     ATTACHMENT_READ = "attachment.read"
 
+    #: This turn would be better served by a different mode. **An offer,
+    #: never a switch** — modes are per-conversation and reset to Normal so
+    #: that one set last week cannot silently shape today's answers, and a
+    #: mode ARIA chose for itself is that same invisible shaping arriving
+    #: faster. Confirmed with Eyaas before building it.
+    MODE_SUGGESTED = "mode.suggested"
+
 
 class Sender(Protocol):
     """Minimal transport surface — a Starlette WebSocket satisfies this."""
