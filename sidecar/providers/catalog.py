@@ -90,6 +90,16 @@ class ModelInfo(BaseModel):
     # and the other reasoning models reject any value but 1.0, and `openai.py`
     # forwards whatever it is given. Set this only where it was measured.
     temperature: float | None = None
+    # Whether this endpoint *always* reasons before answering, and therefore
+    # cannot be told not to.
+    #
+    # **Measured live on 2026-08-19, both directions**: sending
+    # `reasoning: {"enabled": false}` to `openai/gpt-oss-20b:free` returns
+    # **HTTP 400 "Reasoning is mandatory for this endpoint and cannot be
+    # disabled"**, while sending it to a merely `default_enabled` model works
+    # and drops reasoning output to zero characters. So the flag cannot be sent
+    # unconditionally, and this is what says which is which.
+    reasoning_mandatory: bool = False
     # A third party's published score for this model (Artificial Analysis'
     # intelligence index, as OpenRouter reports it), carried verbatim.
     #

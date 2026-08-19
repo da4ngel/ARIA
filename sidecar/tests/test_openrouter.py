@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
+from sidecar.core.context import PersonaLevel
 from sidecar.providers import catalog
 from sidecar.providers.base import ProviderRateLimited, ProviderUnavailable
 from sidecar.providers.discovery import parse_openrouter
@@ -280,15 +281,40 @@ def test_a_429_says_how_much_quota_is_left() -> None:
     assert provider.rate_limit.limit == 50
 
 
-def test_quota_is_read_off_every_response_not_counted_here() -> None:
-    """OpenRouter's figure accounts for the key being used from anywhere.
+def test_the_free_allowance_is_counted_here_because_the_api_does_not_say() -> None:
+    """**Checked live on 2026-08-19, and the first version was wrong.**
 
-    A local counter would drift the moment Eyaas ran a script against the same
-    key, and a wrong number is worse than no number.
+    OpenRouter returns no rate-limit headers on a successful chat completion —
+    the only `x-` header is `x-generation-id` — and `GET /api/v1/key` reports
+    usage in *credits*, which is `0` for every free model by definition. So the
+    remaining free *request* count is not exposed by the API at all, and a
+    reader built on those headers would have displayed nothing forever.
     """
     state = RateLimitState()
+    assert state.as_dict()["remaining"] == 50
+
+    for _ in range(3):
+        state.record_request()
+    reported = state.as_dict()
+    assert reported["spent_today"] == 3
+    assert reported["remaining"] == 47
+    # And it says so. A number the UI presents as authoritative when it is an
+    # inference from a local count is worse than no number: the same key used
+    # from a script or another machine is invisible here.
+    assert reported["counted_here"] is True
+
+
+def test_a_stated_figure_beats_the_local_count() -> None:
+    """The header reader is kept because a 429 is documented to carry them.
+
+    If a real figure ever arrives it must win, and stop claiming to be local.
+    """
+    state = RateLimitState()
+    state.record_request()
     state.update(httpx.Headers({"x-ratelimit-limit": "50", "x-ratelimit-remaining": "31"}))
-    assert state.as_dict() == {"limit": 50, "remaining": 31, "reset_at": None}
+    reported = state.as_dict()
+    assert reported["remaining"] == 31
+    assert reported["counted_here"] is False
     # A response that says nothing must not silently reset what is known.
     state.update(httpx.Headers({}))
     assert state.remaining == 31
@@ -302,3 +328,78 @@ def test_a_non_429_still_reaches_the_base_handling() -> None:
     provider = OpenRouterProvider()
     with pytest.raises(ProviderUnavailable):
         provider._raise_for_detail(401, "invalid key", httpx.Headers({}))  # noqa: SLF001
+
+
+# ── reasoning, and why it cannot be switched off blindly ──────────────
+
+
+def test_reasoning_is_turned_off_where_the_endpoint_allows_it() -> None:
+    """CLAUDE.md's *"always send `think: false` to Ollama"* rule, second provider.
+
+    A reasoning model streams into a separate channel and leaves `content`
+    empty until it is done, so the whole token budget is spent before a word is
+    written. Measured live: `nvidia/nemotron-3-super-120b-a12b:free` answers
+    "Canberra" with **zero** characters of reasoning once this is sent, and
+    reasons by default without it.
+    """
+    info = catalog.ModelInfo(
+        id="vendor/optional-reasoning:free",
+        provider=catalog.ProviderName.OPENROUTER,
+        label="Optional",
+        klass=catalog.ModelClass.FAST,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.FREE,
+        best_for="",
+        reasoning_mandatory=False,
+        discovered=True,
+    )
+    catalog.set_discovered([info])
+    try:
+        body = OpenRouterProvider()._extra_body(info.id)  # noqa: SLF001
+        assert body == {"reasoning": {"enabled": False}}
+    finally:
+        catalog.set_discovered([])
+
+
+def test_it_is_never_sent_to_an_endpoint_that_requires_reasoning() -> None:
+    """**A hard 400, not a warning**, and it kills the whole turn.
+
+    Measured live: `openai/gpt-oss-20b:free` returns *"Reasoning is mandatory
+    for this endpoint and cannot be disabled."*
+    """
+    info = catalog.ModelInfo(
+        id="vendor/must-reason:free",
+        provider=catalog.ProviderName.OPENROUTER,
+        label="Must Reason",
+        klass=catalog.ModelClass.FAST,
+        persona=PersonaLevel.MINIMAL,
+        cost=catalog.Cost.FREE,
+        best_for="",
+        reasoning_mandatory=True,
+        discovered=True,
+    )
+    catalog.set_discovered([info])
+    try:
+        assert OpenRouterProvider()._extra_body(info.id) == {}  # noqa: SLF001
+    finally:
+        catalog.set_discovered([])
+
+
+def test_an_unknown_model_fails_open() -> None:
+    """The cost of not sending it is wasted tokens; the cost of sending it
+    wrongly is a dead turn. So an id the catalog has never seen gets nothing."""
+    catalog.set_discovered([])
+    assert OpenRouterProvider()._extra_body("someone/brand-new:free") == {}  # noqa: SLF001
+
+
+def test_whether_reasoning_is_mandatory_is_read_from_the_payload(payload) -> None:
+    """Not a hand-written list of model ids, which is what `eval_quality.py`
+    still carries and which cannot know about a model discovered this morning."""
+    stated = {
+        entry["id"]: bool((entry.get("reasoning") or {}).get("mandatory", False))
+        for entry in payload["data"]
+    }
+    found = parse_openrouter(payload)
+    assert any(m.reasoning_mandatory for m in found), "the fixture should carry one"
+    for model in found:
+        assert model.reasoning_mandatory == stated[model.id]

@@ -467,3 +467,47 @@ async def test_an_adopted_model_that_disappears_stops_being_routed_to() -> None:
     assert (await service(ask=Asker(), store=store, clock=clock).state()).verdicts[
         "vendor/candidate:free"
     ].state == "adopted"
+
+
+async def test_an_unreachable_candidate_does_not_block_the_ones_behind_it() -> None:
+    """Found live, on the first real run, and it would never have healed.
+
+    `z-ai/glm-5.2:free` is the highest-benchmarked free model on OpenRouter and
+    was throttled upstream by the provider serving it — not by the account —
+    for an entire session. The first version took the head of the queue, hit
+    the error, and ended the tick, so two ticks measured nothing and every tick
+    after them would have done the same.
+    """
+    store, clock = Store(), Clock()
+
+    class Flaky(Asker):
+        async def __call__(self, info: ModelInfo, prompt: str) -> str:
+            self.calls.append((info.id, prompt))
+            if info.id == "vendor/throttled:free":
+                raise RuntimeError("temporarily rate-limited upstream")
+            return perfect_reply(prompt, len(self.calls))
+
+    ask = Flaky()
+    ordered = [a_model("vendor/throttled:free", 52.6), a_model("vendor/reachable:free", 40.0)]
+    svc = service(ask=ask, store=store, clock=clock, candidates=ordered, budget=99, per_tick=6)
+
+    await svc.tick()
+
+    assert "vendor/reachable:free" in {model for model, _ in ask.calls}
+    state = await svc.state()
+    # And the throttled one is *still pending*, not rejected — the outage says
+    # nothing about whether it is honest.
+    assert state.verdicts["vendor/throttled:free"].state == "pending"
+
+
+async def test_a_general_outage_does_not_walk_the_whole_list() -> None:
+    """Stepping over one throttled model is right; stepping over fifteen spends
+    a request per model out of fifty to learn the network is down."""
+    store, clock = Store(), Clock()
+    ask = Asker(RuntimeError("everything is down"))
+    many = [a_model(f"vendor/m{i}:free", 50.0 - i) for i in range(12)]
+    svc = service(ask=ask, store=store, clock=clock, candidates=many, budget=99, per_tick=99)
+
+    await svc.tick()
+
+    assert len(ask.calls) == 3, "it kept trying past the unreachable cap"

@@ -24,11 +24,13 @@ turn carrying the user's own files away from them.
 from __future__ import annotations
 
 import time
+from datetime import date
 from typing import Any
 
 import httpx
 import structlog
 
+from sidecar.providers import catalog
 from sidecar.providers.base import ProviderRateLimited, ProviderUnavailable
 from sidecar.providers.credentials import CredentialKey, get_key
 from sidecar.providers.openai import CONNECT_TIMEOUT_S, READ_TIMEOUT_S, OpenAIProvider
@@ -45,19 +47,46 @@ APP_URL = "https://github.com/da4ngel/ARIA"
 APP_TITLE = "ARIA"
 
 
-class RateLimitState:
-    """What the last response said about remaining free quota.
+#: The free tier's daily allowance, from OpenRouter's published limits. Not
+#: discoverable from the API (see `RateLimitState`), so it is written down here
+#: with the date it was true — the same treatment every other unmeasurable
+#: constant in this project gets.
+FREE_REQUESTS_PER_DAY = 50
 
-    Read off `X-RateLimit-*` headers rather than counted here: OpenRouter's
-    figure accounts for usage from anywhere, and a local counter would drift
-    the moment the key is used from another machine or a script.
+
+class RateLimitState:
+    """How much of the free daily allowance ARIA has spent, and it is a count.
+
+    **The first version read `X-RateLimit-*` headers and would have displayed
+    nothing forever.** Checked live on 2026-08-19: OpenRouter returns no
+    rate-limit headers on a successful chat completion — the only `x-` header
+    is `x-generation-id` — and `GET /api/v1/key` reports usage in *credits*,
+    which is `0` for every free model by definition. So the remaining free
+    *request* count is not exposed by the API at all.
+
+    Counting locally is therefore the only option, and the honest framing is
+    "what this machine has spent", never "what is left on the key": the same
+    key used from a script or another machine is invisible here. The header
+    reader is kept because OpenRouter's docs say a 429 carries them, and a real
+    figure should win over an inferred one the moment one arrives.
     """
 
-    def __init__(self) -> None:
-        self.limit: int | None = None
+    def __init__(self, limit: int = FREE_REQUESTS_PER_DAY) -> None:
+        self.limit: int | None = limit
+        #: Only ever set from a response that actually stated it.
         self.remaining: int | None = None
         #: Unix milliseconds, as OpenRouter sends it.
         self.reset_at: int | None = None
+        #: Requests this process has made today, and the day they count against.
+        self.spent_today = 0
+        self._day = date.today()
+
+    def record_request(self) -> None:
+        today = date.today()
+        if today != self._day:
+            self._day = today
+            self.spent_today = 0
+        self.spent_today += 1
 
     def update(self, headers: httpx.Headers) -> None:
         self.limit = _as_int(headers.get("x-ratelimit-limit")) or self.limit
@@ -66,8 +95,19 @@ class RateLimitState:
             self.remaining = remaining
         self.reset_at = _as_int(headers.get("x-ratelimit-reset")) or self.reset_at
 
-    def as_dict(self) -> dict[str, int | None]:
-        return {"limit": self.limit, "remaining": self.remaining, "reset_at": self.reset_at}
+    def as_dict(self) -> dict[str, int | None | bool]:
+        # `remaining` prefers a stated figure and falls back to arithmetic on
+        # the local count. `counted_here` is what stops that being a lie: a
+        # number the UI presents as authoritative when it is an inference is
+        # worse than no number.
+        inferred = None if self.limit is None else max(0, self.limit - self.spent_today)
+        return {
+            "limit": self.limit,
+            "remaining": self.remaining if self.remaining is not None else inferred,
+            "reset_at": self.reset_at,
+            "spent_today": self.spent_today,
+            "counted_here": self.remaining is None,
+        }
 
 
 def _as_int(raw: str | None) -> int | None:
@@ -113,6 +153,33 @@ class OpenRouterProvider(OpenAIProvider):
             "X-Title": APP_TITLE,
         }
 
+    def _extra_body(self, model: str) -> dict[str, object]:
+        """Turn reasoning off where the endpoint allows it, and count the call.
+
+        This is CLAUDE.md's *"always send `think: false` to Ollama"* rule
+        reaching a second provider, and for the identical reason: a reasoning
+        model streams into a separate channel and leaves `content` empty until
+        it is done, so the tokens are spent before a word is written. Measured
+        here on 2026-08-19 — `nvidia/nemotron-3-super-120b-a12b:free` answers
+        "Canberra" with **0 characters of reasoning** once this is sent, and
+        several free models reason by default without it.
+
+        **It cannot be sent unconditionally.** `openai/gpt-oss-20b:free`
+        returns *HTTP 400 "Reasoning is mandatory for this endpoint and cannot
+        be disabled"* — a hard failure of the whole turn, not a warning. So the
+        catalog is consulted, and an id nobody knows about **fails open**: the
+        cost of not sending it is some wasted tokens, and the cost of sending
+        it wrongly is a dead turn.
+        """
+        # `stream_chat` is inherited whole, so this hook is also the one
+        # place every outgoing request passes through — which is where the
+        # local request count has to live. See `RateLimitState`.
+        self.rate_limit.record_request()
+        info = catalog.get(model)
+        if info is None or info.reasoning_mandatory:
+            return {}
+        return {"reasoning": {"enabled": False}}
+
     async def available(self) -> bool:
         """Reachability, and a free chance to read the quota headers."""
         try:
@@ -142,10 +209,23 @@ class OpenRouterProvider(OpenAIProvider):
         if headers is not None:
             self.rate_limit.update(headers)
         if status_code == 429:
+            # **Two different 429s, and telling the user the wrong one is
+            # actively misleading.** The account-level cap is 20/minute and
+            # 50/day; but a *single free model* is also throttled upstream by
+            # whichever provider is serving it, independently of the account,
+            # and that one is transient and specific to that model. Both were
+            # seen within a minute of the first live test.
+            if "upstream" in detail or "temporarily rate-limited" in detail:
+                raise ProviderRateLimited(
+                    "This free model is busy upstream right now — the limit is the "
+                    "provider serving it, not your account. Another model will "
+                    "answer, or try again shortly.",
+                    retry_after_s=self._retry_after_s(headers),
+                )
             remaining = self.rate_limit.remaining
             spent = "" if remaining is None else f" ({remaining} left)"
             raise ProviderRateLimited(
-                f"OpenRouter rate limit reached{spent}. The free tier allows "
+                f"OpenRouter's free-tier limit for this key is reached{spent}: "
                 f"20 requests a minute and 50 a day. Server said: {detail}",
                 retry_after_s=self._retry_after_s(headers),
             )

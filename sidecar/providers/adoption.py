@@ -69,6 +69,14 @@ DEFAULT_TICK_S = 3600.0
 #: one burst that collides with whatever the user is doing.
 PER_TICK = 4
 
+#: How many candidates may fail to answer in one tick before it gives up.
+#:
+#: Free models are throttled upstream by whoever serves them, independently of
+#: the account, and that is transient — so stepping over one is right. Stepping
+#: over ten is a general outage, and walking the whole list to discover that
+#: spends a request per model out of fifty.
+MAX_UNREACHABLE_PER_TICK = 3
+
 
 class Verdict(BaseModel):
     """What happened to one candidate, and why — kept whatever the answer.
@@ -241,14 +249,39 @@ class AdoptionService:
         if left <= 0:
             return
 
-        candidate = self._next_candidate(offered, state)
-        if candidate is None:
-            return
+        spent = 0
+        skipped = 0
+        for candidate in self._pending(offered, state):
+            if spent >= left or skipped >= MAX_UNREACHABLE_PER_TICK:
+                break
+            used, reachable = await self._measure(candidate, state, left - spent)
+            spent += used
+            if not reachable:
+                skipped += 1
 
+        if spent:
+            state.spend(today, spent)
+        await self._save(state.model_dump(mode="json"))
+
+    async def _measure(
+        self, candidate: ModelInfo, state: AdoptionState, left: int
+    ) -> tuple[int, bool]:
+        """Probe one candidate as far as the remaining budget allows.
+
+        Returns how many requests it cost and whether the model answered at
+        all. **The second half is why this is a separate method**: a candidate
+        that cannot be reached must not end the tick, or one persistently
+        throttled model at the head of the queue blocks every model behind it,
+        forever. Seen live on the first real run — `z-ai/glm-5.2:free` is the
+        highest-benchmarked free model and was upstream-throttled through an
+        entire session, so two ticks made no progress at all and would have
+        gone on making none.
+        """
         verdict = state.verdicts.setdefault(candidate.id, Verdict(model_id=candidate.id))
         verdict.model_json = candidate.model_dump(mode="json")
 
         spent = 0
+        reachable = True
         for probe in self._remaining(verdict):
             if spent >= left:
                 break
@@ -261,21 +294,34 @@ class AdoptionService:
                 # outages say nothing about whether the model is honest, and
                 # recording one as a rejection would be permanent.
                 log.info("adoption.probe_unreachable", model=candidate.id, error=str(exc))
+                # It still cost a request, so it is still spent.
+                spent += 1
+                reachable = False
                 break
 
             spent += 1
+            if not reply.strip():
+                # **Not a rejection**, which is the whole point of it being
+                # special-cased. A rejection here is permanent, and an empty
+                # reply is far more often something at this end — a token
+                # budget too small for a model that reasons before answering
+                # was exactly the bug found the first time this ran against a
+                # real endpoint. A model that genuinely always returns nothing
+                # simply never finishes its probes and is never adopted, which
+                # is the right outcome without a permanent black mark.
+                log.info("adoption.empty_reply", model=candidate.id, probe=probe.id)
+                reachable = False
+                break
+
             reasons = grade(probe, reply)
             if reasons:
-                self._reject(verdict, probe, reply, reasons, today)
+                self._reject(verdict, probe, reply, reasons, self._clock().date())
                 break
             verdict.passed.append(probe.id)
 
         if verdict.state == "pending" and not self._remaining(verdict):
-            self._promote(verdict, candidate, today)
-
-        if spent:
-            state.spend(today, spent)
-        await self._save(state.model_dump(mode="json"))
+            self._promote(verdict, candidate, self._clock().date())
+        return spent, reachable
 
     def _prune(self, offered: list[ModelInfo], state: AdoptionState) -> None:
         """Drop adoptions for models OpenRouter no longer lists.
@@ -295,21 +341,21 @@ class AdoptionService:
                 catalog.unadopt(verdict.model_id)
                 log.info("adoption.withdrawn", model=verdict.model_id, reason="no longer offered")
 
-    def _next_candidate(
-        self, offered: list[ModelInfo], state: AdoptionState
-    ) -> ModelInfo | None:
-        """The most promising model still undecided.
+    def _pending(self, offered: list[ModelInfo], state: AdoptionState) -> list[ModelInfo]:
+        """Every undecided model, best first.
 
         `discovery.parse_openrouter` already sorts by the published benchmark,
-        so "first still pending" is "best still pending" — which is what makes
-        a slow queue tolerable: the model most likely to be worth adopting is
-        also the one measured first.
+        so this order is "best still pending" — which is what makes a slow
+        queue tolerable: the model most likely to be worth adopting is also the
+        one measured first. The whole list rather than just its head, so a
+        candidate that cannot be reached is stepped over instead of blocking
+        the ones behind it.
         """
-        for info in offered:
-            decided = state.verdicts.get(info.id)
-            if decided is None or decided.state == "pending":
-                return info
-        return None
+        return [
+            info
+            for info in offered
+            if (decided := state.verdicts.get(info.id)) is None or decided.state == "pending"
+        ]
 
     def _remaining(self, verdict: Verdict) -> list[Probe]:
         done = set(verdict.passed)

@@ -145,8 +145,8 @@
     "semantic_hash": "0194f490d889cbb2947fb7c50def8796"
   },
   "sidecar/main.py": {
-    "mtime": 1787106743.702984,
-    "ast_hash": "cd6ac90d67c7761e03e3028e49c1135c",
+    "mtime": 1787113935.037494,
+    "ast_hash": "5860c9dcd4218e48cf66990424639c2c",
     "semantic_hash": ""
   },
   "sidecar/memory/__init__.py": {
@@ -215,8 +215,8 @@
     "semantic_hash": "e9b4c0ea549027e6f5ff230f8b31da3f"
   },
   "sidecar/providers/catalog.py": {
-    "mtime": 1787106462.3589385,
-    "ast_hash": "fd044862feb7d24232a45c8372e42b08",
+    "mtime": 1787113865.8918145,
+    "ast_hash": "c78c89d87cda6c70d9b4e3a6090ddf62",
     "semantic_hash": ""
   },
   "sidecar/providers/connectivity.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": ""
   },
   "sidecar/providers/openai.py": {
-    "mtime": 1787105417.750525,
-    "ast_hash": "0d4bde759909a19db6d42641ebc9ce62",
+    "mtime": 1787113894.749921,
+    "ast_hash": "8ca4492a554b4143ca3f2553884e5fa9",
     "semantic_hash": ""
   },
   "sidecar/providers/stt.py": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1787107723.4784853,
-    "ast_hash": "859c055a96f69f9edca39a34b726fb48",
+    "mtime": 1787114884.2598698,
+    "ast_hash": "2ce7bfb542d1ed551af82d5e1abffcfe",
     "semantic_hash": ""
   },
   "README.md": {
@@ -695,8 +695,8 @@
     "semantic_hash": "3bd382bc587d2af03dec1b682cc329f1"
   },
   "sidecar/providers/discovery.py": {
-    "mtime": 1787105866.941239,
-    "ast_hash": "b3a69efac0e4a1f4a353163bcd45052e",
+    "mtime": 1787113865.8928216,
+    "ast_hash": "20a49a146405db5a5a7677723f7b5205",
     "semantic_hash": ""
   },
   "sidecar/tests/fixtures/gemini_models.json": {
@@ -1130,13 +1130,13 @@
     "semantic_hash": ""
   },
   "sidecar/eval/probes.py": {
-    "mtime": 1786035319.6683376,
-    "ast_hash": "a4c2085d353cdf2ede0d219a1f51557f",
+    "mtime": 1787114450.8442953,
+    "ast_hash": "0856a91f61eed6e576c403fc6b5b504e",
     "semantic_hash": ""
   },
   "sidecar/providers/adoption.py": {
-    "mtime": 1787107232.19849,
-    "ast_hash": "74bc2c95746df8bb4418de063b2334bf",
+    "mtime": 1787114144.425743,
+    "ast_hash": "823525787d2b7f384a1abb11dcbbba06",
     "semantic_hash": ""
   },
   "sidecar/providers/factory.py": {
@@ -1145,8 +1145,8 @@
     "semantic_hash": ""
   },
   "sidecar/providers/openrouter.py": {
-    "mtime": 1787105417.8808014,
-    "ast_hash": "99527289d72647c6295d0df4019b33da",
+    "mtime": 1787114064.5604856,
+    "ast_hash": "83f33c0a8f22a3dcc8ecb095163e3aa4",
     "semantic_hash": ""
   },
   "sidecar/tests/fixtures/openrouter_models.json": {
@@ -1155,13 +1155,13 @@
     "semantic_hash": ""
   },
   "sidecar/tests/test_adoption.py": {
-    "mtime": 1787107212.2644844,
-    "ast_hash": "2834b7e09a38a46a07f9fe85a6d7c1a4",
+    "mtime": 1787114165.638957,
+    "ast_hash": "5840c5ca1d7d63d640e7258695dc44c2",
     "semantic_hash": ""
   },
   "sidecar/tests/test_openrouter.py": {
-    "mtime": 1787106560.867083,
-    "ast_hash": "1ebc2694b31d3c9307e3500552b0802a",
+    "mtime": 1787114655.5962653,
+    "ast_hash": "aea9d385918e375fa1a516b53ff90126",
     "semantic_hash": ""
   },
   "tailwind.config.mjs": {
@@ -1172,6 +1172,11 @@
   "image.png": {
     "mtime": 1787053923.0493834,
     "ast_hash": "55d9a168cd5f7615bbb249f1cd2e2168",
+    "semantic_hash": ""
+  },
+  "sidecar/tests/test_probes.py": {
+    "mtime": 1787114505.6146097,
+    "ast_hash": "5012a7c3bc2afd89c2e39ac84fc6f5d4",
     "semantic_hash": ""
   }
 }

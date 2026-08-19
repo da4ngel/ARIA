@@ -90,6 +90,12 @@ log = structlog.get_logger(__name__)
 #: `grounded` check reads the opening, not the tail.
 ADOPTION_MAX_TOKENS = 200
 
+#: And what a model that cannot be told *not* to reason needs. Reasoning is
+#: billed against the same budget, so 200 buys an empty string — measured, on
+#: `openai/gpt-oss-20b:free`, which answers correctly at 2000 and returns
+#: nothing at 200.
+REASONING_MAX_TOKENS = 2000
+
 # Set once at startup, compared against every /rpc upgrade.
 _AUTH_TOKEN: str = ""
 
@@ -543,6 +549,13 @@ async def _start_adoption(
         what the control group is for.
         """
         collected: list[str] = []
+        # A model that must reason spends its budget *before* writing a word,
+        # so the ordinary cap returns an empty string — measured live, and an
+        # empty reply would have been scored as a permanent rejection for a
+        # fault at this end. `eval_quality.py` already carries the same rule
+        # for GPT-5; this is the first place that can read it off the payload
+        # instead of a hand-written list of model ids.
+        budget = REASONING_MAX_TOKENS if info.reasoning_mandatory else ADOPTION_MAX_TOKENS
         machine = ctx.MachineContext(
             now=datetime.now().astimezone(),
             model_label=info.label,
@@ -556,7 +569,7 @@ async def _start_adoption(
         async for delta in openrouter.stream_chat(
             messages,
             model=info.id,
-            options=GenerationOptions(max_tokens=ADOPTION_MAX_TOKENS),
+            options=GenerationOptions(max_tokens=budget),
         ):
             if delta.text:
                 collected.append(delta.text)

@@ -130,6 +130,15 @@ class OpenAIProvider:
         """No-op: cloud models have no local load step to pay for."""
         return 0.0
 
+    def _extra_body(self, model: str) -> dict[str, object]:
+        """Per-request fields this vendor accepts and OpenAI does not.
+
+        A hook rather than a second copy of `stream_chat`: `OpenRouterProvider`
+        needs one field on the body and everything else about the request is
+        identical, which is the whole reason it subclasses this at all.
+        """
+        return {}
+
     async def stream_chat(
         self,
         messages: list[ChatMessage],
@@ -154,6 +163,7 @@ class OpenAIProvider:
             body["max_completion_tokens"] = opts.max_tokens
         if opts.stop:
             body["stop"] = opts.stop
+        body.update(self._extra_body(model))
 
         headers = self._headers()
         try:
@@ -265,6 +275,11 @@ class OpenAIProvider:
             return None
         delta_body = choices[0].get("delta") or {}
         text = delta_body.get("content") or ""
+        # OpenRouter's reasoning models stream their thinking on a separate
+        # `reasoning` key while `content` stays empty — the same shape Ollama
+        # uses with `message.thinking`, and it must never reach the UI or the
+        # TTS buffer. Absent from OpenAI's own payloads, so this is inert there.
+        thinking = delta_body.get("reasoning") or ""
         if partial is not None:
             for fragment in delta_body.get("tool_calls") or []:
                 slot = partial.setdefault(
@@ -281,6 +296,7 @@ class OpenAIProvider:
         usage = chunk.get("usage") or {}
         return StreamDelta(
             text=text,
+            thinking=thinking,
             done=finished,
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),

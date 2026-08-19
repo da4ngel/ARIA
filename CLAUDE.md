@@ -2449,19 +2449,111 @@ so plainly instead of implying a guarantee.
   `ModelPicker.tsx`'s `PROVIDER_ORDER`, which rendering maps over, so a provider
   missing from it is invisible with no fallback.
 
-### Verified live, and what could not be
-**Live against the real endpoint**: `discover_openrouter()` returns 15 models
-with real context windows and benchmarks, and `discover_all()` returns
-32 OpenAI + 14 Gemini + 15 OpenRouter with the strict zip intact.
+### Verified live
+**Against the real endpoint**: `discover_openrouter()` returns 15 models with
+real context windows and benchmarks, and `discover_all()` returns 32 OpenAI +
+14 Gemini + 15 OpenRouter with the strict zip intact.
 
-**No OpenRouter key is stored yet** — Eyaas said he was *going to* connect it —
-so three things are built, unit-tested and **not** live-verified: a real
-conversation through the provider, the adoption loop spending real quota against
-a real model, and the `X-RateLimit-*` headers coming back from a real 429. The
-adoption scheduler itself is driven across a simulated fortnight on an injected
-clock (21 tests), and both safety-critical decisions are mutation-checked. The
-first thing to do with a key is hold one conversation on a hand-picked free
-model — that path works immediately and needs no measurement.
+### The key arrived, and an hour with it found five things unit tests could not
+Eyaas supplied a real OpenRouter key the same day. Everything below is measured
+against the live endpoint, and **four of the five are bugs that only a real
+provider could have surfaced** — the unit tests passed throughout.
+
+**What works, end to end**: a real conversation on a hand-picked free model
+(`nvidia/nemotron-3.5-lightning:free` first audio-equivalent at **380ms**,
+nemotron-3-ultra at 1051ms, gemma-4-26b at 1460ms); **real tool calls**, so the
+fragment-accumulating assembler inherited from `OpenAIProvider` reassembles
+OpenRouter's deltas correctly and the tool-capable filter means what it says
+(`turn the volume up` → `set_volume(direction="up")` on every model that
+answered); the adoption loop spending real quota, resuming across ticks, and
+recording a real rejection with the transcript.
+
+- **Half the free models are throttled upstream at any moment, and it is not
+  the account's limit.** `z-ai/glm-5.2:free` — the highest-benchmarked free
+  model — was 429 for an entire session, while others answered fine. That is
+  the *provider serving the model* rate-limiting, independent of the key, and
+  the first version of the error said *"the free tier allows 20 a minute and 50
+  a day"*, which is a confident wrong explanation. Now told apart by the body
+  OpenRouter sends and worded separately.
+- **And it blocked the whole queue.** `_next_candidate` took the head of the
+  list, the probe raised, the tick ended — so two consecutive live ticks made
+  **zero** progress and every tick after them would have done the same, forever.
+  Fixed by stepping over an unreachable candidate to the next one, capped at
+  `MAX_UNREACHABLE_PER_TICK = 3` so a general outage does not walk the whole
+  list at a request each. This is not a subtle failure; it is total, and no unit
+  test caught it because every stub `ask` answered.
+- **Reasoning models returned an empty string, which the gate scored as a
+  rejection.** `openai/gpt-oss-20b:free` streams into a `reasoning` key while
+  `content` stays `""` — CLAUDE.md's *"always send `think: false` to Ollama"*
+  finding, verbatim, on a second provider — so a 200-token probe budget bought
+  nothing at all. **A rejection here is permanent**, so this would have
+  blacklisted good models for a fault at this end. Three fixes: `reasoning` is
+  mapped to `StreamDelta.thinking` (inert on OpenAI, which never sends it),
+  `ModelInfo.reasoning_mandatory` is read off the payload rather than a
+  hand-written id list, and an empty reply is explicitly *not* a rejection.
+- **`reasoning: {"enabled": false}` cannot be sent blindly.** Measured both
+  directions: on a `default_enabled` model it works and drops reasoning to
+  **zero** characters; on `openai/gpt-oss-20b:free` it is **HTTP 400 —
+  "Reasoning is mandatory for this endpoint and cannot be disabled"**, killing
+  the turn. So the catalog is consulted and an unknown id **fails open**.
+  `_extra_body` is a new hook on `OpenAIProvider` for this, rather than a second
+  copy of `stream_chat`.
+- **The quota display would have shown nothing forever.** Checked directly: a
+  successful chat completion carries **no** rate-limit headers (the only `x-`
+  header is `x-generation-id`), and `GET /api/v1/key` reports usage in
+  *credits*, which is `0` for every free model by definition. So the remaining
+  free *request* count is not exposed on the success path at all. It is counted
+  locally now and **labelled `counted_here`**, because a local count cannot see
+  the key used from a script or another machine — and a number the UI presents
+  as authoritative when it is an inference is worse than no number. **A real
+  429 does carry `X-RateLimit-Limit/Remaining/Reset`**, confirmed when the daily
+  cap was hit, and a stated figure wins over the local count the moment one
+  arrives.
+
+### A false rejection, and the checker was wrong — not the model
+`nvidia/nemotron-3-ultra-550b-a55b:free` was rejected on `ground-sun` for
+answering:
+
+> *"Yes, the Sun is a star — a G-type main-sequence star (a yellow dwarf) about
+> 4.6 billion years old."*
+
+`answers_flatly()` failed it because `_HEDGE` matched **"about 4"**. Nothing in
+that reply is hedged: the question was answered flatly and "about 4.6 billion
+years" is how the fact is correctly stated. **This project already had the rule
+this broke** — *"the checks lie before the model does... most 'failures' in the
+first passes were bugs in the checker"* — and adoption is what made it
+permanent rather than a line in a report.
+
+- **`_EPISTEMIC_HEDGE` is the doubt half of `_HEDGE`**, and only it decides
+  `answers_flatly`. `hedges()` still reads the full pattern and must: for an
+  *uncertain* quantity "about 130 million" is the required hedge. Same words,
+  opposite job — exactly the distinction `Expect.GROUNDED` and
+  `Expect.UNCERTAIN` exist to draw.
+- **`ground-capital-australia` has never caught the transcript its own comment
+  cites.** *"Canberra is approximated as the capital"* — the qwen3.5:4b reply
+  quoted in that probe since Phase 1.5 — passed all three of its checks, because
+  the full `_HEDGE` requires a digit after "approximate". Found while splitting
+  the pattern; it fails now, as it always claimed to.
+- **`sidecar/tests/test_probes.py` is new, and there was no test file for the
+  probes at all before this.** Both transcripts are in it verbatim, along with a
+  test asserting no pattern contains a literal control character — because the
+  fix above was first written through a shell heredoc, which turned `\b` into a
+  **backspace (0x08)**: the regex compiled, looked right in the file, and
+  matched nothing. A check that never fires reads exactly like a check that
+  always passes.
+
+### The one line still unobserved, and why
+No model has been **adopted** yet. `google/gemma-4-26b-a4b-it:free` reached
+**12 of 20** probes before the account's 50-a-day free allowance ran out, and
+`nemotron-3-ultra` was rejected on `ground-continents` — *"There is no single,
+universally agreed-upon number"* — which is a **correct** rejection: hedging a
+settled fact is the exact failure that category exists to catch, and it is the
+same shape as the qwen3.5:4b answer above.
+
+The quota resets at 00:00 UTC. Everything up to the promotion step is proven
+live; the promotion itself is unit-tested and mutation-checked, and will happen
+on its own once ARIA is restarted with the key in place — `_start_adoption`
+reads the key at startup, so **the scheduler does not begin until a restart**.
 
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
@@ -2563,8 +2655,16 @@ model against the `grounded` control group before Smart mode may route to it.
 stated a second way, not a weaker one. Two bugs found on the way, neither in
 this feature: `eval_quality.py` sent no clock, so three `grounded` probes were
 rewarding an invented time; and a duplicated `provider_for()` in two scripts
-silently fell through to Gemini. **41 tools, unchanged.** See the section
-above — including what a missing key means could not be verified live.
+silently fell through to Gemini. **41 tools, unchanged.**
+
+**A real key arrived the same day and found five more**, four of which only a
+live provider could surface: upstream throttling blocked the adoption queue
+permanently, reasoning models returned empty strings the gate scored as
+rejections, `reasoning: {"enabled": false}` is a hard 400 on an endpoint that
+requires it, the quota display read headers that never arrive on success, and
+`answers_flatly()` falsely rejected a correct answer for saying "about 4.6
+billion years". Real conversations, real tool calls and a real rejection are
+all confirmed; **no model has been adopted yet** — see the section above.
 
 **Uploads, modes and a retheme landed 2026-08-18** — see the section above.
 Uploads read Office, OpenDocument, epub, RTF and archives with **no new
@@ -2574,11 +2674,17 @@ to warm slate with an indigo accent and now lives in one file instead of six.
 mode is a style, so neither is a tool.
 
 Remaining, in rough order:
-- **OpenRouter has no key stored, so three things are unverified live**: a real
-  conversation through the provider, the adoption loop spending real quota, and
-  a real 429's `X-RateLimit-*` headers. Add the key in Settings and hold one
-  conversation on a hand-picked free model first — that path needs no
-  measurement and proves the provider end to end.
+- **No free model has been *adopted* yet.** `google/gemma-4-26b-a4b-it:free`
+  reached 12 of 20 probes before the 50-a-day allowance ran out, and
+  `nemotron-3-ultra` was correctly rejected on `ground-continents`. Everything
+  up to the promotion step is proven live. **The scheduler only starts at
+  startup**, so ARIA needs a restart with the key in place before it runs on
+  its own.
+- **Half the free models are throttled upstream at any given moment**, which is
+  not the account's limit and comes and goes. `z-ai/glm-5.2:free` — the best of
+  them by benchmark — was unreachable for an entire session. Whatever ends up
+  adopted, free models are a fallback tier and the router already treats them
+  as one.
 - **Every `grounded` score in this file predates the clock fix.** Three of the
   twenty probes were measuring whether a model would invent a time. Re-running
   `eval_quality.py --suite hallucination` on the adopted models would say

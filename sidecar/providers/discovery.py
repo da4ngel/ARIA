@@ -384,6 +384,9 @@ def parse_openrouter(payload: dict[str, Any], *, today: date | None = None) -> l
                 context_tokens=int(entry.get("context_length") or ASSUMED_CONTEXT_TOKENS),
                 temperature=None,
                 benchmark_index=benchmark,
+                reasoning_mandatory=bool(
+                    (entry.get("reasoning") or {}).get("mandatory", False)
+                ),
                 # A property of the endpoint, not of the model. OpenRouter's
                 # free tier may route to providers that train on what is sent;
                 # the opt-out is the account holder's to set and this code
