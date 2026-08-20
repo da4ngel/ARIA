@@ -6,6 +6,31 @@
    `backgroundColor` on the BrowserWindow is transparent so DWM's acrylic is
    actually visible — an opaque one composites over the material and hides it,
    which is exactly what made "glass everywhere" look like a dark rectangle. */
+/**
+ * The one lever that scales the whole interface.
+ *
+ * Every size in the type scale and every Tailwind spacing step is in `rem`, so
+ * they all hang off this — including `--reading` below, which means the column
+ * widens exactly in step with the text and the line length stays the same
+ * number of *characters*. That is the invariant worth keeping; a column that
+ * grew without the type would just be a longer line to lose your place on.
+ *
+ * Eyaas, on the maximised window: *"the test size also should be bigger and fit
+ * properly."* At 420px, 15px body text is right. Filling a 2560px display it is
+ * small and lost, and stretching a 420px interface across a desktop is not the
+ * same thing as designing for one.
+ */
+html {
+  font-size: 16px;
+}
+
+/* Set on `<html>` when the window fills the screen. It has to be the root
+   element rather than `#root`, because `rem` is defined against `<html>` and
+   nothing else. */
+html.roomy {
+  font-size: 18px;
+}
+
 :root {
   /* **How wide a line of text is allowed to get.**
      Maximised, the window can be 2560px, and a transcript stretched across

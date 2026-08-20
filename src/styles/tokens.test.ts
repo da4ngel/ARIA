@@ -241,3 +241,35 @@ describe('the reading column', () => {
     expect(scroller).not.toContain('max-w-[var(--reading)]')
   })
 })
+
+describe('scaling with the window', () => {
+  const CSS = readFileSync(join(process.cwd(), 'src/styles/index.css'), 'utf8')
+  const CONFIG = readFileSync(join(process.cwd(), 'tailwind.config.mjs'), 'utf8')
+
+  it('has one lever, on the element rem is measured against', () => {
+    // `rem` is defined against `<html>` and nothing else. Setting this on
+    // `#root` would look right and scale nothing.
+    expect(CSS).toMatch(/html\s*\{[^}]*font-size:\s*16px/)
+    expect(CSS).toMatch(/html\.roomy\s*\{[^}]*font-size:\s*18px/)
+  })
+
+  it('keeps the whole type scale in rem so the lever reaches it', () => {
+    // **The regression this guards.** A single `px` in the scale is a step
+    // that silently stops scaling — the text around it grows and that one
+    // does not, which reads as a rendering bug rather than as a setting.
+    const block = CONFIG.slice(CONFIG.indexOf('fontSize: {'), CONFIG.indexOf('letterSpacing'))
+    const sizes = [...block.matchAll(/(\w+): \['([^']+)'/g)]
+
+    expect(sizes.length).toBeGreaterThanOrEqual(6)
+    for (const [, name, value] of sizes) {
+      expect(value, `${name} must be in rem to scale with the window`).toMatch(/rem$/)
+    }
+  })
+
+  it('keeps the reading column in rem too', () => {
+    // So the column widens exactly in step with the text and the line stays
+    // the same number of *characters*. A column that grew without the type
+    // would just be a longer line to lose your place on.
+    expect(CSS).toMatch(/--reading:\s*[\d.]+rem/)
+  })
+})

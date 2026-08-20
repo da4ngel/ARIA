@@ -82,6 +82,14 @@ export default function App(): JSX.Element {
   // frames and the wake word, endpointing and turn all happen there.
   const handsFree = useHandsFree(connected)
   const { expanded, toggle: toggleExpanded, maximized, toggleMaximized } = useWindowMode()
+
+  // Scale the whole interface with the window. Everything typographic is in
+  // `rem`, so one class on `<html>` moves the type, the spacing and the
+  // reading column together — see `html.roomy` in `index.css`. On the root
+  // element and not `#root`, because that is what `rem` is measured against.
+  useEffect(() => {
+    document.documentElement.classList.toggle('roomy', maximized)
+  }, [maximized])
   // Independent of the window mode above: how wide the rail is, versus how big
   // the window is. Conflating them meant a compact window could not show
   // labels and an expanded one could not hide them.

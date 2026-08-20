@@ -425,8 +425,8 @@
     "semantic_hash": "d2df210b82e86372b182b31200860fd0"
   },
   "src/App.tsx": {
-    "mtime": 1787224047.464568,
-    "ast_hash": "dd323793e3c89c9a78f814473e15e191",
+    "mtime": 1787225057.2513468,
+    "ast_hash": "0f3e0cadfdd463d18224ee47c7671217",
     "semantic_hash": ""
   },
   "src/components/ComposerBar.tsx": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1787224450.3061473,
-    "ast_hash": "1466c06892db4de1fa110d6f252ab7d8",
+    "mtime": 1787225593.485169,
+    "ast_hash": "9c22c76f4770fed2a6ab4d194a462cb6",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1120,8 +1120,8 @@
     "semantic_hash": ""
   },
   "src/styles/tokens.test.ts": {
-    "mtime": 1787224254.2211676,
-    "ast_hash": "948162d31a3c598d1b8f9ff6c805b9bf",
+    "mtime": 1787225134.9295983,
+    "ast_hash": "d7509b840fff83485415bd2794e54326",
     "semantic_hash": ""
   },
   "sidecar/eval/__init__.py": {
@@ -1165,7 +1165,7 @@
     "semantic_hash": ""
   },
   "tailwind.config.mjs": {
-    "mtime": 1787188402.074349,
+    "mtime": 1787225188.9954548,
     "ast_hash": "2284a5afaa59fa0c960e9ba904cd8d4c",
     "semantic_hash": ""
   },

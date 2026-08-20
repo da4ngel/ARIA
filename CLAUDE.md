@@ -3223,7 +3223,30 @@ this file has now recorded eight times, pre-empted rather than discovered.
 so the scrollbar sits at the window edge where it belongs, rather than floating
 in the middle of a maximised window beside the text. Both halves have a test.
 
-**178 renderer tests (+8), 1312 sidecar, ruff, mypy, typecheck and the build
+### And the type scales with it
+Eyaas, straight after: *"if full expand the test size also should be bigger and
+fit properly."* Right — at 420px, 15px body text is correct; filling a 2560px
+display it is small and lost, and stretching a 420px interface across a desktop
+is not the same thing as designing for one.
+
+**One lever, because the whole scale was already in `rem`.** `html { font-size:
+16px }` becomes `18px` under a `roomy` class, and the type, the spacing steps
+*and* `--reading` all move together. Measured: body 15 → 16.9px, hero 28 →
+31.5px, column 736 → 828px.
+
+**The column growing in step is the point, not a side effect.** Both are in
+`rem`, so the line stays the same number of *characters* — a column that grew
+without the type would just be a longer line to lose your place on.
+
+- **On `<html>`, not `#root`.** `rem` is measured against the root element and
+  nothing else; setting it on `#root` would look right in the CSS and scale
+  nothing at all.
+- A test asserts **every step of the scale is in `rem`**, because a single `px`
+  in there is a step that silently stops scaling — the text around it grows and
+  that one does not, which reads as a rendering bug rather than a setting.
+  Mutation-checked: one `px` in the scale fails exactly that test.
+
+**181 renderer tests (+11), 1312 sidecar, ruff, mypy, typecheck and the build
 all clean.** Not yet looked at on screen — and the thing to check is not the
 maximising but the *emptiness*: a 46rem column centred in 2560px leaves a great
 deal of glass either side, and whether that reads as composed or as unfinished
