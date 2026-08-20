@@ -3543,7 +3543,16 @@ one run with the sidecar up. **Nothing in this session has been looked at on
 screen either** — restart `npm run dev` fully, because main and preload never
 hot-reload.
 
-**1404 sidecar tests (+34), 193 renderer (+12), ruff, mypy, typecheck and the
+### There was no test for the rail at all
+Found while adding the Study item. **A `Section` added to the union with no
+`<Item>` to reach it typechecks perfectly and leaves the whole panel
+unreachable**, with nothing anywhere saying so — the same shape as the `finder`
+import once dropped from `tools/__init__.py`. `Sidebar.test.tsx` is new and
+parametrised over every member of `Section`, so the next one cannot arrive
+unreachable either. Mutation-checked: deleting the Study item fails four of its
+eleven tests.
+
+**1404 sidecar tests (+34), 204 renderer (+23), ruff, mypy, typecheck and the
 renderer build all clean.**
 
 ## Current phase
