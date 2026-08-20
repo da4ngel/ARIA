@@ -151,6 +151,9 @@ POLICIES: dict[ConversationMode, ModePolicy] = {
     ConversationMode.STUDY: ModePolicy(
         mode=ConversationMode.STUDY,
         label="Study",
+        # Four is what the teaching loop needs: begin the subject, teach, check
+        # what landed, answer. `study_begin` and `study_check` are `Tier.AUTO`,
+        # so READ_ONLY's `Tier.SAFE` ceiling leaves both reachable.
         max_steps=4,
         bias=None,
         tools=ToolPolicy.READ_ONLY,

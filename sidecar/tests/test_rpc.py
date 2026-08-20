@@ -124,9 +124,9 @@ def test_unknown_method_returns_32601(client: TestClient) -> None:
 
     implemented = method_names()
     unimplemented = next((m for m in SPEC_METHODS if m not in implemented), None)
-    assert unimplemented is not None, (
-        "Every §7.1 method is implemented — pick a different probe for this test."
-    )
+    assert (
+        unimplemented is not None
+    ), "Every §7.1 method is implemented — pick a different probe for this test."
 
     with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
         response = _call(ws, unimplemented, {})
@@ -363,7 +363,7 @@ async def test_browsing_something_that_is_not_a_folder_is_a_clear_error(tmp_path
 
 
 async def test_rename_refuses_a_path_that_is_a_name(tmp_path: Path) -> None:
-    """"Rename it to ../../etc" is not a rename. Same guard `rename_file`
+    """ "Rename it to ../../etc" is not a rename. Same guard `rename_file`
     already carries, because it is as true of a click as of a tool call."""
     from sidecar.rpc.handlers import files_rename
     from sidecar.rpc.protocol import RpcMethodError
@@ -403,3 +403,45 @@ async def test_the_panel_cannot_touch_a_system_folder() -> None:
         await files_rename({"path": "C:/Windows", "name": "Windows2"})
     with pytest.raises(RpcMethodError):
         await files_delete({"path": "C:/Windows"})
+
+
+# ── study state ───────────────────────────────────────────────────────
+
+
+def test_study_state_is_empty_before_anything_is_studied(client: TestClient) -> None:
+    """`None`, not an error. A fresh install has never studied anything, and a
+    read that raises for the ordinary case would make the caller treat a normal
+    state as a fault."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        result = _call(ws, "study.state")["result"]
+
+    assert result == {"subject": None, "concepts": []}
+
+
+def test_study_state_reports_the_map_and_what_it_has_earned(client: TestClient) -> None:
+    """The read `scripts/gate_study.py` asserts on instead of on her prose — a
+    model that says it recorded an answer and a row that changed are different
+    claims, and only the second is what the next session reads."""
+    import anyio
+
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    async def _seed() -> None:
+        db = runtime.require_db()
+        subject_id = await study.ensure_subject(db, "Kestrel", "C:/lectures/kestrel.txt")
+        await study.add_concepts(db, subject_id, [("Handshake", "three messages"), ("Drift", "")])
+        state = await study.state(db, subject_id)
+        assert state is not None
+        await study.record_answer(db, state.concepts[0].id, correct=True)
+
+    anyio.run(_seed)
+
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        result = _call(ws, "study.state")["result"]
+
+    assert result["subject"] == "Kestrel"
+    assert result["source_path"] == "C:/lectures/kestrel.txt"
+    assert [c["name"] for c in result["concepts"]] == ["Handshake", "Drift"]
+    assert result["covered"] == 1
+    assert result["next"] == "Handshake", "a shaky concept is taught before a new one"

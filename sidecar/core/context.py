@@ -214,6 +214,7 @@ When you know something only approximately, give the approximation and say it is
 approximate. Answer what you do know and flag only what you do not — being
 honest is not a reason to be unhelpful."""
 
+
 class ConversationMode(StrEnum):
     """How she should answer this conversation — the ChatGPT-style modes.
 
@@ -280,13 +281,14 @@ _MODE_TEXT: dict[ConversationMode, tuple[str, str, str]] = {
         "Study",
         "Teach so he stops needing you. Find out what he already knows before "
         "explaining, and name a misconception rather than talking past it. "
-        "Build from first principles, in layers, and say what the layers are "
-        "before starting. End on a question or a small problem he has to work, "
-        "and do not answer it in the same message. When he is wrong, say which "
-        "step failed, not the whole thing again. Bring back an earlier mistake "
-        "when it becomes relevant. If he asks outright for the answer, give "
-        "it. Full paragraphs are right here — the short-sentences guidance is "
-        "about being spoken aloud and does not apply.",
+        "Build from first principles, in layers. "
+        "End on a question he must work, and do not answer it in the same "
+        "message. When he is wrong, say which step failed, not the whole thing "
+        "again. Bring back an earlier mistake when it becomes relevant. If he "
+        "asks outright for the answer, give it. Full paragraphs here; the "
+        "short-sentences rule is about being spoken aloud and does not apply. "
+        "His material is the primary source: use its own terms, and say when "
+        "he asks something it does not cover.",
         "You are done when he could reproduce the idea without you, not when "
         "you have finished explaining.",
     ),
@@ -302,8 +304,7 @@ _MODE_TEXT: dict[ConversationMode, tuple[str, str, str]] = {
         "one out of ten — say what it is. "
         "Length follows the evidence; the short-sentences guidance is about "
         "being spoken aloud and does not apply.",
-        "You are done when the conclusion names its evidence and carries its "
-        "own uncertainty.",
+        "You are done when the conclusion names its evidence and carries its " "own uncertainty.",
     ),
     ConversationMode.QUICK: (
         "Quick",
@@ -313,8 +314,7 @@ _MODE_TEXT: dict[ConversationMode, tuple[str, str, str]] = {
         "elaborate. Use what is already in the conversation instead of asking "
         "what he has effectively told you. Do the arithmetic yourself rather "
         "than describing how. If unsure, say so in a clause and answer anyway.",
-        "You are done when he has the correct answer in the fewest words it "
-        "can be said in.",
+        "You are done when he has the correct answer in the fewest words it " "can be said in.",
     ),
     ConversationMode.CODE: (
         "Code",
@@ -446,7 +446,7 @@ _VARIANTS: tuple[tuple[bool, bool], ...] = ((False, False), (True, False), (True
 
 #: **Every prompt this app can produce, resolved once at import.**
 #:
-#: Thirty strings - two persona levels by three capability variants by five
+#: Thirty-six strings - two persona levels by three capability variants by six
 #: modes — built by a comprehension rather than written out, because the
 #: property that matters is not how they are spelled but that a given
 #: configuration always yields byte-identical text. That is what keeps
@@ -586,6 +586,7 @@ def volatile_prefix(
     retrieved: str | None = None,
     affect: str | None = None,
     procedure_hint: str | None = None,
+    study_state: str | None = None,
 ) -> list[ChatMessage]:
     """Content that changes per turn. Everything after this point re-prefills.
 
@@ -602,6 +603,14 @@ def volatile_prefix(
     not something recalled about the user. The procedure hint sits last,
     right next to the conversation — it is about *this specific message*,
     the same reasoning that puts memory closest of all.
+
+    Study state (`memory/study.py`) sits beside it, for the same reason and
+    with the same shape: one line, `None` on every turn outside a study
+    session. **Injected rather than looked up.** Study's step budget is 4, and
+    spending one of them on a tool call to answer "where were we" would be
+    paying a model round trip for something the database already knows — the
+    line is built in `_build_context` alongside the memory read it travels
+    with.
     """
     messages: list[ChatMessage] = []
     if summary:
@@ -618,6 +627,8 @@ def volatile_prefix(
         messages.append(ChatMessage(role=Role.SYSTEM, content=retrieved))
     if procedure_hint:
         messages.append(ChatMessage(role=Role.SYSTEM, content=procedure_hint))
+    if study_state:
+        messages.append(ChatMessage(role=Role.SYSTEM, content=study_state))
     return messages
 
 
@@ -757,6 +768,7 @@ def overhead_tokens(
     affect: str | None = None,
     procedure_hint: str | None = None,
     mode: ConversationMode = ConversationMode.NORMAL,
+    study_state: str | None = None,
 ) -> int:
     """Tokens spent before the conversation even starts.
 
@@ -769,7 +781,7 @@ def overhead_tokens(
     """
     prefix = [
         *stable_prefix(level, has_tools=has_tools, online=online, mode=mode),
-        *volatile_prefix(summary, machine, retrieved, affect, procedure_hint),
+        *volatile_prefix(summary, machine, retrieved, affect, procedure_hint, study_state),
     ]
     return sum(estimate_tokens(m.content) for m in prefix)
 
@@ -786,11 +798,12 @@ def assemble(
     affect: str | None = None,
     procedure_hint: str | None = None,
     mode: ConversationMode = ConversationMode.NORMAL,
+    study_state: str | None = None,
 ) -> list[ChatMessage]:
     """Build the final message list, stable content first."""
     return [
         *stable_prefix(level, has_tools=has_tools, online=online, mode=mode),
-        *volatile_prefix(summary, machine, retrieved, affect, procedure_hint),
+        *volatile_prefix(summary, machine, retrieved, affect, procedure_hint, study_state),
         *turns,
     ]
 
@@ -808,6 +821,7 @@ def fit_to_budget(
     affect: str | None = None,
     procedure_hint: str | None = None,
     mode: ConversationMode = ConversationMode.NORMAL,
+    study_state: str | None = None,
 ) -> list[ChatMessage]:
     """Drop oldest turns until the assembled prompt fits. Backstop, not policy.
 
@@ -833,7 +847,9 @@ def fit_to_budget(
     persona levels. Exactly the shape the paragraph above describes, one flag
     later. Adding a parameter to a budget function and not to its caller is
     apparently the recurring mistake here; the guard is
-    `test_overhead_matches_assemble_for_every_combination`.
+    `test_overhead_matches_assemble_for_every_combination`, which is
+    parametrised over every flag precisely so the *next* one cannot repeat it.
+    `study_state` is that next one.
     """
     overhead = overhead_tokens(
         summary,
@@ -845,6 +861,7 @@ def fit_to_budget(
         affect=affect,
         procedure_hint=procedure_hint,
         mode=mode,
+        study_state=study_state,
     )
     budget = hard_cap_tokens - overhead
     if budget <= 0:
@@ -918,8 +935,8 @@ def clean_title(raw: str) -> str:
     "Title:", and add a full stop. Cheaper to strip than to re-prompt.
     """
     title = raw.strip().splitlines()[0] if raw.strip() else ""
-    title = re.sub(r'^(title|subject)\s*[:\-]\s*', "", title, flags=re.IGNORECASE)
-    title = title.strip().strip('"“”\'').rstrip(".").strip()
+    title = re.sub(r"^(title|subject)\s*[:\-]\s*", "", title, flags=re.IGNORECASE)
+    title = title.strip().strip("\"“”'").rstrip(".").strip()
     words = title.split()
     if len(words) > TITLE_MAX_WORDS:
         title = " ".join(words[:TITLE_MAX_WORDS])

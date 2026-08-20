@@ -20,6 +20,7 @@ from sidecar.tools import memory as memory
 from sidecar.tools import organize as organize
 from sidecar.tools import research as research
 from sidecar.tools import screen as screen
+from sidecar.tools import study as study
 from sidecar.tools import system as system
 
 __all__ = [
@@ -33,5 +34,6 @@ __all__ = [
     "organize",
     "research",
     "screen",
+    "study",
     "system",
 ]

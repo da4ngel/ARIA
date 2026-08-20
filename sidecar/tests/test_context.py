@@ -12,6 +12,7 @@ from sidecar.core.context import (
     PERSONA_PROMPTS_ONLINE,
     PERSONA_PROMPTS_WITH_TOOLS,
     RETRIEVED_MAX_TOKENS,
+    ConversationMode,
     MachineContext,
     PersonaLevel,
     assemble,
@@ -158,6 +159,23 @@ def test_the_whole_prefix_stays_within_the_local_budget() -> None:
     assert overhead_tokens(None, PersonaLevel.FULL, full()) < 900
 
 
+@pytest.mark.parametrize("mode", list(ConversationMode))
+def test_the_whole_prefix_stays_within_budget_in_every_mode(mode: ConversationMode) -> None:
+    """The guard above only ever measured NORMAL, and a mode block is part of
+    the prefix a local model actually prefills.
+
+    That gap was real rather than theoretical: when this was written Research
+    sat at 796 of 800, Critic at 787 and Code at 784 — every one of them within
+    a sentence of the ceiling, and nothing would have said so. The per-mode
+    ~150-token cap is not the same guarantee; six modes each under their own
+    cap can still put any one of them over the budget that matters.
+
+    Study is the mode that found it, arriving at 883 and being trimmed back to
+    fit rather than having the ceiling moved to accommodate it.
+    """
+    assert overhead_tokens(None, PersonaLevel.MINIMAL, full(), mode=mode) < 800
+
+
 def test_overhead_accounts_for_the_machine_block() -> None:
     """Roll-up decisions subtract this; if it were uncounted, a conversation
     could overflow the context immediately after successfully rolling up."""
@@ -287,9 +305,7 @@ def test_fit_to_budget_reserves_room_for_memory() -> None:
     turns = [ChatMessage(role=Role.USER, content="x" * 400) for _ in range(8)]
     rendered = retrieved_block([f"a remembered fact number {i}" for i in range(5)], [])
     without = fit_to_budget(turns, summary=None, hard_cap_tokens=700)
-    with_memory = fit_to_budget(
-        turns, summary=None, hard_cap_tokens=700, retrieved=rendered
-    )
+    with_memory = fit_to_budget(turns, summary=None, hard_cap_tokens=700, retrieved=rendered)
     assert len(with_memory) <= len(without)
 
 
@@ -385,8 +401,9 @@ def test_she_is_told_to_use_relative_paths_not_a_guessed_account_name() -> None:
 @pytest.mark.parametrize("level", list(ctx.PersonaLevel))
 @pytest.mark.parametrize("has_tools", [False, True])
 @pytest.mark.parametrize("online", [False, True])
+@pytest.mark.parametrize("study_state", [None, "[studying: Networking — 2 of 9 covered]"])
 def test_overhead_matches_assemble_for_every_combination(
-    level: ctx.PersonaLevel, has_tools: bool, online: bool
+    level: ctx.PersonaLevel, has_tools: bool, online: bool, study_state: str | None
 ) -> None:
     """`overhead_tokens` must equal what `assemble` actually produces, for
     every flag, or the roll-up trims against a budget that is not the real
@@ -398,11 +415,21 @@ def test_overhead_matches_assemble_for_every_combination(
     Parametrised rather than written per flag so the next one cannot repeat it.
     """
     counted = ctx.overhead_tokens(
-        None, level, None, has_tools, None, online=online, affect=None, procedure_hint=None
+        None,
+        level,
+        None,
+        has_tools,
+        None,
+        online=online,
+        affect=None,
+        procedure_hint=None,
+        study_state=study_state,
     )
     assembled = sum(
         ctx.estimate_tokens(m.content)
-        for m in ctx.assemble([], level=level, has_tools=has_tools, online=online)
+        for m in ctx.assemble(
+            [], level=level, has_tools=has_tools, online=online, study_state=study_state
+        )
     )
 
     assert counted == assembled
@@ -421,11 +448,36 @@ def test_fit_to_budget_accounts_for_the_online_paragraph() -> None:
     # A cap that fits the offline prefix plus the turn, but not the online one.
     cap = offline + ctx.estimate_tokens(turn.content) + (online - offline) // 2
 
-    kept = ctx.fit_to_budget(
-        [turn], summary=None, hard_cap_tokens=cap, has_tools=True, online=True
-    )
+    kept = ctx.fit_to_budget([turn], summary=None, hard_cap_tokens=cap, has_tools=True, online=True)
 
     assert kept == [], "the turn does not fit once the online paragraph is counted"
+
+
+def test_fit_to_budget_accounts_for_the_study_block() -> None:
+    """The third flag on the same axis, guarded before it could be the third
+    bug. `fit_to_budget` calls `overhead_tokens` and every parameter it forgets
+    is a block it trims against a budget too generous by exactly that block's
+    size — twice now, for ~1650 and 73 tokens.
+
+    Sized so the turn only survives if `study_state` is ignored.
+    """
+    block = "[studying: Information Security — 7 of 12 covered. next: Access Control]"
+    cap = ctx.overhead_tokens(None, ctx.PersonaLevel.MINIMAL, None, False, None) + 12
+    turn = ChatMessage(role=Role.USER, content="a short question about it")
+
+    without = ctx.fit_to_budget(
+        [turn], summary=None, hard_cap_tokens=cap, level=PersonaLevel.MINIMAL
+    )
+    with_study = ctx.fit_to_budget(
+        [turn],
+        summary=None,
+        hard_cap_tokens=cap,
+        level=PersonaLevel.MINIMAL,
+        study_state=block,
+    )
+
+    assert without == [turn], "the turn must fit when there is no study block"
+    assert with_study == [], "the study block was not counted against the budget"
 
 
 # ── conversation modes ────────────────────────────────────────────────

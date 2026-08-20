@@ -46,7 +46,7 @@ nothing structural moved. Safe to run when unsure.
 - `graphify check-update .` reports whether a semantic re-extraction is pending;
   it is cron-safe and changes nothing.
 - **Two extractors report known gaps here, both benign**: `settings.local.json`
-  yields zero nodes, and 4 `.sql` migration files are skipped because
+  yields zero nodes, and 7 `.sql` migration files are skipped because
   `tree_sitter_sql` is absent (`pip install "graphifyy[sql]"` to include them).
   Do not treat either warning as a failed update.
 
@@ -3252,6 +3252,159 @@ maximising but the *emptiness*: a 46rem column centred in 2560px leaves a great
 deal of glass either side, and whether that reads as composed or as unfinished
 is a judgement only visible there.
 
+## Study Mode got a memory (2026-08-20)
+    pytest sidecar/tests -v            # 1370
+    python scripts/gate_study.py       # needs the sidecar running
+
+Eyaas specified Study Mode as a full tutor — knowledge map, per-concept mastery,
+adaptive difficulty, sub-modes, spaced repetition — around one principle:
+
+> *"Never optimize Study Mode for producing the best answer. Optimize it for
+> producing the best learning outcome."*
+
+Scoped with him to **the spine only**, plus two decisions that shaped it:
+mastery resumes **when he asks** ("carry on with information security"), and due
+revision surfaces **on entering Study**, never as an unprompted message.
+
+**The mode already promised all of this and none of it was true.** Its prompt
+body has said *"find out what he already knows before explaining"* and *"bring
+back an earlier mistake when it becomes relevant"* since modes shipped — two
+sentences with nowhere to remember anything, so every session started from
+nothing. This is the state that makes them claims about behaviour rather than
+about intent. **42 tools** (`study_begin`, `study_check`), `SCHEMA_VERSION`
+6 → **7**.
+
+- **Mastery is not a fact, and lives nowhere near `facts`.** A fact is a belief
+  an overnight reflection may supersede; mastery is a count of answers actually
+  given. Filing one as the other would let a model call overwrite evidence —
+  and this file already records what `qwen2.5:7b` does when asked to judge
+  something it cannot (it returns a constant, 15 times out of 18).
+- **`add_concepts` is additive, never a replace.** `concept_mastery` hangs off
+  `concepts.id` with `ON DELETE CASCADE`, so re-running extraction over the same
+  lecture with a replace would silently destroy every answer he had given.
+  `UNIQUE(subject_id, name)` absorbs the repeats, the way `procedures.name`
+  already does.
+- **A shaky concept is taught before a new one.** The prompt says "build from
+  first principles, in layers", and a layer with a hole in it is not a
+  foundation, so `next_concept` returns the first weak one ahead of the first
+  untouched one.
+- **The answer key never reaches the screen.** `QuizQuestion` is deliberately
+  *not* `core/questions.Question`: the broker broadcasts what it is given
+  straight to the renderer, so a `correct` field on that model would ship the
+  answer to the page displaying the question. Grading happens in the tool,
+  which is the only thing that knows it. The broker needed no change at all.
+- **`study_check` takes a list, and that is not a convenience.** Study's budget
+  is 4 steps; one question per call caps a quiz at about three and then stops
+  mid-round. The broker already steps up to four questions one at a time on
+  screen — which is what Eyaas asked for when he said *"one by one it move to
+  next"*.
+
+### The extraction runs on the turn path, which nothing else here does
+`memory/curriculum.py` is shaped like `Reflector` — slots filled by
+`str.replace`, first-brace-to-last JSON, cloud-then-local fallback that rewrites
+the reported model. The one difference is **who asked**. Reflection is
+background because nobody requested it. Here he has just said "teach me this
+lecture" and is waiting for exactly this; a map that materialised silently some
+minutes later would be useless. Once per subject, inside a 4-step budget.
+
+**`_extract_json` is imported from `reflection`, not copied** — a second copy of
+"find the JSON in whatever a 7B actually returned" is a second thing to fix when
+one of them is wrong. The same call `OpenRouterProvider` made when it subclassed
+`OpenAIProvider` instead of duplicating its tool-call assembler.
+
+**The source text needed a reader that did not exist.** `file_chunks` has held
+the full text of every indexed document since Phase 4 and **nothing on the turn
+path had ever read it**: `search_content` deliberately collapses chunks to file
+*paths* and throws the text away, and `attachments.remember`'s own docstring
+records that `Retriever` reads facts and episodes and has never touched that
+table. `curriculum.source_text` is a plain ordered read of state this project
+already stores and simply never looked at.
+
+### Two things the plan said to do that turned out to be the wrong fix
+Both are recorded because the approved plan says otherwise and the code is what
+shipped.
+
+- **The plan added a per-mode prompt-token cap. It is not in the code.** Study's
+  first draft needed one, at 232 tokens against a uniform 150. Trimming the
+  block to 147 removed the need, and a knob that exists only because an earlier
+  draft wanted it is exactly the "field nothing consumes" pattern `modes.py`
+  warns about in its own docstring. **Trim to fit the budget; do not move the
+  budget to fit the text.**
+- **What replaced it is a better guard than either.** The whole-prefix test only
+  ever measured NORMAL — and with modes in the prefix, Study was at **883
+  against a 800-token local budget**, while Research (796), Critic (787) and
+  Code (784) were each within a sentence of it and nothing said so. The per-mode
+  ~150 cap is not the same guarantee: six modes each under their own cap can
+  still put any one of them over the budget that matters.
+  `test_the_whole_prefix_stays_within_budget_in_every_mode` is the fix, and
+  every mode now passes it with Study at 798.
+- The trim also decided a smaller thing correctly: the *tools* are named in
+  their own descriptions rather than in the mode block. That is where a model
+  reads while choosing, and `ask.py` already made the argument.
+
+### `study_state` is the third flag on an axis that has broken twice
+`fit_to_budget` forgot `has_tools` (~1650 tokens) and then forgot `online` (73
+tokens), each time trimming against a budget too generous by exactly that block.
+`test_overhead_matches_assemble_for_every_combination` is parametrised *"so the
+next one cannot repeat it"* — `study_state` is that next one, and it is on the
+parametrisation plus its own `fit_to_budget` regression. Mutation-checked:
+dropping it from the call fails exactly that one test.
+
+**The block is injected, not fetched**, and joins `_build_context`'s existing
+`asyncio.gather`. Answering "where were we" with a tool call would spend one of
+four steps plus a model round trip on something a single `SELECT` knows. Outside
+Study mode it is `None` and the prompt is byte-identical to before — the same
+contract `retrieved_block` keeps.
+
+The active subject is *the most recently touched one*, not a per-session
+pointer. Two study conversations open at once would share it — accepted, because
+the alternative is a second piece of session state that can disagree with the
+database.
+
+### A real bug, found by a test rather than by reading
+**`latest_subject_id` was returning an arbitrary subject.** `_now()` copied
+`procedures.py`'s whole-second format, and a study turn calls `study_begin` and
+`study_check` well inside one second — so two `last_studied_at` values tied and
+SQLite was free to return either. Found by a test that touched two subjects in a
+row and got the first one back. Millisecond precision now, plus `id DESC` as a
+deterministic tie-break.
+
+### Mutation checks
+- Letting `level` jump to `MAX_LEVEL` on one correct answer fails 5 tests,
+  starting with `test_mastery_cannot_be_reached_in_one_answer`. Reaching the top
+  takes five right answers net of any wrong ones; a wrong one never returns a
+  concept to 0, because 0 means "never introduced" and that stops being true the
+  moment it is taught.
+- Dropping the study block from `volatile_prefix` fails exactly 2 — the
+  injection test and the budget regression — and nothing else.
+
+### Not built, and named so none is mistaken for missing
+**Exam mode, teach-back, rapid-review and weak-areas as sub-modes, the
+five-level difficulty ladder, confidence tracking, spaced-repetition scheduling,
+and the mastery dashboard panel.** Every one needs mastery data to be worth
+anything and there is none yet; due-revision surfacing lands with the panel.
+`study.state` (RPC) is the seam that panel will read, and is what
+`gate_study.py` asserts on today.
+
+**`scripts/gate_study.py` is written and has not been run live.** It builds its
+own scratch lecture with invented terminology — "Kestrel handshake", "drift
+window" — precisely so line 1 can tell a concept read *out of the material* from
+one the model already knew; a lecture about TCP would prove nothing. It answers
+its own questions, because this feature *asks by design* and a gate that cannot
+answer does not fail, it hangs — `gate_research.py`'s recorded lesson, walked
+into by the next script to need it.
+
+**The real `data/aria.db` is now at version 7**, migrated by the running app
+picking up the change rather than by anything here. Verified against a
+`sqlite3.backup` snapshot: 834 messages, 107 episodes, 49 facts and 8,805 file
+chunks all intact, `integrity_check` ok, `foreign_key_check` clean, three new
+empty tables. **Copying `aria.db` alone gives an inconsistent snapshot** — the
+database is in WAL mode and the first attempt at this check read a 70MB file
+reporting `user_version 0` and zero messages. Use the backup API.
+
+**1370 sidecar tests (+58), 181 renderer, ruff, mypy, typecheck and the renderer
+build all clean.**
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -3377,7 +3530,20 @@ mode is a style, so neither is a tool.
 
 **`ask_user` landed 2026-08-19** — she can put a decision on screen as options you click, four at a time, stepped one by one. **42 tools.** Four bugs came out of it and only one was in the new code; the worst,
 `call_key` crashing on any list argument, had been latent since Phase 6.
-See the section above for what is proven live and what is not.
+See the section above for what is proven live and what is not. **That entry
+said 42 and the registry held 40** — the count had been wrong here since
+somewhere around Phase 8 and nothing checked it. It is now genuinely 42.
+
+**Study Mode got its memory 2026-08-20** — `study_subjects`, `concepts` and
+`concept_mastery` (**schema 7**), a knowledge map extracted from attached
+lecture material, and `study_begin`/`study_check`. **42 tools.** The mode
+had promised to find out what he already knows and to bring back an earlier
+mistake since modes shipped, with nowhere to remember either. Two items in the
+approved plan were dropped for better answers and both are recorded above; the
+deep Study features (exam mode, teach-back, the difficulty ladder, spaced
+repetition, the dashboard) are deliberately not built, because every one of
+them needs mastery data and there is none yet. `scripts/gate_study.py` is
+written and **has not been run live**.
 
 Remaining, in rough order:
 
@@ -3414,6 +3580,10 @@ when `ModePolicy` was built — each is a session, and each hangs off it:
 - **`READ_ONLY` in Quick and Study is unmeasured.** Per-mode tool sets are
   argued to be safe where relevance filtering was not, and that argument has
   not been tested. `gate_tool_selection.py` is the instrument.
+- **The Study loop is unproven against a real model.** `gate_study.py` covers
+  it end to end — map, teach, quiz, resume, and a question the lecture does not
+  answer — and needs one run with the sidecar up. The line most likely to fail
+  is the first: whether the concepts really come out of the material.
 - **No free model has been *adopted* yet.** `gemma-4-26b` reached 12 of 20
   probes before the 50-a-day allowance ran out. **The scheduler only starts at
   startup**, so ARIA needs a restart with the key in place.

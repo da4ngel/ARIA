@@ -979,9 +979,7 @@ async def turn_rate(params: dict[str, Any]) -> dict[str, Any]:
         )
 
     changed = (
-        await log_.clear_rating(message_id)
-        if rating == 0
-        else await log_.rate(message_id, rating)
+        await log_.clear_rating(message_id) if rating == 0 else await log_.rate(message_id, rating)
     )
     return {"message_id": message_id, "rating": rating or None, "recorded": changed}
 
@@ -1014,11 +1012,7 @@ async def models_verdicts(_params: dict[str, Any]) -> dict[str, Any]:
     if log_ is None:
         return {"verdicts": []}
     verdicts = await log_.verdicts()
-    return {
-        "verdicts": [
-            {**v.model_dump(mode="json"), "approval": v.approval} for v in verdicts
-        ]
-    }
+    return {"verdicts": [{**v.model_dump(mode="json"), "approval": v.approval} for v in verdicts]}
 
 
 # ── memory (Phase 5) ──────────────────────────────────────────────────
@@ -1161,6 +1155,61 @@ async def memory_reflect(params: dict[str, Any]) -> dict[str, Any]:
     return report.model_dump(mode="json")
 
 
+@method("study.state")
+async def study_state(params: dict[str, Any]) -> dict[str, Any]:
+    """Where he is in a subject: the map, and what each concept has earned.
+
+    Read-only, and the same state `_study_state` injects into the prompt — so
+    the two can never disagree about what has been learned. Exposed rather than
+    only logged for the reason `memory.stats` is: `scripts/gate_study.py`
+    asserts on this instead of on her prose, because a model that *says* it
+    recorded an answer and a row that actually changed are different claims,
+    and only the second is what the next session reads.
+
+    Defaults to the subject most recently studied, which is the same one the
+    prompt block shows.
+    """
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    db = runtime.db
+    if db is None:
+        return {"subject": None, "concepts": []}
+
+    raw = params.get("subject")
+    subject_id = (
+        await study.find_subject(db, raw)
+        if isinstance(raw, str) and raw.strip()
+        else await study.latest_subject_id(db)
+    )
+    if subject_id is None:
+        return {"subject": None, "concepts": []}
+
+    state = await study.state(db, subject_id)
+    if state is None:
+        return {"subject": None, "concepts": []}
+
+    nxt = state.next_concept
+    return {
+        "subject_id": state.subject_id,
+        "subject": state.subject,
+        "source_path": state.source_path,
+        "covered": len(state.covered),
+        "next": nxt.name if nxt else None,
+        "concepts": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "summary": c.summary,
+                "level": c.level,
+                "asked": c.asked,
+                "correct": c.correct,
+            }
+            for c in state.concepts
+        ],
+    }
+
+
 @method("memory.stats")
 async def memory_stats(_params: dict[str, Any]) -> dict[str, Any]:
     """Counts, retrieval latency, and whether embeddings are actually working.
@@ -1278,7 +1327,6 @@ async def _invoke(handler: Handler, request: RpcRequest) -> RpcResponse | None:
 # Explorer itself does and what makes a misclick survivable.
 
 
-
 @method("files.browse")
 async def files_browse(params: dict[str, Any]) -> dict[str, Any]:
     """One folder's contents, for the panel.
@@ -1354,9 +1402,7 @@ async def files_reveal(params: dict[str, Any]) -> dict[str, Any]:
     target = Path(str(params.get("path") or ""))
     if not await asyncio.to_thread(target.exists):
         raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"There is nothing at {target}.")
-    await asyncio.to_thread(
-        subprocess.Popen, ["explorer.exe", "/select,", str(target)]
-    )
+    await asyncio.to_thread(subprocess.Popen, ["explorer.exe", "/select,", str(target)])
     return {"ok": True}
 
 

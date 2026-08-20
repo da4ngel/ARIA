@@ -20,6 +20,9 @@ EXPECTED_TABLES = {
     "file_index",
     "file_chunks",
     "tool_log",
+    "study_subjects",
+    "concepts",
+    "concept_mastery",
 }
 EXPECTED_VEC_TABLES = {"episode_vec", "fact_vec", "file_vec"}
 

@@ -35,7 +35,7 @@ from sidecar.core.router import (
     is_tool_shaped,
 )
 from sidecar.core.tasks import spawn
-from sidecar.memory import procedures
+from sidecar.memory import procedures, study
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore, SessionSummary, StoredMessage
 from sidecar.memory.retrieval import MemoryServices, Retrieved
@@ -72,9 +72,7 @@ def _session_started_at(history: list[StoredMessage]) -> datetime | None:
     if not history:
         return None
     with contextlib.suppress(ValueError):
-        return datetime.strptime(history[0].created_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=UTC
-        )
+        return datetime.strptime(history[0].created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     return None
 
 
@@ -590,9 +588,7 @@ class ConversationService:
         await self._store.add_message(resolved_session, Role.USER, stored.strip())
 
         task = asyncio.create_task(
-            self._run_turn(
-                turn_id, resolved_session, text, model or self._selected, spoken=spoken
-            )
+            self._run_turn(turn_id, resolved_session, text, model or self._selected, spoken=spoken)
         )
         self._tasks[turn_id] = task
         self._turn_sessions[turn_id] = resolved_session
@@ -818,9 +814,7 @@ class ConversationService:
                         return
                     nxt = chain[attempt + 1]
                     note = f"{info.label} was unavailable, so {nxt.label} answered instead."
-                    log.warning(
-                        "turn.failover", turn_id=turn_id, tried=info.id, next=nxt.id
-                    )
+                    log.warning("turn.failover", turn_id=turn_id, tried=info.id, next=nxt.id)
                     await self._bus.send_error("provider_failover", note, recoverable=True)
                     continue
 
@@ -1120,9 +1114,7 @@ class ConversationService:
                 # would let a misbehaving provider keep this loop going past
                 # its own budget forever; discard it and let the text (if
                 # any) stand as the answer instead.
-                log.warning(
-                    "turn.agent_ignored_unsolicited_call", turn_id=turn_id, step=state.step
-                )
+                log.warning("turn.agent_ignored_unsolicited_call", turn_id=turn_id, step=state.step)
                 requested = []
 
             if not requested:
@@ -1145,14 +1137,10 @@ class ConversationService:
             call = requested[0]
             dropped = requested[1:]
             if dropped:
-                log.info(
-                    "turn.tools_dropped", turn_id=turn_id, dropped=[c.name for c in dropped]
-                )
+                log.info("turn.tools_dropped", turn_id=turn_id, dropped=[c.name for c in dropped])
 
             if state.would_repeat(call.name, call.arguments):
-                log.info(
-                    "turn.loop_detected", turn_id=turn_id, tool=call.name, step=state.step
-                )
+                log.info("turn.loop_detected", turn_id=turn_id, tool=call.name, step=state.step)
                 if collected:
                     collected.clear()
                     await self._bus.broadcast(Event.TURN_RESET, {"turn_id": turn_id})
@@ -1610,10 +1598,11 @@ class ConversationService:
         # a thread hop, the retrieval started back in `send()`, and so did the
         # attachment read. Overlapping them makes an attached image cost less
         # than it did when it blocked `send()` outright.
-        history, retrieval, _ = await asyncio.gather(
+        history, retrieval, _, study_state = await asyncio.gather(
             self._store.history(session_id),
             self._await_retrieval(turn_id),
             self._await_attachments(turn_id),
+            self._study_state(mode),
         )
         retrieved = retrieval.render() if retrieval else None
         turns = ctx.to_chat_messages(history)
@@ -1651,6 +1640,7 @@ class ConversationService:
             affect=affect,
             procedure_hint=procedure_hint,
             mode=mode,
+            study_state=study_state,
         )
         to_summarize, kept = ctx.split_for_rollup(turns, max(turn_budget, 0))
         if to_summarize:
@@ -1670,6 +1660,7 @@ class ConversationService:
             affect=affect,
             procedure_hint=procedure_hint,
             mode=mode,
+            study_state=study_state,
         )
         messages = ctx.assemble(
             turns,
@@ -1682,6 +1673,7 @@ class ConversationService:
             affect=affect,
             procedure_hint=procedure_hint,
             mode=mode,
+            study_state=study_state,
         )
 
         # **After the turns, not in the volatile prefix.** An attached file is
@@ -1811,6 +1803,41 @@ class ConversationService:
             return None
         return affect_module.render(state, datetime.now().astimezone())
 
+    async def _study_state(self, mode: ctx.ConversationMode) -> str | None:
+        """Where he is in the subject he is studying, for the volatile prefix.
+
+        **Only in Study mode**, which is the whole of Eyaas's answer on when
+        revision should surface: on entering Study, never as an unprompted
+        message. Outside it this returns `None` and the prompt is byte-for-byte
+        what it was before any of this existed.
+
+        **Injected rather than looked up.** Study's step budget is 4, and
+        spending one on a tool call to answer "where were we" would be a model
+        round trip for something a single `SELECT` already knows. It joins the
+        `asyncio.gather` in `_build_context`, so it overlaps the history read
+        rather than adding to it.
+
+        The subject is the one most recently touched (`study.touch`, called by
+        both study tools), not a per-session pointer. That means two study
+        conversations open at once would share one — accepted, because the
+        alternative is a second piece of session state that can disagree with
+        the database, and studying two subjects in parallel is not a thing
+        anyone does.
+        """
+        if self._db is None or mode is not ctx.ConversationMode.STUDY:
+            return None
+        try:
+            subject_id = await study.latest_subject_id(self._db)
+            if subject_id is None:
+                return None
+            state = await study.state(self._db, subject_id)
+        except Exception:  # noqa: BLE001 — never let this fail a turn
+            log.warning("study.state_failed", exc_info=True)
+            return None
+        if state is None or not state.concepts:
+            return None
+        return study.render(state)
+
     async def speak(self, text: str) -> bool:
         """Say a reply aloud, on request. False when there is no voice engine.
 
@@ -1925,17 +1952,13 @@ class ConversationService:
         self._jobs.add(job)
         job.add_done_callback(self._jobs.discard)
 
-    async def _summarize(
-        self, to_summarize: list[ChatMessage], previous: str | None
-    ) -> str:
+    async def _summarize(self, to_summarize: list[ChatMessage], previous: str | None) -> str:
         """Compress the oldest turns. Folds in any earlier note so it compounds."""
         request = ctx.summarization_request(to_summarize)
         if previous:
             request.insert(
                 1,
-                ChatMessage(
-                    role=Role.SYSTEM, content=f"Earlier summary to fold in:\n{previous}"
-                ),
+                ChatMessage(role=Role.SYSTEM, content=f"Earlier summary to fold in:\n{previous}"),
             )
 
         chunks: list[str] = []
@@ -1943,9 +1966,7 @@ class ConversationService:
             async for delta in self._provider.stream_chat(
                 request,
                 model=self._model,
-                options=GenerationOptions(
-                    num_ctx=self._num_ctx, max_tokens=SUMMARY_MAX_TOKENS
-                ),
+                options=GenerationOptions(num_ctx=self._num_ctx, max_tokens=SUMMARY_MAX_TOKENS),
             ):
                 chunks.append(delta.text)
                 if delta.done:
