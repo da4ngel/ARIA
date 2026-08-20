@@ -3405,6 +3405,147 @@ reporting `user_version 0` and zero messages. Use the backup API.
 **1370 sidecar tests (+58), 181 renderer, ruff, mypy, typecheck and the renderer
 build all clean.**
 
+## The Study tab, and the six ways to run a session (2026-08-21)
+    pytest sidecar/tests -v            # 1404
+    npm test                           # 193
+    python scripts/gate_study.py       # needs the sidecar running
+
+Eyaas: *"i need a seperate dedicated tab with what i said above, like chat,
+voice, files, tools ... as study"*. Study Mode got its state yesterday and the
+only way to see any of it was to ask her.
+
+Three answers shaped it, and each cost something real: **a console, not a
+viewer** — Learn / Practice / Revision / Rapid review / Exam / Teach-back as
+buttons, none of which existed; **"due" means weakest-first**, derived from
+`level` and `last_wrong_at` rather than from a schedule; and **rename, delete
+and reset**, which needed the first `study.*` methods that write anything.
+
+**One button in the mockup did not survive contact.** "Weak areas" and
+"Revision" are the same query once due means weakest-first, so Rapid review
+took the sixth slot instead. Two buttons doing one thing is worse than one.
+
+**42 tools, unchanged.** A sub-mode is a policy and a panel is a view; neither
+is a tool. **No migration** — every one of the new methods reads or deletes rows
+that already existed.
+
+### A sub-mode is volatile, and that is the whole design
+`core/study_modes.py` is shaped like `core/modes.py` — a frozen `SubModePolicy`
+per entry, every field read by something — with one deliberate difference:
+**it lands in the volatile prefix, not the stable one.**
+
+`ConversationMode` is resolved at import into 36 strings (2 persona levels × 3
+capability variants × 6 modes). Nesting a second axis under it makes **216**,
+and Study's stable block already sits at **798 of the 800-token local budget**
+with no room whatever. A sub-mode also changes several times inside one
+session, which is what volatile is *for*. Cost: ~40 tokens on a block that only
+exists in Study mode, ≈19ms a turn.
+
+- **Learn's line is empty on purpose**, so the block is byte-for-byte what it
+  was before sub-modes existed. The guarantee NORMAL already keeps for
+  `ConversationMode`, and there is a test asserting Learn is the *only* mode
+  with an empty line — any other one would be a button that does nothing.
+- **`Scope` decides which concepts the block names**, so the sub-mode and the
+  concepts in front of her can never disagree. Revision drops the "solid:" line
+  entirely: it is about what failed, and this block is paid every turn.
+- **`Scope.COVERED` is deliberately unbounded**, the one exception to a block
+  written to be a constant cost. Rapid review is *"one line on each concept he
+  has covered"* and cannot do that from a list of three. Bounded anyway by
+  `curriculum.MAX_CONCEPTS` at 24 short names, and only in a session that asked
+  for them.
+
+### Exam is the only sub-mode with a mechanical lever
+Everything else is prompt text a model may or may not follow. `reveal_answers`
+cannot be, **because a tool result is an instruction to a model** — handing it
+*"the answer was X"* halfway through an exam is exactly how the answer reaches
+his screen before the exam is over. So `study_check` withholds the per-question
+lines and returns only the score and the concepts to review. The information is
+kept out of the room rather than the model asked not to use it.
+
+- **It fails open.** No conversation service means no sub-mode means Learn means
+  reveal. The other default silently withholds every answer from every ordinary
+  quiz, which is a much worse direction for a wrong guess here.
+- **Withholding is about what she is told, not what is measured** — mastery is
+  recorded from an exam exactly as from a quiz, with its own test.
+- Mutation-checked: forcing `reveal = True` fails exactly the two tests written
+  for it and nothing else.
+
+### The sub-mode dies with its conversation, the mastery does not
+`_study_submodes` sits beside `_modes` in memory, keyed by session id. A
+sub-mode is the shape of *this* session; one that persisted would put last
+week's exam conditions on today's first question. Mastery is the opposite — it
+is evidence, not a setting — and stays in SQLite. Mutation-checked: making
+sub-modes global fails exactly `test_a_study_submode_does_not_outlive_its_conversation`.
+
+### The panel, and why a button sends a message
+`StudyPanel.tsx` / `useStudy.ts`, following `MemoryPanel`/`useMemory` closely —
+the `latest` ticket guard, and **refetch after every write rather than patching
+locally**, which matters more here than there: deleting a subject cascades
+through `concepts` into `concept_mastery`, and a rename can be *refused*.
+
+- **A button sets the sub-mode and then sends its opener as an ordinary
+  message.** `study.start` could have sent it and been less code — but then the
+  thing that started an exam would be invisible in the transcript, and pressing
+  "Exam" *is* asking to be examined. It belongs there in his own words. The
+  opener comes back **from the sidecar**, so the panel and `study_modes.py`
+  cannot each have their own idea of what Exam says.
+- **The panel closes before the message goes.** A sheet over the reply you just
+  asked for is in the way of the thing you asked for.
+- **A button with nothing to work on is disabled and says why.** Revision with
+  nothing shaky, Rapid review with nothing covered. A button that produces
+  "there is nothing to revise" is one that should have said so itself rather
+  than spending a turn finding out.
+- **Mastery is dots, not a number.** `level` is an integer 0-5 and
+  `MemoryPanel`'s `0.00-1.00` ramp does not carry over; five positions read as a
+  scale at a glance where "3" has to be compared against something.
+  `asked/correct` sits beside it as the analogue of `evidence_count`.
+- **`WEAK_AT_OR_BELOW` is restated in the hook rather than fetched**, and the
+  comment says why: it decides *layout*, not behaviour. The sidecar is still the
+  only thing that decides what she is told; this only decides what is drawn
+  under "Needs revision".
+- The hook owns which subject is selected, because two of the three writes can
+  change which subjects exist — after a delete, something has to decide what is
+  now on screen, and it should be the thing that knows the new list.
+
+### Clicks are not tool calls — five new RPCs, and one that destroys something
+`study.subjects`, `study.start`, `study.rename`, `study.forget`, `study.reset`.
+The `files.browse` distinction, kept: a confirmation dialog in front of the
+button somebody just pressed is asking them to confirm the thing they just did.
+
+- **`study.forget` is unrecoverable** — `concepts` cascades from
+  `study_subjects` and `concept_mastery` from `concepts`, so one row takes the
+  whole learning history. It arms in two clicks, `MemoryPanel`'s forget, for a
+  bigger reason. **Resetting a concept is one click**, because it destroys
+  nothing that cannot be earned again by answering.
+- **A refused rename is a `reason`, not an exception.** Two subjects with one
+  name makes `find_subject` a coin flip, so it is refused — and a panel that can
+  show why beats one that throws.
+- `study.subjects` is separate from `study.state` on purpose: a rail section
+  that had to fetch every concept of every subject just to draw a list gets
+  slower the more he studies.
+
+### The heredoc escaping bit three more times
+`\n` inside a quoted heredoc collapsed into a real newline in an f-string,
+twice in `gate_study.py` and once in `study.py`, each time producing a file
+that would not parse. This file already records the version of this bug that
+was *worse* — a `\b` that became a literal backspace, compiled fine, and matched
+nothing. **Write the file, or build the escape with `chr(92)`; do not pass
+backslashes through a heredoc.**
+
+### Not built, and named rather than implied
+Spaced repetition stays unbuilt by choice — "due" is weakest-first, and the list
+is shaped so a real schedule could reorder it later without a redesign.
+Confidence tracking and the adaptive difficulty ladder are likewise absent.
+
+**`scripts/gate_study.py` has still never been run live.** It was written
+yesterday, gained a sixth section today (Revision reaches for shaky concepts;
+an Exam's tool result must not contain the string "the answer was"), and needs
+one run with the sidecar up. **Nothing in this session has been looked at on
+screen either** — restart `npm run dev` fully, because main and preload never
+hot-reload.
+
+**1404 sidecar tests (+34), 193 renderer (+12), ruff, mypy, typecheck and the
+renderer build all clean.**
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -3534,6 +3675,12 @@ See the section above for what is proven live and what is not. **That entry
 said 42 and the registry held 40** — the count had been wrong here since
 somewhere around Phase 8 and nothing checked it. It is now genuinely 42.
 
+**The Study tab landed 2026-08-21** — a rail section beside Chats, Voice,
+Files, Tools and Memory, with the six sub-modes behind its buttons
+(`core/study_modes.py`) and five `study.*` RPCs. Exam is the only sub-mode with
+a mechanical lever rather than a prompt line. **42 tools, no migration.** See
+the section above; the panel has not been looked at on screen.
+
 **Study Mode got its memory 2026-08-20** — `study_subjects`, `concepts` and
 `concept_mastery` (**schema 7**), a knowledge map extracted from attached
 lecture material, and `study_begin`/`study_check`. **42 tools.** The mode
@@ -3581,9 +3728,13 @@ when `ModePolicy` was built — each is a session, and each hangs off it:
   argued to be safe where relevance filtering was not, and that argument has
   not been tested. `gate_tool_selection.py` is the instrument.
 - **The Study loop is unproven against a real model.** `gate_study.py` covers
-  it end to end — map, teach, quiz, resume, and a question the lecture does not
-  answer — and needs one run with the sidecar up. The line most likely to fail
-  is the first: whether the concepts really come out of the material.
+  it end to end — map, teach, quiz, resume, a question the lecture does not
+  answer, and (since 2026-08-21) Revision and Exam — and needs one run with the
+  sidecar up. The line most likely to fail is the first: whether the concepts
+  really come out of the material.
+- **The Study panel has not been looked at on screen**, and neither have the
+  six sub-mode buttons. It builds and its 12 tests pass, which is exactly the
+  state the retheme was in when it shipped a blank window.
 - **No free model has been *adopted* yet.** `gemma-4-26b` reached 12 of 20
   probes before the 50-a-day allowance ran out. **The scheduler only starts at
   startup**, so ARIA needs a restart with the key in place.

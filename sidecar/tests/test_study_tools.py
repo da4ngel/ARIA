@@ -15,6 +15,7 @@ import pytest
 
 from sidecar.core import context as ctx
 from sidecar.core.questions import Answer, Asked, Option, Question
+from sidecar.core.study_modes import StudySubMode
 from sidecar.memory import study
 from sidecar.memory.db import Database
 from sidecar.tools import registry
@@ -285,3 +286,84 @@ def test_option_labels_are_carried_through_verbatim(wired: Database) -> None:
     option = Option(label="Availability", description="")
 
     assert option.label == "Availability"
+
+
+@pytest.fixture
+def exam(monkeypatch: pytest.MonkeyPatch):
+    """Put the session into Exam, through the real `ConversationService` API
+    rather than by patching the tool — the point is that the sub-mode reaches
+    it, not that a flag can be set."""
+
+    class FakeService:
+        def study_submode_for(self, session_id: str | None) -> StudySubMode:
+            return StudySubMode.EXAM
+
+    from sidecar.state import runtime
+
+    monkeypatch.setattr(runtime, "conversation", FakeService(), raising=False)
+
+
+@pytest.mark.asyncio
+async def test_an_exam_never_reports_which_answer_was_right(
+    wired: Database, broker: Any, exam: None
+) -> None:
+    """**Exam's one mechanical lever.** Everything else about a sub-mode is
+    prose a model may ignore; this cannot be, because a tool result is an
+    instruction to a model and "the answer was X" halfway through an exam is
+    how the answer reaches his screen before the exam is over.
+
+    Mutation-checked: making `reveal` unconditionally True fails exactly this
+    and its sibling below.
+    """
+    await _mapped(wired)
+    broker.picks = ["Encryption"]
+
+    result = await study_check(CTX, [quiz(correct="Availability")])
+
+    assert result.ok
+    assert "Availability" not in result.summary, "the answer key leaked"
+    assert "he chose" not in result.summary
+    assert "0 of 1 right" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_an_exam_still_says_what_to_review(wired: Database, broker: Any, exam: None) -> None:
+    """Withholding the answers must not withhold the point of sitting it. The
+    concept is named; the question, his answer and the right one are not."""
+    await _mapped(wired)
+    broker.picks = ["Encryption"]
+
+    result = await study_check(CTX, [quiz(concept="CIA Triad", correct="Availability")])
+
+    assert "To review: CIA Triad" in result.summary
+    assert "must not invent" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_an_exam_records_mastery_exactly_as_a_quiz_does(
+    wired: Database, broker: Any, exam: None
+) -> None:
+    """Withholding is about what she is told, not about what is measured."""
+    subject_id = await _mapped(wired)
+    broker.picks = ["Encryption"]
+
+    await study_check(CTX, [quiz(correct="Availability")])
+
+    state = await study.state(wired, subject_id)
+    assert state is not None
+    assert (state.concepts[0].asked, state.concepts[0].correct) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_quiz_still_says_what_the_answer_was(
+    wired: Database, broker: Any
+) -> None:
+    """The other direction, and the reason `reveal` fails open: a wrong default
+    that silently withheld every answer from every ordinary quiz would be far
+    worse than one that reveals during an exam nobody set."""
+    await _mapped(wired)
+    broker.picks = ["Encryption"]
+
+    result = await study_check(CTX, [quiz(correct="Availability")])
+
+    assert "Availability" in result.summary

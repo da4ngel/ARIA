@@ -14,6 +14,7 @@ import pytest
 from sidecar.core import context as ctx
 from sidecar.core.conversation import ConversationService, _parse_yes_no
 from sidecar.core.router import Router, RoutingBias
+from sidecar.core.study_modes import StudySubMode
 from sidecar.memory import procedures
 from sidecar.memory.db import Database
 from sidecar.memory.messages import ConversationStore
@@ -581,9 +582,7 @@ async def test_rollup_does_not_block_the_turn_that_triggers_it(
     assert session_id in svc._summaries, "the summary should land after the turn"  # noqa: SLF001
 
 
-async def test_only_one_rollup_per_session_at_a_time(
-    database: Database, make_service
-) -> None:
+async def test_only_one_rollup_per_session_at_a_time(database: Database, make_service) -> None:
     """A fast typist would otherwise queue several summarisations of nearly the
     same history, burning the model on a race."""
     svc = make_service(
@@ -671,9 +670,7 @@ class ScriptedToolProvider(FakeProvider):
     chaining, a repeated call, or a model that never stops asking.
     """
 
-    def __init__(
-        self, script: list[list[ToolCall] | None], reply: str = "Done."
-    ) -> None:
+    def __init__(self, script: list[list[ToolCall] | None], reply: str = "Done.") -> None:
         super().__init__(chunks=[reply])
         self._script = script
         self.passes = 0
@@ -839,9 +836,7 @@ async def test_no_engine_means_the_model_is_never_told_tools_exist(
 # ── the agent loop chains steps (Phase 6) ──────────────────────────────
 
 
-async def test_a_second_step_can_call_a_different_tool(
-    database: Database, make_service
-) -> None:
+async def test_a_second_step_can_call_a_different_tool(database: Database, make_service) -> None:
     """The whole point of Phase 6: find, then open, then answer — three
     passes, two different tools, one turn."""
     provider = ScriptedToolProvider(
@@ -863,9 +858,7 @@ async def test_a_second_step_can_call_a_different_tool(
     assert [c["step"] for c in calls] == [0, 1], "each step is numbered, not repeated"
 
 
-async def test_a_turn_never_ends_with_an_empty_reply(
-    database: Database, make_service
-) -> None:
+async def test_a_turn_never_ends_with_an_empty_reply(database: Database, make_service) -> None:
     """The observed half of `gate_agent.py`'s open line: the model runs a
     tool, then finishes its next pass with no text at all. `_finish` would
     store and broadcast an empty `full_text`, which from the outside is
@@ -1586,10 +1579,8 @@ async def test_a_mode_belongs_to_its_own_conversation(
     assert fresh["mode"] == "normal", "a new chat starts back at Normal"
 
 
-async def test_a_quiz_can_keep_asking(
-    database: Database, make_service
-) -> None:
-    """"Test with set of mcqs one after the other" is a real request, and a
+async def test_a_quiz_can_keep_asking(database: Database, make_service) -> None:
+    """ "Test with set of mcqs one after the other" is a real request, and a
     one-per-turn cap turned every question after the first into markdown."""
     provider = ScriptedToolProvider(
         [
@@ -1626,3 +1617,46 @@ async def test_asking_does_not_cost_her_the_rest_of_her_tools(
     await _drain(svc)
 
     assert [name for name, _ in engine.ran] == ["ask_user", "find"]
+
+
+# ── study sub-modes ───────────────────────────────────────────────────
+
+
+async def test_a_study_submode_does_not_outlive_its_conversation(service) -> None:
+    """**The reason it is in memory rather than in a table.**
+
+    A sub-mode is the shape of *this* session. One that persisted would put
+    last week's exam conditions on today's first question — the same reasoning
+    `_modes` already carries for `ConversationMode`, and the same reason mastery
+    (which is evidence, not a setting) is in SQLite and this is not.
+
+    Mutation-checked: storing sub-modes anywhere a new session can read fails
+    exactly this.
+    """
+    svc, _, _ = service
+    first = await svc.new_session()
+    svc.set_study_submode(first, StudySubMode.EXAM)
+    assert svc.study_submode_for(first) is StudySubMode.EXAM
+
+    second = await svc.new_session()
+
+    assert svc.study_submode_for(second) is StudySubMode.LEARN
+
+
+async def test_learn_is_stored_as_an_absence(service) -> None:
+    """A session set back to Learn must be indistinguishable from one that
+    never moved — the contract NORMAL already keeps for the conversation mode."""
+    svc, _, _ = service
+    session = await svc.new_session()
+
+    svc.set_study_submode(session, StudySubMode.REVISION)
+    svc.set_study_submode(session, StudySubMode.LEARN)
+
+    assert svc.study_submode_for(session) is StudySubMode.LEARN
+    assert session not in svc._study_submodes  # noqa: SLF001
+
+
+async def test_no_session_is_learn_rather_than_an_error(service) -> None:
+    svc, _, _ = service
+
+    assert svc.study_submode_for(None) is StudySubMode.LEARN

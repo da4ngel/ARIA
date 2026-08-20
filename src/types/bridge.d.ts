@@ -126,6 +126,50 @@ export interface MemoryEpisode {
   last_accessed: string | null
 }
 
+/** One concept on a subject's map, with whatever mastery it has earned.
+ *
+ * `level` is an integer 0-5, not a 0..1 confidence — 0 never seen, 1
+ * introduced, 2-3 shaky, 4 solid, 5 he could teach it. `asked`/`correct` are
+ * the evidence behind it, the way `evidence_count` is for a fact. */
+export interface StudyConcept {
+  id: number
+  name: string
+  summary: string
+  level: number
+  asked: number
+  correct: number
+}
+
+/** One subject's whole map, as `study.state` returns it. */
+export interface StudyState {
+  subject_id?: number
+  /** null when nothing has ever been studied. */
+  subject: string | null
+  source_path?: string | null
+  covered?: number
+  /** What she would teach next, or null when the map is finished. */
+  next?: string | null
+  concepts: StudyConcept[]
+}
+
+/** A row in the subject switcher — progress without fetching every concept. */
+export interface StudySubject {
+  id: number
+  name: string
+  source_path: string | null
+  last_studied_at: string | null
+  total: number
+  covered: number
+}
+
+/** What `study.start` hands back: the message the panel should then send. */
+export interface StudyStart {
+  session_id: string
+  sub_mode: string
+  label: string
+  opener: string
+}
+
 /** `memory.stats` — the retrieval latency §9 Phase 5's gate is measured on. */
 export interface RetrievalStats {
   count: number

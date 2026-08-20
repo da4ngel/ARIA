@@ -21,10 +21,14 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
 from sidecar.memory.db import Database
+
+if TYPE_CHECKING:
+    from sidecar.core.study_modes import SubModePolicy
 
 log = structlog.get_logger(__name__)
 
@@ -403,23 +407,148 @@ async def touch(db: Database, subject_id: int) -> None:
     await db.run(_touch)
 
 
-def render(state: StudyState) -> str:
-    """The one-line block that goes in the volatile prefix.
+def render(state: StudyState, policy: SubModePolicy | None = None) -> str:
+    """The block that goes in the volatile prefix.
 
-    Bounded by construction — one line per group, `NAMES_IN_BLOCK` names in
-    each. This is paid on every turn of a study session, so it is written to
-    be a constant cost rather than one that grows with the syllabus.
+    Bounded by construction, and the bound depends on what the sub-mode is
+    doing. `Scope.NEXT` and `Scope.WEAK` name at most `NAMES_IN_BLOCK` each,
+    because a lesson only needs the thing in front of it. **`Scope.COVERED`
+    names all of them**, which is the one deliberate exception: Rapid review
+    is *"one line on each concept he has covered"*, and it cannot do that from
+    a list of three. Bounded anyway by `curriculum.MAX_CONCEPTS` — at most 24
+    short names, and only during a session that asked for them.
+
+    `policy=None` is Learn, and Learn's line is empty, so the block is
+    byte-for-byte what it was before sub-modes existed.
     """
+    from sidecar.core.study_modes import Scope, policy_for
 
-    def names(group: tuple[Concept, ...]) -> str:
-        return ", ".join(c.name for c in group[:NAMES_IN_BLOCK])
+    resolved = policy_for(policy.sub_mode if policy else None)
+
+    def names(group: tuple[Concept, ...], limit: int | None = NAMES_IN_BLOCK) -> str:
+        chosen = group if limit is None else group[:limit]
+        return ", ".join(c.name for c in chosen)
 
     parts = [f"studying: {state.subject} — {len(state.covered)} of {len(state.concepts)} covered"]
-    nxt = state.next_concept
-    if nxt is not None:
-        parts.append(f"next: {nxt.name}")
+
+    if resolved.scope is Scope.COVERED:
+        if state.covered:
+            parts.append(f"covered: {names(state.covered, limit=None)}")
+    else:
+        nxt = state.next_concept
+        if nxt is not None:
+            parts.append(f"next: {nxt.name}")
+
     if state.weak:
         parts.append(f"shaky: {names(state.weak)}")
-    if state.strong:
+    if state.strong and resolved.scope is not Scope.WEAK:
+        # Revision is about what failed. Naming what he is good at there is
+        # padding in a block paid for on every turn.
         parts.append(f"solid: {names(state.strong)}")
-    return "[" + ". ".join(parts) + "]"
+
+    block = "[" + ". ".join(parts) + "]"
+    return f"{block}\n{resolved.line}" if resolved.line else block
+
+
+# ── editing, from the panel rather than from a tool ────────────────────
+#
+# These are reached by `study.*` RPCs, not by anything in the registry. A click
+# is not a tool call — the `files.browse` distinction, already made here: a
+# confirmation dialog in front of the button somebody just pressed is asking
+# them to confirm the thing they just did.
+
+
+async def list_subjects(db: Database) -> list[dict[str, object]]:
+    """Every subject with its progress, most recently studied first."""
+    rows = await db.run(
+        lambda c: c.execute(
+            "SELECT s.id, s.name, s.source_path, s.last_studied_at, "
+            "  COUNT(c2.id) AS total, "
+            "  COALESCE(SUM(CASE WHEN m.level > 0 THEN 1 ELSE 0 END), 0) AS covered "
+            "FROM study_subjects s "
+            "LEFT JOIN concepts c2 ON c2.subject_id = s.id "
+            "LEFT JOIN concept_mastery m ON m.concept_id = c2.id "
+            "GROUP BY s.id "
+            "ORDER BY COALESCE(s.last_studied_at, s.created_at) DESC, s.id DESC"
+        ).fetchall()
+    )
+    return [
+        {
+            "id": int(r["id"]),
+            "name": str(r["name"]),
+            "source_path": r["source_path"],
+            "last_studied_at": r["last_studied_at"],
+            "total": int(r["total"]),
+            "covered": int(r["covered"]),
+        }
+        for r in rows
+    ]
+
+
+async def rename_subject(db: Database, subject_id: int, name: str) -> bool:
+    """Rename a subject. False if the new name is taken or empty.
+
+    The name is what resuming matches on, so this is not cosmetic — she files a
+    subject under whatever words he used, and "week 3 infosec" is a worse handle
+    than "Information Security" for every session after the first.
+    """
+    clean = name.strip()
+    if not clean:
+        return False
+
+    def _rename(c: sqlite3.Connection) -> bool:
+        clash = c.execute(
+            "SELECT id FROM study_subjects WHERE name = ? COLLATE NOCASE AND id != ?",
+            (clean, subject_id),
+        ).fetchone()
+        if clash is not None:
+            return False
+        with c:
+            cursor = c.execute(
+                "UPDATE study_subjects SET name = ? WHERE id = ?", (clean, subject_id)
+            )
+        return bool(cursor.rowcount)
+
+    renamed = await db.run(_rename)
+    log.info("study.renamed", subject_id=subject_id, name=clean, ok=renamed)
+    return renamed
+
+
+async def delete_subject(db: Database, subject_id: int) -> bool:
+    """Delete a subject, its map, and every answer recorded against it.
+
+    **This is the destructive one.** `concepts` cascades from `study_subjects`
+    and `concept_mastery` cascades from `concepts`, so one row taken here
+    removes the whole history — which is why the panel arms it with two clicks
+    rather than one.
+    """
+
+    def _delete(c: sqlite3.Connection) -> bool:
+        with c:
+            cursor = c.execute("DELETE FROM study_subjects WHERE id = ?", (subject_id,))
+        return bool(cursor.rowcount)
+
+    deleted = await db.run(_delete)
+    log.info("study.subject_deleted", subject_id=subject_id, ok=deleted)
+    return deleted
+
+
+async def reset_concept(db: Database, concept_id: int) -> bool:
+    """Put one concept back to never-introduced.
+
+    Deletes the mastery row rather than zeroing it: `state` already reads a
+    missing row as level 0 with no counts, so an absent row and a zeroed one
+    mean the same thing and only one of them can drift.
+
+    Re-earnable by answering, which is why this is one click where deleting a
+    subject is two.
+    """
+
+    def _reset(c: sqlite3.Connection) -> bool:
+        with c:
+            cursor = c.execute("DELETE FROM concept_mastery WHERE concept_id = ?", (concept_id,))
+        return bool(cursor.rowcount)
+
+    reset = await db.run(_reset)
+    log.info("study.concept_reset", concept_id=concept_id, ok=reset)
+    return reset

@@ -1210,6 +1210,122 @@ async def study_state(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _study_id(params: dict[str, Any], key: str) -> int:
+    """A row id off the wire. The panel always sends one; anything else is a
+    caller bug worth naming rather than a row id of 0 quietly matching nothing."""
+    raw = params.get(key)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"{key} must be a number.")
+    return raw
+
+
+@method("study.subjects")
+async def study_subjects(_params: dict[str, Any]) -> dict[str, Any]:
+    """Every subject with its progress, most recently studied first.
+
+    What the Study panel opens on. Separate from `study.state`, which returns
+    one subject's whole map — a rail section that had to fetch every concept of
+    every subject just to draw a list would get slower the more he studies.
+    """
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    db = runtime.db
+    if db is None:
+        return {"subjects": []}
+    return {"subjects": await study.list_subjects(db)}
+
+
+@method("study.start")
+async def study_start(params: dict[str, Any]) -> dict[str, Any]:
+    """Put a conversation into Study mode with a sub-mode, and say what to send.
+
+    **The RPC sets the state and the caller sends the message.** It would be
+    less code to send it here, but then the thing that starts a study session
+    would be invisible in the transcript — and pressing "Exam" *is* asking to
+    be examined, so it belongs there in his own words. The panel sends the
+    returned `opener` through the ordinary `chat.send` path.
+    """
+    from sidecar.core import study_modes
+    from sidecar.core.context import ConversationMode
+    from sidecar.state import runtime
+
+    service = runtime.require_conversation()
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        session_id = await service.store.latest_session_id()
+    if not session_id:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "There is no conversation to study in.")
+
+    sub_mode = study_modes.parse(params.get("sub_mode")) or study_modes.StudySubMode.LEARN
+    service.set_mode(session_id, ConversationMode.STUDY)
+    service.set_study_submode(session_id, sub_mode)
+
+    policy = study_modes.policy_for(sub_mode)
+    return {
+        "session_id": session_id,
+        "sub_mode": str(sub_mode),
+        "label": policy.label,
+        "opener": policy.opener,
+    }
+
+
+@method("study.rename")
+async def study_rename(params: dict[str, Any]) -> dict[str, Any]:
+    """Rename a subject. Not cosmetic — the name is what resuming matches on.
+
+    `ok: false` with a reason rather than an exception when the name is taken:
+    two subjects with one name would make `find_subject` a coin flip, and a
+    panel that says so beats one that throws.
+    """
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    subject_id = _study_id(params, "subject_id")
+    name = params.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "A subject needs a name.")
+
+    renamed = await study.rename_subject(runtime.require_db(), subject_id, name)
+    return {
+        "ok": renamed,
+        "reason": None if renamed else "There is already a subject with that name.",
+    }
+
+
+@method("study.forget")
+async def study_forget(params: dict[str, Any]) -> dict[str, Any]:
+    """Delete a subject, its map, and every answer recorded against it.
+
+    **The destructive one, and it is not recoverable.** `concepts` cascades
+    from `study_subjects` and `concept_mastery` from `concepts`, so this takes
+    the whole learning history with it. There is no confirmation round-trip
+    here on purpose — this is a click the user made in a panel, not a tool call
+    the model asked for, and a dialog in front of the button somebody just
+    pressed is asking them to confirm the thing they just did. The panel arms
+    it with two clicks instead, the way `MemoryPanel`'s forget already does.
+    """
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    subject_id = _study_id(params, "subject_id")
+    return {"ok": await study.delete_subject(runtime.require_db(), subject_id)}
+
+
+@method("study.reset")
+async def study_reset(params: dict[str, Any]) -> dict[str, Any]:
+    """Put one concept back to never-introduced.
+
+    One click, where deleting a subject takes two: a reset destroys nothing
+    that cannot be earned again by answering a question.
+    """
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    concept_id = _study_id(params, "concept_id")
+    return {"ok": await study.reset_concept(runtime.require_db(), concept_id)}
+
+
 @method("memory.stats")
 async def memory_stats(_params: dict[str, Any]) -> dict[str, Any]:
     """Counts, retrieval latency, and whether embeddings are actually working.

@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Orb } from '@/components/Orb'
 import type { AssistantState } from '@/types/bridge'
 
-export type Section = 'history' | 'voice' | 'files' | 'tools' | 'memory' | 'settings'
+export type Section = 'history' | 'voice' | 'files' | 'tools' | 'memory' | 'study' | 'settings'
 
 const COLLAPSE_KEY = 'aria.sidebar.collapsed'
 
@@ -180,6 +180,14 @@ export function Sidebar({
         disabled={!connected}
         onClick={() => onSelect('memory')}
       />
+      <Item
+        icon={<IconStudy />}
+        label="Study"
+        collapsed={collapsed}
+        active={active === 'study'}
+        disabled={!connected}
+        onClick={() => onSelect('study')}
+      />
 
       {/* The section's own content, in the menu rather than beside it. It
           takes the remaining height, so Settings stays pinned to the bottom. */}
@@ -303,6 +311,19 @@ function IconHistory(): JSX.Element {
 }
 
 // Nodes joined by edges — what she has learned, not where it is stored.
+/** An open book. The one glyph here that had to survive being 14px wide —
+ *  a stack of pages reads as noise at that size, so it is two facing leaves
+ *  and a spine, which is still a book at a glance. */
+function IconStudy(): JSX.Element {
+  return (
+    <svg {...stroke} aria-hidden>
+      <path d="M7 4.2v7.2" />
+      <path d="M7 4.2C5.8 3.2 4.3 2.9 2.2 3v7.2c2.1-.1 3.6.2 4.8 1.2" />
+      <path d="M7 4.2c1.2-1 2.7-1.3 4.8-1.2v7.2c-2.1-.1-3.6.2-4.8 1.2" />
+    </svg>
+  )
+}
+
 function IconMemory(): JSX.Element {
   return (
     <svg {...stroke} aria-hidden>

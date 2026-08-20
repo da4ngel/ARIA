@@ -19,6 +19,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from sidecar.core.questions import Option, Question
+from sidecar.core.study_modes import policy_for as study_policy_for
 from sidecar.memory import curriculum, study
 from sidecar.tools.registry import Tier, ToolContext, ToolResult, tool
 
@@ -261,6 +262,23 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
         )
 
     subject_id = await study.latest_subject_id(db)
+    # **Exam's one mechanical lever** (`core/study_modes.py`). Everything else
+    # about a sub-mode is prompt text a model may or may not follow; this
+    # cannot be, because a tool result is an instruction to a model, and
+    # handing it "the answer was X" halfway through an exam is exactly how the
+    # answer reaches his screen before the exam is over. The information is
+    # kept out of the room rather than the model asked not to use it.
+    #
+    # Fails *open* — no conversation service means no sub-mode, which means
+    # Learn, which reveals. The alternative fails closed and silently withholds
+    # every answer from every ordinary quiz, which is the far worse direction
+    # for a wrong default here.
+    service = runtime.conversation
+    reveal = (
+        study_policy_for(service.study_submode_for(ctx.session_id)).reveal_answers
+        if service is not None
+        else True
+    )
     asked = await broker.ask(
         [
             Question(
@@ -290,13 +308,19 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
     # `options`, so anything else is a mis-copy in `correct` rather than a
     # near miss by him.
     lines: list[str] = []
+    missed: list[str] = []
     right = 0
     for question, answer in zip(prepared, asked.answers, strict=False):
         chosen = answer.text.strip()
         correct = chosen.casefold() == question.correct.strip().casefold()
         right += 1 if correct else 0
-        verdict = "correct" if correct else f"wrong (the answer was: {question.correct})"
-        lines.append(f"{question.concept}: he chose '{chosen}' — {verdict}")
+        if reveal:
+            verdict = "correct" if correct else f"wrong (the answer was: {question.correct})"
+            lines.append(f"{question.concept}: he chose '{chosen}' — {verdict}")
+        elif not correct:
+            # The concept, so she knows what to tell him to review. Not the
+            # question, not his answer, and above all not the right one.
+            missed.append(question.concept)
 
         if subject_id is None:
             continue
@@ -316,14 +340,19 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
     if unanswered > 0:
         lines.append(f"({unanswered} left unanswered.)")
 
-    tail = (
-        "He got them all. Move on to the next concept."
-        if right == len(asked.answers) and asked.answers
-        else (
+    if not reveal:
+        lines.append(f"To review: {', '.join(missed)}." if missed else "Nothing to review.")
+        tail = (
+            "The exam is over. Give him the score and what to review — you do not "
+            "have the individual answers and must not invent them."
+        )
+    elif right == len(asked.answers) and asked.answers:
+        tail = "He got them all. Move on to the next concept."
+    else:
+        tail = (
             "Say which step of his reasoning went wrong, not the whole thing again, "
             "then give him another way in."
         )
-    )
     return ToolResult(
         ok=True,
         summary=f"{right} of {len(asked.answers)} right.\n" + "\n".join(lines) + f"\n{tail}",

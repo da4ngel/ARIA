@@ -19,6 +19,9 @@ Five lines, in the order they have to work:
 4. A **new session** with no file resumes the subject at the right place.
 5. A question the lecture does not cover is answered as not covered, rather
    than from general knowledge as though it were in the slides.
+6. A sub-mode changes the session: Revision works on what is shaky, and
+   **an Exam does not give the answers away**, which is the one lever that is
+   mechanical rather than a prompt line a model may ignore.
 
 **Its own sessions, its own scratch lecture, and it answers its own
 questions.** `chat.send` with no session continues whatever conversation was
@@ -364,6 +367,35 @@ async def main() -> int:
             print("    PASS  she said it is outside the material")
         else:
             failures.append("5. she answered as though revocation were in the lecture")
+
+        print("\n" + "=" * 72)
+        print("6. SUB-MODES: REVISION WORKS ON WHAT IS SHAKY, EXAM WITHHOLDS")
+        print("=" * 72)
+        started = await client.call("study.start", {"session_id": fresh, "sub_mode": "revision"})
+        print(f"    revision opener: {started['opener']!r}")
+        await client.ask(fresh, started["opener"])
+        print(f"    tools: {client.tools_used()}")
+
+        started = await client.call("study.start", {"session_id": fresh, "sub_mode": "exam"})
+        client.pick_correct = False
+        result = await client.ask(fresh, started["opener"])
+        reply = (result.get("full_text") or "").strip()
+        print(f"    exam reply:\n      {reply[:400]}")
+
+        # **The check that matters.** `study_check` withholds the per-question
+        # answers under Exam, so the only way a right answer can appear in her
+        # reply is if she invented it — which is worth knowing either way.
+        summaries = [
+            e["params"].get("summary", "") for e in client.events if e["method"] == "tool.result"
+        ]
+        leaked = [s for s in summaries if "the answer was" in s.lower()]
+        if leaked:
+            failures.append("6. an exam's tool result gave the answers away")
+        elif summaries:
+            print("    PASS  no tool result named a correct answer during the exam")
+        else:
+            observed.append("6. no study_check ran during the exam turn")
+            print("    OBSERVED  she did not reach for study_check — read the reply above")
 
     finally:
         # The subject this gate created is left in place deliberately: it is

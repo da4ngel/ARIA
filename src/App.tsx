@@ -26,6 +26,7 @@ import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
 import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
 import { MemoryPanel } from '@/components/MemoryPanel'
+import { StudyPanel } from '@/components/StudyPanel'
 import { FilesPanel } from '@/components/FilesPanel'
 import { ModeSelector } from '@/components/ModeSelector'
 import { QuestionCard } from '@/components/QuestionCard'
@@ -439,6 +440,14 @@ export default function App(): JSX.Element {
               />
             )}
             {overlay === 'memory' && <MemoryPanel key="memory" onClose={() => setOverlay(null)} />}
+            {overlay === 'study' && (
+              <StudyPanel
+                key="study"
+                onClose={() => setOverlay(null)}
+                onStudy={(text) => void send(text)}
+                sessionId={sessionId}
+              />
+            )}
             {overlay === 'settings' && (
               <SettingsPanel
                 key="settings"

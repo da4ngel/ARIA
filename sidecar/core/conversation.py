@@ -34,6 +34,8 @@ from sidecar.core.router import (
     RoutingBias,
     is_tool_shaped,
 )
+from sidecar.core.study_modes import StudySubMode
+from sidecar.core.study_modes import policy_for as study_policy_for
 from sidecar.core.tasks import spawn
 from sidecar.memory import procedures, study
 from sidecar.memory.db import Database
@@ -366,6 +368,13 @@ class ConversationService:
         #: and a migration for a value that resets on New Chat would be
         #: storing something whose whole point is not to persist.
         self._modes: dict[str, ctx.ConversationMode] = {}
+        #: How the study session in this conversation is being run — Learn,
+        #: Practice, Exam and the rest (`core/study_modes.py`). Per session and
+        #: in memory for exactly the reason above: a sub-mode is the shape of
+        #: *this* session, and one that outlived its conversation would put
+        #: last week's exam conditions on today's first question. LEARN is
+        #: stored as an absence, the way NORMAL is.
+        self._study_submodes: dict[str, StudySubMode] = {}
         self._attachment_reads: dict[str, asyncio.Task[list[attach.Attachment]]] = {}
         self._attachments: dict[str, list[attach.Attachment]] = {}
         # Phase 8: the name of the procedure most recently offered via
@@ -605,6 +614,19 @@ class ConversationService:
         if session_id is None:
             return ctx.ConversationMode.NORMAL
         return self._modes.get(session_id, ctx.ConversationMode.NORMAL)
+
+    def study_submode_for(self, session_id: str | None) -> StudySubMode:
+        if session_id is None:
+            return StudySubMode.LEARN
+        return self._study_submodes.get(session_id, StudySubMode.LEARN)
+
+    def set_study_submode(self, session_id: str, sub_mode: StudySubMode) -> None:
+        """Set how this study session runs. LEARN is stored as an absence."""
+        if sub_mode is StudySubMode.LEARN:
+            self._study_submodes.pop(session_id, None)
+        else:
+            self._study_submodes[session_id] = sub_mode
+        log.info("study.submode_changed", session_id=session_id, sub_mode=str(sub_mode))
 
     def set_mode(self, session_id: str, mode: ctx.ConversationMode) -> None:
         """Set it for one conversation. NORMAL is stored as an absence, so a
@@ -1602,7 +1624,7 @@ class ConversationService:
             self._store.history(session_id),
             self._await_retrieval(turn_id),
             self._await_attachments(turn_id),
-            self._study_state(mode),
+            self._study_state(mode, session_id),
         )
         retrieved = retrieval.render() if retrieval else None
         turns = ctx.to_chat_messages(history)
@@ -1803,7 +1825,9 @@ class ConversationService:
             return None
         return affect_module.render(state, datetime.now().astimezone())
 
-    async def _study_state(self, mode: ctx.ConversationMode) -> str | None:
+    async def _study_state(
+        self, mode: ctx.ConversationMode, session_id: str | None = None
+    ) -> str | None:
         """Where he is in the subject he is studying, for the volatile prefix.
 
         **Only in Study mode**, which is the whole of Eyaas's answer on when
@@ -1836,7 +1860,10 @@ class ConversationService:
             return None
         if state is None or not state.concepts:
             return None
-        return study.render(state)
+        # The sub-mode decides which concepts the block names, so the two can
+        # never disagree — a Revision session listing what he has mastered is
+        # exactly that disagreement.
+        return study.render(state, study_policy_for(self.study_submode_for(session_id)))
 
     async def speak(self, text: str) -> bool:
         """Say a reply aloud, on request. False when there is no voice engine.

@@ -445,3 +445,107 @@ def test_study_state_reports_the_map_and_what_it_has_earned(client: TestClient) 
     assert [c["name"] for c in result["concepts"]] == ["Handshake", "Drift"]
     assert result["covered"] == 1
     assert result["next"] == "Handshake", "a shaky concept is taught before a new one"
+
+
+def test_study_subjects_is_empty_before_anything_is_studied(client: TestClient) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        assert _call(ws, "study.subjects")["result"] == {"subjects": []}
+
+
+def test_study_start_sets_the_mode_and_hands_back_the_opener(client: TestClient) -> None:
+    """**The RPC sets the state and the caller sends the message.** Sending it
+    here would be less code and would make the thing that started an exam
+    invisible in the transcript — pressing "Exam" is asking to be examined, and
+    it belongs there in his own words."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        session_id = _call(ws, "chat.new")["result"]["session_id"]
+        started = _call(
+            ws, "study.start", {"session_id": session_id, "sub_mode": "exam"}, call_id=2
+        )["result"]
+        mode = _call(ws, "chat.mode", {"session_id": session_id}, call_id=3)["result"]
+
+    assert started["sub_mode"] == "exam"
+    assert started["label"] == "Exam"
+    assert started["opener"]
+    assert mode["mode"] == "study", "starting a study session must also set Study mode"
+
+
+def test_an_unknown_sub_mode_lands_on_learn_rather_than_failing_a_click(
+    client: TestClient,
+) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        session_id = _call(ws, "chat.new")["result"]["session_id"]
+        started = _call(
+            ws, "study.start", {"session_id": session_id, "sub_mode": "nonsense"}, call_id=2
+        )["result"]
+
+    assert started["sub_mode"] == "learn"
+
+
+def test_the_three_edits_reach_the_database(client: TestClient) -> None:
+    """Rename, reset and delete, in the order the panel offers them. Delete is
+    last because it takes the rest with it."""
+    import anyio
+
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    async def _seed() -> int:
+        db = runtime.require_db()
+        subject_id = await study.ensure_subject(db, "week 3 infosec")
+        await study.add_concepts(db, subject_id, [("Handshake", ""), ("Drift", "")])
+        state = await study.state(db, subject_id)
+        assert state is not None
+        await study.record_answer(db, state.concepts[0].id, correct=True)
+        return subject_id
+
+    subject_id = anyio.run(_seed)
+
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        renamed = _call(
+            ws, "study.rename", {"subject_id": subject_id, "name": "Information Security"}
+        )["result"]
+        state = _call(ws, "study.state", call_id=2)["result"]
+        concept_id = state["concepts"][0]["id"]
+        reset = _call(ws, "study.reset", {"concept_id": concept_id}, call_id=3)["result"]
+        after_reset = _call(ws, "study.state", call_id=4)["result"]
+        forgotten = _call(ws, "study.forget", {"subject_id": subject_id}, call_id=5)["result"]
+        after_delete = _call(ws, "study.subjects", call_id=6)["result"]
+
+    assert renamed["ok"] is True
+    assert state["subject"] == "Information Security"
+    assert reset["ok"] is True
+    assert after_reset["concepts"][0]["level"] == 0
+    assert forgotten["ok"] is True
+    assert after_delete["subjects"] == [], "deleting a subject takes its map with it"
+
+
+def test_a_rename_onto_a_taken_name_comes_back_as_a_reason(client: TestClient) -> None:
+    """Not an exception: two subjects with one name would make resuming a coin
+    flip, and a panel that can show why beats one that throws."""
+    import anyio
+
+    from sidecar.memory import study
+    from sidecar.state import runtime
+
+    async def _seed() -> int:
+        db = runtime.require_db()
+        await study.ensure_subject(db, "Networking")
+        return await study.ensure_subject(db, "Databases")
+
+    second = anyio.run(_seed)
+
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        result = _call(ws, "study.rename", {"subject_id": second, "name": "networking"})["result"]
+
+    assert result["ok"] is False
+    assert "already" in (result["reason"] or "")
+
+
+def test_a_row_id_that_is_not_a_number_is_named_rather_than_matching_nothing(
+    client: TestClient,
+) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        message = _call(ws, "study.forget", {"subject_id": "seven"})
+
+    assert message["error"]["code"] == ErrorCode.INVALID_PARAMS
