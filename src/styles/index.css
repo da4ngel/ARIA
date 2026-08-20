@@ -6,6 +6,18 @@
    `backgroundColor` on the BrowserWindow is transparent so DWM's acrylic is
    actually visible — an opaque one composites over the material and hides it,
    which is exactly what made "glass everywhere" look like a dark rectangle. */
+:root {
+  /* **How wide a line of text is allowed to get.**
+     Maximised, the window can be 2560px, and a transcript stretched across
+     that is genuinely hard to read — the eye loses the start of the next line.
+     The compact window is 420px and never reaches this, so it costs nothing
+     until the day it is needed.
+     Declared once because the transcript and the composer must agree on where
+     the column edge is; two numbers would drift and the input would stop
+     lining up with the thing it answers. */
+  --reading: 46rem;
+}
+
 html,
 body,
 #root {

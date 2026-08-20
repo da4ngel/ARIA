@@ -212,3 +212,32 @@ describe('syntax highlighting', () => {
     expect(saturated.length).toBeLessThanOrEqual(3)
   })
 })
+
+describe('the reading column', () => {
+  const CSS = readFileSync(join(process.cwd(), 'src/styles/index.css'), 'utf8')
+
+  it('is declared once, not per surface', () => {
+    // Maximised, the window can be 2560px wide, and a transcript stretched
+    // across that is genuinely hard to read. The transcript and the composer
+    // must agree on where the column edge is — two numbers would drift and the
+    // input would stop lining up with the thing it answers.
+    expect(CSS).toContain('--reading:')
+
+    const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8')
+    const view = readFileSync(join(process.cwd(), 'src/components/ConversationView.tsx'), 'utf8')
+    expect(app).toContain('max-w-[var(--reading)]')
+    expect(view).toContain('max-w-[var(--reading)]')
+  })
+
+  it('caps the content and not the scroller', () => {
+    // The scrollbar belongs at the window edge, not floating in the middle of
+    // a maximised window beside the text.
+    const view = readFileSync(join(process.cwd(), 'src/components/ConversationView.tsx'), 'utf8')
+    // Up to the mask, which is the last thing on the scroller element
+    // itself — anything past that is the capped wrapper inside it.
+    const scroller = view.slice(view.indexOf('ref={scroller}'), view.indexOf('maskImage'))
+
+    expect(scroller).toContain('overflow-y-auto')
+    expect(scroller).not.toContain('max-w-[var(--reading)]')
+  })
+})

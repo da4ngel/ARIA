@@ -195,6 +195,37 @@ function animateBounds(
   }, FADE_INTERVAL_MS)
 }
 
+/**
+ * Fill the screen, or come back to the centred working size.
+ *
+ * A third state rather than a bigger `EXPANDED_WIDTH`: Eyaas asked to "full
+ * expand the window as well which fits the entire desktop screen", and the
+ * centred 900x700 is a deliberately different thing — a window you put beside
+ * your work rather than one you disappear into.
+ *
+ * **Maximising implies expanding.** Compact is `resizable: false` and pinned
+ * bottom-right; `maximize()` on it either does nothing or produces a
+ * full-screen always-on-top window with no taskbar entry, which is a window
+ * you cannot get behind or away from. So the expanded flags are applied first
+ * and the two states cannot disagree.
+ */
+function setMaximized(next: boolean): boolean {
+  const win = window
+  if (!win || win.isDestroyed()) return false
+  if (next === win.isMaximized()) return next
+
+  if (next) {
+    // Not animated, unlike `setExpanded`: `maximize()` is the OS's own
+    // transition and racing it with a hand-driven `setBounds` loop makes the
+    // window judder between two ideas of where it should be.
+    if (!expanded) setExpanded(true)
+    win.maximize()
+  } else {
+    win.unmaximize()
+  }
+  return next
+}
+
 function setExpanded(next: boolean): boolean {
   const win = window
   if (!win || win.isDestroyed()) return expanded
@@ -212,6 +243,10 @@ function setExpanded(next: boolean): boolean {
     win.setMinimumSize(MIN_EXPANDED_WIDTH, MIN_EXPANDED_HEIGHT)
     animateBounds(win, centredExpandedBounds())
   } else {
+    // Out of maximised first: `animateBounds` drives `setBounds` by hand, and
+    // a maximised window ignores it — the window would stay full-screen while
+    // the app believed it had gone back to the corner.
+    if (win.isMaximized()) win.unmaximize()
     win.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
     animateBounds(win, { ...bottomRightPosition(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT })
   }
@@ -303,6 +338,13 @@ function createWindow(): BrowserWindow {
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // The OS maximises too — Win+Up, edge snap, a double click on the drag
+  // region — so the renderer is told by the window itself rather than only by
+  // the handler it called. A button that shows the wrong state is worse than
+  // no button.
+  win.on('maximize', () => sendToRenderer('aria:window-maximized', true))
+  win.on('unmaximize', () => sendToRenderer('aria:window-maximized', false))
 
   win.on('closed', () => {
     window = null
@@ -464,6 +506,10 @@ function registerIpc(): void {
   })
   ipcMain.handle('aria:set-expanded', (_event, next: boolean) => setExpanded(Boolean(next)))
   ipcMain.handle('aria:is-expanded', () => expanded)
+  ipcMain.handle('aria:set-maximized', (_event, next: boolean) => setMaximized(Boolean(next)))
+  ipcMain.handle('aria:is-maximized', () =>
+    Boolean(window && !window.isDestroyed() && window.isMaximized()),
+  )
   // The only filesystem-shaped channel in the preload, and it deliberately
   // returns *paths* rather than contents: the renderer never reads a file,
   // the sidecar does. The dialog is the consent — nothing here can open

@@ -283,12 +283,15 @@ export function ConversationView({
       <div
         ref={scroller}
         onScroll={() => setFollowing(atBottom())}
-        className="flex h-full flex-col gap-4 overflow-y-auto px-3 pb-2"
+        // The *scroller* stays full width so the scrollbar sits at the
+        // window edge where it belongs; only the content is capped.
+        className="flex h-full flex-col items-center overflow-y-auto px-3 pb-2"
         style={{
           maskImage: 'linear-gradient(to bottom, transparent 0, #000 20px)',
           WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, #000 20px)',
         }}
       >
+        <div className="flex w-full max-w-[var(--reading)] flex-col gap-4">
         {turns.map((turn) =>
           turn.role === 'user' ? (
             <motion.div
@@ -314,6 +317,7 @@ export function ConversationView({
           ),
         )}
         {question}
+        </div>
       </div>
 
       <AnimatePresence>

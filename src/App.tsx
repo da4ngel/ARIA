@@ -81,7 +81,7 @@ export default function App(): JSX.Element {
   // Hands-free is the sidecar's loop, not this one: the renderer streams
   // frames and the wake word, endpointing and turn all happen there.
   const handsFree = useHandsFree(connected)
-  const { expanded, toggle: toggleExpanded } = useWindowMode()
+  const { expanded, toggle: toggleExpanded, maximized, toggleMaximized } = useWindowMode()
   // Independent of the window mode above: how wide the rail is, versus how big
   // the window is. Conflating them meant a compact window could not show
   // labels and an expanded one could not hide them.
@@ -243,6 +243,11 @@ export default function App(): JSX.Element {
           <header
             className="flex shrink-0 items-center justify-between gap-2 px-3 py-2"
             style={drag}
+            // The Windows gesture. Costs nothing and is the first thing a lot
+            // of people try on a title bar; without it the strip just ignores
+            // them. Only meaningful once expanded — `toggleMaximized` handles
+            // the compact case by expanding first.
+            onDoubleClick={() => expanded && toggleMaximized()}
           >
             {/* Empty and draggable: the whole strip is the title bar, and the
                 rail already carries the name and the orb. */}
@@ -263,7 +268,12 @@ export default function App(): JSX.Element {
                 onOpen={() => setOverlay('tools')}
               />
               <ModelPicker models={models} />
-              <WindowControls expanded={expanded} onToggleExpanded={toggleExpanded} />
+              <WindowControls
+                expanded={expanded}
+                onToggleExpanded={toggleExpanded}
+                maximized={maximized}
+                onToggleMaximized={toggleMaximized}
+              />
             </div>
           </header>
 
@@ -329,7 +339,7 @@ export default function App(): JSX.Element {
             </p>
           )}
 
-          <div className="px-3 pb-3" style={noDrag}>
+          <div className="mx-auto w-full max-w-[var(--reading)] px-3 pb-3" style={noDrag}>
             <ComposerBar
               busy={busy}
               disabled={!connected}

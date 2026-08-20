@@ -198,6 +198,13 @@ export interface AriaApi {
   setExpanded: (expanded: boolean) => Promise<boolean>
   isExpanded: () => Promise<boolean>
   onWindowMode: (handler: (expanded: boolean) => void) => Unsubscribe
+  /** Fill the screen. Maximising implies expanding — compact is not
+   *  resizable, and a full-screen always-on-top window with no taskbar
+   *  entry is one you cannot get behind. */
+  setMaximized: (maximized: boolean) => Promise<boolean>
+  isMaximized: () => Promise<boolean>
+  /** Including when the OS did it — Win+Up, snap, a double click. */
+  onWindowMaximized: (handler: (maximized: boolean) => void) => Unsubscribe
   /** Absolute paths the user chose in the OS picker. Paths only — the
    *  renderer never reads a file; the sidecar opens them. */
   pickFiles: () => Promise<string[]>

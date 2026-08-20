@@ -86,6 +86,17 @@ const api = {
   /** Current mode, for the initial render. */
   isExpanded: (): Promise<boolean> => ipcRenderer.invoke('aria:is-expanded') as Promise<boolean>,
 
+  /** Fill the screen, or come back to the centred working size. Maximising
+   *  implies expanding — compact is not resizable. */
+  setMaximized: (maximized: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('aria:set-maximized', maximized) as Promise<boolean>,
+
+  isMaximized: (): Promise<boolean> => ipcRenderer.invoke('aria:is-maximized') as Promise<boolean>,
+
+  /** Including when the OS did it — Win+Up, snap, a double click. */
+  onWindowMaximized: (handler: (maximized: boolean) => void): Unsubscribe =>
+    subscribe('aria:window-maximized', handler),
+
   /** Mode changes, including ones main initiates. */
   onWindowMode: (handler: (expanded: boolean) => void): Unsubscribe =>
     subscribe('aria:window-mode', handler),

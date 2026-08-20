@@ -3177,6 +3177,58 @@ all clean.** Not yet looked at on screen — the theme is the part most likely t
 need a second pass, since some `hljs` classes now share a colour and whether
 that reads as restrained or as broken is only visible there.
 
+## A third window size, and the column that had to come with it (2026-08-20)
+    npm test && npx electron-vite build
+
+Eyaas: *"i should be able to full expand the window as well which fits the
+entire desktop screen."*
+
+There were two sizes — the 420×600 companion pinned bottom-right, and a centred
+900×700 working window — and no way past the second. Now three, with a
+maximise/restore control, the Windows double-click-the-title-bar gesture, and
+`Win+Up` and edge-snap all reported back correctly.
+
+- **Maximising implies expanding, in `main.ts` rather than in the UI.** Compact
+  is `resizable: false`, `alwaysOnTop: true`, `skipTaskbar: true` and pinned to
+  the corner — `maximize()` on it either does nothing or produces a full-screen
+  always-on-top window with **no taskbar entry**, which is a window you cannot
+  get behind or away from. `setMaximized(true)` calls `setExpanded(true)` first
+  so the two states cannot disagree.
+- **Shrinking out of maximised unmaximises first.** `animateBounds` drives
+  `setBounds` by hand — CLAUDE.md already records why, `setBounds(…, true)`
+  animates on macOS only — and a maximised window ignores it. Without the
+  `unmaximize()` the window would stay full-screen while the app believed it
+  had gone back to the corner.
+- **Maximising is not animated**, unlike expand/shrink. `maximize()` is the
+  OS's own transition and racing it with a hand-driven `setBounds` loop makes
+  the window judder between two ideas of where it should be.
+- **The renderer is told by the window, not only by the handler it called.**
+  `win.on('maximize'|'unmaximize')` → `aria:window-maximized`, because Win+Up,
+  edge snap and the double-click gesture all bypass our own path. A button
+  showing the wrong state is worse than no button.
+- The maximise control **only exists while expanded**, for the reason above
+  rather than for tidiness. There is a test for its absence.
+
+### The part that actually decides whether it is usable
+**Nothing capped the reading column.** At 420px that never mattered; maximised
+on this display it is 2560, and a transcript stretched across that is genuinely
+hard to read — the eye loses the start of the next line.
+
+`--reading: 46rem`, declared **once** in `index.css` and used by both the
+transcript and the composer. Two numbers would drift, and the input would stop
+lining up with the thing it answers — the same "restated in N places" failure
+this file has now recorded eight times, pre-empted rather than discovered.
+
+**The cap is on the content, not the scroller.** The scroller stays full width
+so the scrollbar sits at the window edge where it belongs, rather than floating
+in the middle of a maximised window beside the text. Both halves have a test.
+
+**178 renderer tests (+8), 1312 sidecar, ruff, mypy, typecheck and the build
+all clean.** Not yet looked at on screen — and the thing to check is not the
+maximising but the *emptiness*: a 46rem column centred in 2560px leaves a great
+deal of glass either side, and whether that reads as composed or as unfinished
+is a judgement only visible there.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

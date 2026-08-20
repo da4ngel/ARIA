@@ -15,9 +15,13 @@ const HIT = 'interactive grid h-7 w-7 place-items-center rounded-lg text-aria-mu
 export function WindowControls({
   expanded,
   onToggleExpanded,
+  maximized,
+  onToggleMaximized,
 }: {
   expanded: boolean
   onToggleExpanded: () => void
+  maximized: boolean
+  onToggleMaximized: () => void
 }): JSX.Element {
   return (
     <div className="ml-1 flex shrink-0 items-center gap-0.5">
@@ -50,6 +54,30 @@ export function WindowControls({
           </svg>
         )}
       </button>
+
+      {/* Only once expanded. In compact the window is pinned bottom-right
+          and not resizable, so a maximise button there would either do nothing
+          or produce a full-screen always-on-top window with no taskbar entry —
+          one you cannot get behind. */}
+      {expanded && (
+        <button
+          type="button"
+          aria-label={maximized ? 'Restore' : 'Fill the screen'}
+          title={maximized ? 'Restore' : 'Fill the screen'}
+          onClick={onToggleMaximized}
+          className={`${HIT} hover:text-aria-text`}
+        >
+          {maximized ? (
+            <svg {...stroke} aria-hidden>
+              <path d="M4.6 5.4h4v4h-4zM5.6 4.6V3.4h4v4H8.4" />
+            </svg>
+          ) : (
+            <svg {...stroke} aria-hidden>
+              <path d="M3.4 3.4h7.2v7.2H3.4z" />
+            </svg>
+          )}
+        </button>
+      )}
 
       <button
         type="button"
