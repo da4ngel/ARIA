@@ -158,3 +158,57 @@ describe('the palette', () => {
     expect(code).toContain('export const COLORS')
   })
 })
+
+describe('the streaming shimmer', () => {
+  const CSS = readFileSync(join(process.cwd(), 'src/styles/index.css'), 'utf8')
+
+  it('does not reach code', () => {
+    // **A real bug for an hour.** `.streaming` sets `background-clip: text`
+    // with a transparent colour, and every descendant inherits it — so a
+    // fenced block inside a streaming reply rendered transparent, clipped to
+    // the *container's* gradient rather than drawn.
+    //
+    // Invisible unless you happened to watch a reply containing code arrive,
+    // which is exactly the kind of thing that needs a test rather than an eye.
+    const exemption = CSS.slice(CSS.indexOf('.streaming pre'))
+
+    expect(CSS).toContain('.streaming pre')
+    expect(CSS).toContain('.streaming code')
+    expect(exemption.slice(0, 400)).toContain('background-clip: border-box')
+    expect(exemption.slice(0, 400)).toContain('color: inherit')
+  })
+
+  it('still applies to ordinary prose', () => {
+    // The exemption must not have turned the whole effect off.
+    const rule = CSS.slice(CSS.indexOf('.streaming {'), CSS.indexOf('.streaming pre'))
+    expect(rule).toContain('background-clip: text')
+    expect(rule).toContain('color: transparent')
+  })
+})
+
+describe('syntax highlighting', () => {
+  const CSS = readFileSync(join(process.cwd(), 'src/styles/index.css'), 'utf8')
+
+  it('is coloured from the palette, not a stock theme', () => {
+    // `highlight.js` themes ship a full colour scheme and assume their own
+    // background. Dropping one in would put eight hues in the one place where
+    // colour is otherwise load-bearing.
+    const block = CSS.slice(CSS.indexOf('.hljs {'), CSS.indexOf('.interactive {'))
+
+    expect(block).toContain('.hljs')
+    expect(block).not.toMatch(/#[0-9a-fA-F]{6}/)
+    expect(block).toContain("theme('colors.aria")
+  })
+
+  it('keeps saturation meaning something', () => {
+    // The palette's own stated rule. Three things carry colour — keywords,
+    // strings, a deletion — and the rest is the neutral ramp.
+    const block = CSS.slice(CSS.indexOf('.hljs {'), CSS.indexOf('.interactive {'))
+    const hues = new Set(
+      [...block.matchAll(/theme\('colors\.aria\.([a-z-]+)'\)/g)].map((m) => m[1]),
+    )
+    const saturated = [...hues].filter((h) => ['accent', 'ok', 'warn', 'bad'].includes(h))
+
+    expect(saturated.length).toBeLessThanOrEqual(3)
+  })
+})

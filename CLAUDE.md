@@ -3106,6 +3106,77 @@ white editor, which is what the 0.62 alpha was chosen for. If the green tint
 costs readability, readability wins and the alpha goes up, exactly as the
 token's own comment pre-commits.
 
+## Code that looks like code, and a bug the retheme had just shipped (2026-08-20)
+    npm test && npx electron-vite build
+
+Eyaas: *"when its gonna give code or cmd command or any kinda those stuffs, it
+should be in a nice kinda snippet box, like how things are in chatgpt and
+claude."*
+
+There **was** already a box — `Markdown.tsx` wrapped `<pre>` in a
+`rim bg-aria-sunk` container with a copy button — and it read as an
+undifferentiated grey slab. Three things were missing: a header naming the
+language, a copy control visible without hunting for it, and highlighting.
+
+- **The copy button was hover-only and floated over the code's first line.**
+  At 420px that covers the thing you are reading, and a control you discover by
+  hovering is one most people never find. It sits in a header strip now, always
+  there, with the language on the left.
+- **The language is read off the `language-*` class, never guessed.** An
+  untagged fence gets no name rather than a plausible one — the header is a
+  claim about the code, and highlighting will already have declined to colour it.
+- The body keeps `overflow-x-auto`. Wrapping code changes what it means: a
+  broken line in PowerShell is a different command.
+- Surfaces are `sunk` for the body and `raised` for the header, so the lid
+  reads as the same object catching more light rather than a second block.
+
+### Two defects found on the way, one of them an hour old
+- **The streaming shimmer made code invisible.** `.streaming` sets
+  `background-clip: text` with `color: transparent`, and every descendant
+  inherits it — so a fenced block inside a *still-arriving* reply rendered
+  transparent, clipped to the container's gradient. Shipped in the retheme
+  commit and visible only while watching a reply containing code arrive.
+  Mutation-checked: removing the exemption fails exactly its own test.
+- **`[&_a]:text-sky-400` — the eighth restatement of the palette**, sitting in
+  this file through an entire retheme. After the green change it was both
+  off-palette and near the accent's own hue. **There was no test for
+  `Markdown.tsx` at all**, which is exactly how it survived; there is one now,
+  and it fails on any raw Tailwind colour rather than only on that one.
+
+### The highlighter, and what it actually cost
+`rehype-highlight` into the `rehypePlugins` slot beside the `remarkGfm` already
+configured. **First npm dependency added in a while**, and the reasoning is
+specific rather than general: a hand-rolled highlighter's failure mode is code
+that reads *wrong* — a mangled regex literal, a nested string closing early —
+where the hand-rolled HTML parser this project already accepted fails only by
+being ugly.
+
+**It cost 363KB, not the 40-60KB estimated, and the estimate was wrong for a
+reason worth recording.** `subset` narrows *detection*, not the bundle:
+`rehype-highlight` does `import {common} from 'lowlight'` at module scope, so
+all thirty-seven languages compile in whatever options are passed. 551KB →
+**914KB**. Getting it back would mean writing the plugin against
+`createLowlight` directly and owning `no-highlight`, nested code and prefixes —
+not a trade worth making for a bundle read off local disk, but the number is
+stated rather than smoothed over.
+
+What `subset` does buy is predictable guessing: an untagged fence of prose or a
+stack trace will not be confidently coloured as Perl.
+
+### The theme is the palette's own rule, applied to syntax
+`highlight.js` themes ship a full colour scheme and assume their own
+background. Dropping one in would put eight hues in the one place where colour
+is otherwise load-bearing. So the `hljs-*` mapping is deliberately narrow —
+**keywords take `accent`, strings take `ok`, a deletion takes `bad`, and
+everything else is the neutral ramp**, with names the eye scans for given
+weight instead of a fourth hue. Two tests hold it: no raw hex anywhere in the
+block, and at most three saturated tokens.
+
+**170 renderer tests (+12), 1312 sidecar, ruff, mypy, typecheck and the build
+all clean.** Not yet looked at on screen — the theme is the part most likely to
+need a second pass, since some `hljs` classes now share a colour and whether
+that reads as restrained or as broken is only visible there.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

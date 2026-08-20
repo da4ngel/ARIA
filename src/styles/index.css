@@ -129,6 +129,69 @@ textarea {
     color: transparent;
   }
 
+  /* **Code is exempt, and this was a real bug for an hour.**
+     `background-clip: text` with a transparent colour is inherited by every
+     descendant, so a fenced block inside a streaming reply rendered
+     transparent — clipped to the *container's* gradient rather than drawn.
+     Invisible unless you happened to watch a reply containing code arrive. */
+  .streaming pre,
+  .streaming code,
+  .streaming pre *,
+  .streaming code * {
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: inherit;
+  }
+  .streaming pre {
+    color: theme('colors.aria.dim');
+  }
+
+  /* Syntax highlighting, on this palette rather than a stock theme.
+     `highlight.js` themes ship a full colour scheme and assume their own
+     background; dropping one in would put eight hues in the one place where
+     colour is otherwise load-bearing.
+     So this is deliberately narrow. Only three things carry colour —
+     keywords, strings, and comments receding — and everything else is the
+     neutral ramp. The rule the palette states about itself holds here too:
+     saturation means something. */
+  .hljs {
+    color: theme('colors.aria.dim');
+  }
+  .hljs-comment,
+  .hljs-quote {
+    color: theme('colors.aria.faint');
+    font-style: italic;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-built_in,
+  .hljs-name {
+    color: theme('colors.aria.accent');
+  }
+  .hljs-string,
+  .hljs-attr,
+  .hljs-symbol,
+  .hljs-addition,
+  .hljs-regexp {
+    color: theme('colors.aria.ok');
+  }
+  /* Names the reader scans for — a function being defined, a variable being
+     bound — get weight rather than a fourth hue. */
+  .hljs-title,
+  .hljs-section,
+  .hljs-type,
+  .hljs-number {
+    color: theme('colors.aria.text');
+  }
+  .hljs-deletion {
+    color: theme('colors.aria.bad');
+  }
+  .hljs-meta {
+    color: theme('colors.aria.muted');
+  }
+
   /* Rows and buttons that respond to the pointer. */
   .interactive {
     /* 120ms — `DURATION.hover` in `src/styles/motion.ts`, which did not have
