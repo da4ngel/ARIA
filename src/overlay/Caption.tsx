@@ -7,9 +7,9 @@
  * Anything more belongs in the window, which is one keypress away.
  */
 
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 
-import { SPRING } from '@/styles/motion'
+import { SPRING, still } from '@/styles/motion'
 
 interface Props {
   /** What the sidecar heard. Empty until a turn starts. */
@@ -22,6 +22,7 @@ interface Props {
 }
 
 export function Caption({ asked, reply, misheard }: Props): JSX.Element {
+  const reduced = useReducedMotion()
   const showing = Boolean(asked || reply || misheard)
 
   return (
@@ -34,7 +35,7 @@ export function Caption({ asked, reply, misheard }: Props): JSX.Element {
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 10 }}
-          transition={SPRING.settle}
+          transition={still(SPRING.settle, reduced)}
         >
           {/* Text follows the palette; the background deliberately does not.
               This card floats over an arbitrary desktop, not over the app's

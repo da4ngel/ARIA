@@ -7,7 +7,10 @@
  * away or Escape to close, `glass-pop` sheet, `animate-rise`.
  */
 
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useRef, useState } from 'react'
+
+import { TWEEN, still } from '@/styles/motion'
 
 import type { ConversationMode } from '@/hooks/useConversationMode'
 import { MODE_OPTIONS } from '@/hooks/useConversationMode'
@@ -37,6 +40,7 @@ export function ModeSelector({
   onDismissSuggestion: () => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
+  const reduced = useReducedMotion()
   const root = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -84,25 +88,35 @@ export function ModeSelector({
         <span aria-hidden>▾</span>
       </button>
 
-      {open && (
-        <div className="glass-pop absolute bottom-full left-0 z-20 mb-1.5 w-64 overflow-hidden rounded-xl p-1.5 animate-rise">
-          {MODE_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => choose(option.value)}
-              className={`interactive block w-full rounded-lg px-2 py-1.5 text-left ${
-                option.value === mode ? 'bg-white/10' : ''
-              }`}
+      {/* An exit, which it never had — the sheet used to vanish between
+          frames, which reads as a glitch rather than as closing. */}
+      <AnimatePresence>
+          {open && (
+            <motion.div
+              initial={{ opacity: 0, y: 4, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 2, scale: 0.99 }}
+              transition={still(TWEEN.rise, reduced)}
+              className="glass-pop absolute bottom-full left-0 z-20 mb-1.5 w-64 overflow-hidden rounded-xl p-1.5"
             >
-              <span className="block text-tiny text-aria-text">{option.label}</span>
-              <span className="block text-micro leading-relaxed text-aria-faint">
-                {option.hint}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+              {MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => choose(option.value)}
+                  className={`interactive block w-full rounded-lg px-2 py-1.5 text-left ${
+                    option.value === mode ? 'bg-white/10' : ''
+                  }`}
+                >
+                  <span className="block text-tiny text-aria-text">{option.label}</span>
+                  <span className="block text-micro leading-relaxed text-aria-faint">
+                    {option.hint}
+                  </span>
+                </button>
+              ))}
+            </motion.div>
+          )}
+      </AnimatePresence>
 
       {/* "On" is not the same as "working" — the same distinction
           `settings.online` already draws. Research with the web switched off

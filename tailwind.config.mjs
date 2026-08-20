@@ -107,6 +107,8 @@ export default {
       animation: {
         rise: 'rise 160ms cubic-bezier(0.2, 0.8, 0.2, 1)',
         caret: 'caret 1.1s ease-in-out infinite',
+      shimmer: 'shimmer 2.4s linear infinite',
+      ring: 'ring 140ms cubic-bezier(0.2, 0.8, 0.2, 1)',
       },
     },
   },

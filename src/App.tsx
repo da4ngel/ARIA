@@ -383,7 +383,10 @@ export default function App(): JSX.Element {
               the exception: when the window is expanded it is already a
               permanent column, so opening it again would be a sheet over a
               copy of itself. */}
-          <AnimatePresence>
+          {/* `mode="wait"`: without it, switching panel A to B crossfades
+              both at once and you briefly see two sheets stacked. One
+              leaves, then the next arrives. */}
+            <AnimatePresence mode="wait">
             {overlay === 'history' && !chatsInMenu && (
               <HistoryPanel
                 key="history"

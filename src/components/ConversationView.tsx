@@ -9,6 +9,8 @@
 
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { ReactNode } from 'react'
+
+import { SPRING, TWEEN, still as stillMotion } from '@/styles/motion'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Markdown } from '@/components/Markdown'
@@ -176,7 +178,7 @@ function AssistantTurn({
           {state === 'thinking' ? 'Thinking…' : 'Working…'}
         </p>
       ) : waiting ? null : (
-        <div className="text-body">
+        <div className={`text-body ${turn.streaming ? 'streaming' : ''}`}>
           <Markdown text={turn.content} />
           {turn.streaming && (
             <span
@@ -293,14 +295,22 @@ export function ConversationView({
               key={turn.id}
               initial={still ? false : { opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+              transition={stillMotion(SPRING.arrive, still)}
             >
               <UserTurn turn={turn} />
             </motion.div>
           ) : (
-            <div key={turn.id}>
+            // It used to be a bare div: a user message sprang in and the reply
+            // it belongs to just appeared. Softer than the user's spring — the
+            // reply is the thing being read, not the thing being sent.
+            <motion.div
+              key={turn.id}
+              initial={still ? false : { opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={stillMotion(TWEEN.base, still)}
+            >
               <AssistantTurn turn={turn} state={state} onRate={onRate} />
-            </div>
+            </motion.div>
           ),
         )}
         {question}
@@ -310,9 +320,10 @@ export function ConversationView({
         {!following && (
           <motion.button
             type="button"
-            initial={{ opacity: 0, y: 4 }}
+            initial={still ? false : { opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 4 }}
+            transition={stillMotion(TWEEN.fast, still)}
             onClick={() => {
               setFollowing(true)
               scrollToEnd()

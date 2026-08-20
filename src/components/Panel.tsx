@@ -10,9 +10,9 @@
  * click, and where the close button is.
  */
 
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 
-import { TWEEN } from '@/styles/motion'
+import { TWEEN, still } from '@/styles/motion'
 import { useEffect, useRef } from 'react'
 
 export function Panel({
@@ -26,6 +26,7 @@ export function Panel({
   children: React.ReactNode
   width?: string
 }): JSX.Element {
+  const reduced = useReducedMotion()
   const sheet = useRef<HTMLDivElement>(null)
 
   // App.tsx owns Escape globally so it can decide what is on top; this only
@@ -40,7 +41,7 @@ export function Panel({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.14 }}
+      transition={still(TWEEN.fast, reduced)}
       className="absolute inset-0 z-30 flex items-center justify-center p-4"
       // A click on the backdrop closes; a click on the sheet must not bubble
       // back out and close it again.
@@ -59,7 +60,7 @@ export function Panel({
         initial={{ opacity: 0, y: 8, scale: 0.985 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 4, scale: 0.99 }}
-        transition={TWEEN.emphasis}
+        transition={still(TWEEN.emphasis, reduced)}
         className={`glass-pop sheen relative flex max-h-full w-full flex-col overflow-hidden rounded-2xl outline-none ${width}`}
       >
         <header className="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-3">

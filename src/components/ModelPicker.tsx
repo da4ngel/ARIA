@@ -6,7 +6,10 @@
  * own, so the tooltip and the router can never disagree.
  */
 
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useEffect, useRef, useState } from 'react'
+
+import { TWEEN, still } from '@/styles/motion'
 
 import { SMART_ID, type UseModels } from '@/hooks/useModels'
 import type { ModelAvailability, RoutingBias } from '@/types/bridge'
@@ -144,6 +147,7 @@ function Row({ entry, selected, onSelect, onHover }: RowProps): JSX.Element {
 
 export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
   const [open, setOpen] = useState(false)
+  const reduced = useReducedMotion()
   const [hovered, setHovered] = useState<string | null>(null)
   // Folded by default, per provider. The measured models are the answer to
   // "which should I use"; the rest is a catalogue.
@@ -188,14 +192,21 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
         <span aria-hidden>▾</span>
       </button>
 
+      {/* An exit, which it never had — the sheet used to vanish between
+          frames, which reads as a glitch rather than as closing. */}
+      <AnimatePresence>
       {open && (
-        <div
+        <motion.div
+          initial={{ opacity: 0, y: 4, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 2, scale: 0.99 }}
+          transition={still(TWEEN.rise, reduced)}
           onMouseLeave={() => setHovered(null)}
           // Taller than it was. Measured on screen with the catalog listing 50
           // models: at 24rem the Smart block and the detail sheet left about
           // 100px for the list itself, which is four rows of fifty. Capped
           // against the viewport so the compact window cannot overflow.
-          className="glass-pop absolute right-0 z-20 mt-1.5 flex max-h-[min(32rem,78vh)] w-72 flex-col overflow-hidden rounded-xl animate-rise"
+          className="glass-pop absolute right-0 z-20 mt-1.5 flex max-h-[min(32rem,78vh)] w-72 flex-col overflow-hidden rounded-xl"
         >
           <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {/* Smart, pinned. */}
@@ -328,8 +339,9 @@ export function ModelPicker({ models }: { models: UseModels }): JSX.Element {
           </div>
 
           {detail && <DetailSheet entry={detail} />}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   )
 }

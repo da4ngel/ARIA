@@ -3003,6 +3003,109 @@ address? +1"* says more than *"2 items"*. The body lays a list out as lines,
 falling back to JSON for anything unrecognised, because showing something beats
 showing nothing.
 
+## Dark green, and the motion system that was never plugged in (2026-08-20)
+    npm test && npm run typecheck && npx electron-vite build
+
+Eyaas: *"i asked u to change the entire ui color, its currently somewhat blue,
+can u make it dark green kinda nice cool looking vibe, decent and professional
+and give more ui animations."*
+
+**Surfaces go green; nothing that *means* something moves.** `void` →
+`#050a08`, `glass` → `rgba(9, 18, 14, 0.62)`, `pop` → `rgba(12, 24, 19, 0.82)`,
+and the four-step neutral ramp re-cut in green-grey. `panel`/`raised`/`sunk`/
+`rim` are white and black washes and stay exactly as they were — they are light
+and shadow, not colour. **Values only**, so `tailwind.config.mjs` (which maps
+`aria: COLORS` wholesale) and every `bg-aria-*` in the app needed no edit. That
+is what makes a recolour here cheap, and it held.
+
+**The accent stays `#6d8cff`, and that is the whole reason the rest could go
+green.** Confirmed with Eyaas before starting. `tokens.test.ts` asserts the
+accent sits ≥20° of hue from every saturated state — it exists because the old
+cyan accent sat 7° from `listening` and the two were indistinguishable. `ok`
+and `speaking` are `#57d38a`, green, at hue ~145. A green accent lands on top
+of "that worked" and "she is speaking". Deep green against a cool blue is also
+just a better pairing than green on green.
+
+Measured before writing anything, because the contrast floors are checked
+against `over(glass, void)` and **both** ends moved:
+
+| | contrast | floor |
+|---|---|---|
+| `text` `#ecf3ef` | 17.21 | 7 |
+| `dim` `#b3c5ba` | 10.73 | 4.5 |
+| `muted` `#889b90` | 6.59 | 4.5 |
+| `faint` `#5f7067` | 3.69 | 3 |
+| `accent` (unchanged) | 6.32 | 3 |
+
+The canvases got **nothing**, deliberately: they read only `listening` and
+`speaking`, neither of which moved, and CLAUDE.md is explicit that changing
+their geometry to make them prettier is how their bug history repeats.
+
+### The tray icons had been a whole retheme behind for days
+Not part of the request. `scripts/make_tray_icons.py` carried a hand-typed copy
+of the palette — `#4ade80/#fbbf24/#f87171`, the **Tailwind 400s from before the
+last recolour** — and pointed at `tailwind.config.js`, a file that no longer
+exists. The base64 PNGs in `electron/tray.ts` still had those pixels.
+
+This is the *"palette restated in six places"* bug from two days ago, still
+live in a seventh — and it survived because the tray is the one surface with no
+test and no screenshot. The script **parses `tokens.js`** now instead of
+restating it, and `src/styles/tray.test.ts` inflates the embedded PNGs and
+compares their centre pixel to `COLORS.ok/warn/bad`. One test also names the
+stale hexes explicitly, because "it matches the tokens" would pass just as well
+if somebody changed the tokens back.
+
+### `still()` was dead code, and its type signature says why
+`src/styles/motion.ts` has defined `DURATION`, `EASE`, `SPRING`, `TWEEN` and
+`still()` since the last retheme. **`still()` had never been imported
+anywhere**, and only 3 of about 12 framer call sites used the tokens at all.
+
+The likely reason is in the signature: it took `reduced: boolean`, and
+`useReducedMotion()` returns `boolean | null`. **Every call site would have
+been a type error.** Widened, and now wired through ten components.
+
+Several inline numbers turned out to be near-misses of tokens that already
+existed — `ConfirmDialog`'s `320/28` against `SPRING.settle`'s `320/30`,
+`Panel`'s `0.14` written out instead of `TWEEN.fast`. The tokens also gained
+the numbers the call sites had proved were needed and nobody had named:
+`DURATION.hover` (120, the `.interactive` transition), `DURATION.rise` (160,
+`animate-rise`), `DURATION.colour` (300, the orb's documented wake-word path),
+`SPRING.reactive` (700/30, duplicated in `Orb` and `HandsFreeToggle`),
+`SPRING.arrive` (420/34) and a `stagger()` scale replacing `EmptyState`'s
+hand-written `0.12`/`0.2`.
+
+### What now moves that did not
+- **`ToolCallCard` expands.** It was a bare `{open && …}` and a `▾`/`▸` glyph
+  swap; the body height-animates and one chevron rotates. A swap reads as a
+  flicker at that size.
+- **Both popovers have an exit.** `ModeSelector` and `ModelPicker` entered with
+  `animate-rise` and then *vanished* between frames.
+- **Assistant turns have an entrance.** Only user turns animated before, so a
+  message sprang in and the reply it belonged to simply appeared. Softer than
+  the user's spring — the reply is the thing being read, not sent.
+- **Attachment chips** arrive and leave instead of popping.
+- **Panels switch with `mode="wait"`.** Without it, A→B crossfades both at once
+  and you briefly see two stacked sheets.
+- **Streaming text shimmers** — a slow light along it, so a long reply reads as
+  being written rather than stalled. CSS `background-clip: text` on a gradient:
+  one composited layer, no JavaScript, because this runs beside Whisper, Kokoro
+  and a 7B model.
+- **The focus ring arrives** rather than snapping on.
+- **The jump-to-latest pill honours reduced motion**, which it never did — the
+  one leak in `ConversationView`, and the CSS blanket does not cover framer's
+  JS-driven values.
+
+**158 renderer tests (+14), 1312 sidecar, ruff, mypy, typecheck and the
+renderer build all clean.** The build is not optional here: the blank-window
+incident passed typecheck and the whole suite, and only `electron-vite build`
+named it.
+
+**Not yet looked at on screen** — the neutral ramp is the part most likely to
+need a second pass, and the case that decides it is the window over a bright
+white editor, which is what the 0.62 alpha was chosen for. If the green tint
+costs readability, readability wins and the alpha goes up, exactly as the
+token's own comment pre-commits.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,

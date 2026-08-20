@@ -1,6 +1,9 @@
 /** Text input. Enter sends, Shift+Enter newlines, Esc cancels a live turn. */
 
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+
+import { TWEEN, still } from '@/styles/motion'
 
 interface Props {
   busy: boolean
@@ -50,6 +53,7 @@ export function ComposerBar({
   // Absolute paths, never file contents. The renderer has no filesystem
   // access by design (see `electron/preload.ts`) — Electron's own picker
   // hands back where the files are, and the sidecar opens them.
+  const reduced = useReducedMotion()
   const [attached, setAttached] = useState<string[]>([])
   const [dragging, setDragging] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
@@ -138,9 +142,15 @@ export function ComposerBar({
           not enough to notice you attached the wrong thing before sending
           it to a cloud vision model. */}
       {attached.length > 0 && (
-        <ul className="flex flex-wrap gap-1 pr-1 pt-0.5">
+        <motion.ul layout className="flex flex-wrap gap-1 pr-1 pt-0.5">
+          <AnimatePresence initial={false}>
           {attached.map((path) => (
-            <li
+            <motion.li
+              layout
+              initial={reduced ? false : { opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={still(TWEEN.fast, reduced)}
               key={path}
               className="flex max-w-full items-center gap-1 rounded-md bg-aria-sunk px-1.5 py-0.5 text-micro text-aria-muted"
             >
@@ -155,9 +165,10 @@ export function ComposerBar({
               >
                 ×
               </button>
-            </li>
+            </motion.li>
           ))}
-        </ul>
+          </AnimatePresence>
+        </motion.ul>
       )}
 
       <div className="flex items-end gap-1.5">

@@ -37,9 +37,10 @@ export function hexToRgb(hex) {
 
 export const COLORS = {
   // Ground. The window is transparent; this is what shows through where
-  // acrylic cannot. Neutral and dark — the fallback should read as absence,
-  // not as navy.
-  void: '#060709',
+  // acrylic cannot. **Dark green, and only just** — the fallback should read
+  // as absence, not as a colour. The old note said "not as navy"; the same
+  // trap in green is a ground that reads as a felt table.
+  void: '#050a08',
 
   // Layered glass. Alpha carries the depth, so these compose over the acrylic
   // backdrop and over each other without extra borders.
@@ -51,7 +52,7 @@ export const COLORS = {
   // desaturated, so the acrylic's own colour shows through instead of
   // fighting a blue tint. If it ever fights readability, readability wins and
   // it goes back up.
-  glass: 'rgba(12, 14, 19, 0.62)',
+  glass: 'rgba(9, 18, 14, 0.62)',
 
   // Docked chrome — the navigation rail. Lifted off the panel by a white wash
   // rather than tinted darker, so it reads as nearer the viewer than the
@@ -62,7 +63,7 @@ export const COLORS = {
   // Floating sheets. Denser than the panel behind them — a sheet sharing its
   // backdrop's alpha reads as a hole in the window. These hold forms and
   // dense text, so they stay the most opaque surface.
-  pop: 'rgba(16, 19, 25, 0.82)',
+  pop: 'rgba(12, 24, 19, 0.82)',
 
   raised: 'rgba(255, 255, 255, 0.055)',
   sunk: 'rgba(0, 0, 0, 0.30)',
@@ -76,10 +77,10 @@ export const COLORS = {
   // fell two notches and the hierarchy read flat. `dim` is the missing step:
   // what a paragraph inside a panel should be, where before it was either
   // full `text` (too loud everywhere) or `muted` (too quiet to read).
-  text: '#eef1f7',
-  dim: '#b6bdcc',
-  muted: '#8b93a4',
-  faint: '#616878',
+  text: '#ecf3ef',
+  dim: '#b3c5ba',
+  muted: '#889b90',
+  faint: '#5f7067',
 
   // **Focus rings and selection only. Nothing else may use this.**
   //

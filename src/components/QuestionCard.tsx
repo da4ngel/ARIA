@@ -15,7 +15,9 @@
  * buttons would mean nothing.
  */
 
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+
+import { TWEEN, still } from '@/styles/motion'
 import { useCallback, useState } from 'react'
 
 import type { AskedQuestion, GivenAnswer, PendingAsk } from '@/hooks/useAskQuestion'
@@ -65,6 +67,7 @@ export function QuestionCard({
   onAnswer: (given: GivenAnswer) => void
   onDismiss: () => void
 }): JSX.Element | null {
+  const reduced = useReducedMotion()
   const [multi, setMulti] = useState<string[]>([])
   const [other, setOther] = useState('')
   const [typing, setTyping] = useState(false)
@@ -107,7 +110,7 @@ export function QuestionCard({
       key={`${pending.request_id}:${index}`}
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
+      transition={still(TWEEN.rise, reduced)}
       className="raised rim my-1.5 rounded-xl p-2.5"
     >
       <div className="mb-1.5 flex items-baseline justify-between gap-2">

@@ -15,7 +15,9 @@
  *   without seeing which file is not consent to anything.
  */
 
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+
+import { SPRING, still } from '@/styles/motion'
 import { useEffect, useState } from 'react'
 
 /** A batch of file moves, worked out before the user is asked about it.
@@ -200,6 +202,7 @@ const TIER_LABEL: Record<number, string> = {
 }
 
 export function ConfirmDialog({ request, onRespond }: Props): JSX.Element {
+  const reduced = useReducedMotion()
   const [confirmation, setConfirmation] = useState('')
 
   // A fresh request must never inherit the last one's typing.
@@ -239,7 +242,7 @@ export function ConfirmDialog({ request, onRespond }: Props): JSX.Element {
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.99 }}
-            transition={{ type: 'spring', stiffness: 320, damping: 28 }}
+            transition={still(SPRING.settle, reduced)}
           >
             <div className="flex items-center gap-2">
               <span

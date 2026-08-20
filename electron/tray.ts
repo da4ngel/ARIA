@@ -40,12 +40,16 @@ const STATUS_LABEL: Record<BrainStatus, string> = {
  * icon working identically in dev and in the packaged app, where that directory
  * moves.
  *
- * Regenerate with scripts/make_tray_icons.py if the palette changes.
+ * Regenerate with scripts/make_tray_icons.py if the palette changes — the
+ * script reads `src/styles/tokens.js` itself now, and `tray.test.ts` decodes
+ * these pixels back and fails if they have drifted. Both exist because this
+ * file sat a whole retheme behind for days: the tray was the only surface
+ * with no test and no screenshot, so nothing said so.
  */
 const ICON_PNG: Record<'ok' | 'warn' | 'bad', string> = {
-  ok: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAsUlEQVR42u2X0Q2AIAwFGYV5nIIRGMFNGIVNXKEjICaYEBKkwTatho/7Ico7QoVqtmM3kpgl8DUBm/GZmIFMKkAZ8+UZcoFr0lAFjghYEUy4a1aLBcq7rwTcRHCLmxWgCB9KPO05EApAryZ6AoEwvC5MlIBlCL+xGAHPKOAxApFRIGIEgFEAMAKJGf0C4lsgXoTin6H4QSR+FKu4jMSvYxUNiYqWTEVTqqItX39G/xU4Af7VYrmYWVqIAAAAAElFTkSuQmCC',
-  warn: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAArklEQVR42u2XwQ2AIAxFGYWDgzFCN2IURuoAHhATTAgJ0mCbVuPhXYjyH6FCdXvanCbuF3ibgC9AIRWwkCtYx6A+wy5wThqbwBmRKkIJD91qqWB995FAWAjuCasCHOFTibs9R0YBHNXESCAyhreFSRLwAuEXniIAggJAEUiCAokigIICSBHIwtgXUN8C9SJU/wzVDyL1o9jEZaR+HZtoSEy0ZCaaUhNt+f9n9F2BA4UyOsg+wFQsAAAAAElFTkSuQmCC',
-  bad: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAArUlEQVR42u2XwQ2AIAxFGYXRGAEmYhRG6tUbYoIJIUEabNNqOLwLUf4jVKjmCMFIYrbA1wRswRdSAQq5AnXM12fIBa5JYxM4I2JFMOGuWy0WqO++EnALwT1uVYAifCrxtOdAKACjmhgJRMLwtjBRApYh/MZiBDyjgMcIJEaBhBEARgHACGRm9AuIb4F4EYp/huIHkfhRrOIyEr+OVTQkKloyFU2pirZ8/xn9V+AENZQqyAFzoywAAAAASUVORK5CYII=',
+  ok: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAsElEQVR42u2XwQ2AIAxFGYWtvDICc7gEozCEg3QExAQTQoI02KbVcHgXovxHqFDNduxGErMEviZgMz4TM5BJBShjvjxDLnBNGqrAEQErggl3zWqxQHn3lYCbCG5xswIU4UOJpz0HQgHo1URPIBCG14WJErAM4TcWI+AZBTxGIDIKRIwAMAoARiAxo19AfAvEi1D8MxQ/iMSPYhWXkfh1rKIhUdGSqWhKVbTl68/ovwInOZGSuRyanTgAAAAASUVORK5CYII=',
+  warn: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAsElEQVR42u2XwQ2AIAxFGYVBHIYR2IgdXIB1vHUExAQTQoI02KbVcHgXovxHqFDNsW9GErMEviZgMz4TM5BJBShjvjxDLnBNGqrAEQErggl3zWqxQHn3lYCbCG5xswIU4UOJpz0HQgHo1URPIBCG14WJErAM4TcWI+AZBTxGIDIKRIwAMAoARiAxo19AfAvEi1D8MxQ/iMSPYhWXkfh1rKIhUdGSqWhKVbTl68/ovwInugUayGF+IpYAAAAASUVORK5CYII=',
+  bad: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAArklEQVR42u2XYQqAIAxGPYpH8wQhdCCP4pHWDczAQARz2MZW+OP9kfJ74tJljn0zkpgl8DUBm/GZmIFMKkAZ8+UZcoFr0lAFjghYEUy4a1aLBcq7rwTcRHCLmxWgCB9KPO05EApAryZ6AoEwvC5MlIBlCL+xGAHPKOAxApFRIGIEgFEAMAKJGf0C4lsgXoTin6H4QSR+FKu4jMSvYxUNiYqWTEVTqqItX39G/xU4Ab6HBsixgmo0AAAAAElFTkSuQmCC',
 }
 
 function statusIcon(status: BrainStatus): Electron.NativeImage {

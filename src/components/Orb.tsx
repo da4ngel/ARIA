@@ -16,7 +16,7 @@
 import { motion, useReducedMotion } from 'framer-motion'
 
 import type { AssistantState } from '@/types/bridge'
-import { SPRING } from '@/styles/motion'
+import { SPRING, still } from '@/styles/motion'
 import { COLORS, HUES } from '@/styles/tokens'
 
 export const ORB_LAYOUT_ID = 'aria-orb'
@@ -61,14 +61,14 @@ export function Orb({
   shared = true,
   level = 0,
 }: OrbProps): JSX.Element {
-  const still = useReducedMotion()
+  const reduced = useReducedMotion()
   const hue = connected ? HUE[state] : COLORS.faint
   const breath = BREATH[state]
-  const spin = SPINS.has(state) && connected && !still
+  const spin = SPINS.has(state) && connected && !reduced
 
   // Capped well below the breath's own swell: this is a voice showing through
   // the animation, not a level meter competing with it.
-  const reactive = still || !connected ? 0 : Math.min(1, Math.max(0, level))
+  const reactive = reduced || !connected ? 0 : Math.min(1, Math.max(0, level))
   const voiced = state === 'listening' || state === 'speaking'
   const swell = voiced ? 1 + reactive * 0.18 : 1
 
@@ -91,7 +91,7 @@ export function Orb({
           background: `radial-gradient(circle, ${hue}55 0%, ${hue}00 68%)`,
         }}
         animate={
-          still
+          reduced
             ? { opacity: 0.5 }
             : { scale: [1, breath.swell, 1], opacity: [0.35, 0.72, 0.35] }
         }
@@ -117,7 +117,7 @@ export function Orb({
         animate={{ opacity: connected ? 1 : 0.45, scale: swell }}
         // Stiff and lightly damped: a voice's envelope moves in tens of
         // milliseconds, and a slow spring would smear syllables into a hum.
-        transition={{ type: 'spring', stiffness: 700, damping: 30 }}
+        transition={still(SPRING.reactive, reduced)}
       />
 
       {/* Rim — a thin arc that turns only while she is working, which is the

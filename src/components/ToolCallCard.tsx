@@ -11,7 +11,10 @@
  * payload are a click away for when something looks wrong.
  */
 
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useState } from 'react'
+
+import { TWEEN, still } from '@/styles/motion'
 
 import type { ToolCall } from '@/hooks/useConversation'
 
@@ -25,6 +28,7 @@ export function ToolCallCard({
   chained?: boolean
 }): JSX.Element {
   const [open, setOpen] = useState(false)
+  const reduced = useReducedMotion()
   const args = Object.entries(call.args)
 
   return (
@@ -59,13 +63,28 @@ export function ToolCallCard({
         <span className="shrink-0 font-mono tabular-nums text-aria-faint">
           {call.state === 'running' ? <Waiting /> : formatDuration(call.durationMs)}
         </span>
-        <span className="shrink-0 text-aria-faint" aria-hidden>
-          {open ? '▾' : '▸'}
-        </span>
+        {/* One glyph that turns, rather than two that swap. A swap reads as
+            a flicker at this size; a rotation reads as the thing opening. */}
+        <motion.span
+          className="shrink-0 text-aria-faint"
+          aria-hidden
+          animate={{ rotate: open ? 90 : 0 }}
+          transition={still(TWEEN.fast, reduced)}
+        >
+          ▸
+        </motion.span>
       </button>
 
-      {open && (
-        <div className="border-t border-white/5 px-2 py-1.5">
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={still(TWEEN.fast, reduced)}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-white/5 px-2 py-1.5">
           {args.length > 0 && (
             <dl className="space-y-0.5">
               {args.map(([key, value]) => (
@@ -78,17 +97,19 @@ export function ToolCallCard({
               ))}
             </dl>
           )}
-          {call.summary && (
-            <p
-              className={`mt-1.5 whitespace-pre-wrap ${
-                call.state === 'failed' ? 'text-aria-bad' : 'text-aria-muted'
-              }`}
-            >
-              {call.summary}
-            </p>
-          )}
-        </div>
-      )}
+            {call.summary && (
+              <p
+                className={`mt-1.5 whitespace-pre-wrap ${
+                  call.state === 'failed' ? 'text-aria-bad' : 'text-aria-muted'
+                }`}
+              >
+                {call.summary}
+              </p>
+            )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

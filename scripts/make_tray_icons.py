@@ -16,19 +16,42 @@ requirements.txt.
 from __future__ import annotations
 
 import base64
+import re
 import struct
 import zlib
+from pathlib import Path
 
 SIZE = 32
 RADIUS = 12.0
 SAMPLES = 4  # supersampling per axis, for a smooth edge
 
-# Must match theme.extend.colors.aria in tailwind.config.js.
-COLORS: dict[str, tuple[int, int, int]] = {
-    "ok": (0x4A, 0xDE, 0x80),
-    "warn": (0xFB, 0xBF, 0x24),
-    "bad": (0xF8, 0x71, 0x71),
-}
+# **Read from `src/styles/tokens.js`, not typed out again.**
+#
+# This was a hand-written copy pointing at `tailwind.config.js` — a file that
+# no longer exists — and it sat a whole retheme behind: `#4ade80/#fbbf24/
+# #f87171`, the Tailwind 400s from before the palette moved to measured values.
+# The tray had been the wrong colour ever since, and nothing said so, because
+# it is the one surface no test and no screenshot covers.
+#
+# That is the same "the palette was restated in six places" bug this project
+# already fixed once, still live in a seventh. Parsing the token file is ugly
+# and it is the only thing that cannot drift.
+_TOKENS = Path(__file__).resolve().parent.parent / "src" / "styles" / "tokens.js"
+
+
+def _palette() -> dict[str, tuple[int, int, int]]:
+    source = _TOKENS.read_text(encoding="utf-8")
+    found: dict[str, tuple[int, int, int]] = {}
+    for name in ("ok", "warn", "bad"):
+        match = re.search(rf"^\s+{name}:\s*'#([0-9a-fA-F]{{6}})'", source, re.MULTILINE)
+        if match is None:
+            raise SystemExit(f"No {name!r} in {_TOKENS} — has the palette moved?")
+        value = match.group(1)
+        found[name] = (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+    return found
+
+
+COLORS: dict[str, tuple[int, int, int]] = _palette()
 
 
 def coverage(px: int, py: int) -> float:

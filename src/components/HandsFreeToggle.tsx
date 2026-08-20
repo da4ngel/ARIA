@@ -7,7 +7,9 @@
  * obvious click rather than a hunt through settings.
  */
 
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
+
+import { SPRING, still } from '@/styles/motion'
 
 interface Props {
   available: boolean
@@ -28,6 +30,10 @@ export function HandsFreeToggle({
   disabled,
   onToggle,
 }: Props): JSX.Element | null {
+  // Before the early return: hooks cannot run conditionally, and this
+  // component returns null when the wake-word weights are missing.
+  const reduced = useReducedMotion()
+
   // Absent weights: no control at all rather than one that cannot work. The
   // sidecar logs what to run, and push-to-talk is unaffected.
   if (!available) return null
@@ -55,7 +61,7 @@ export function HandsFreeToggle({
             aria-hidden
             className="absolute inset-0 rounded-full bg-aria-listening/40"
             animate={{ scale: 1 + Math.min(1, level) * 1.4, opacity: 0.55 - level * 0.3 }}
-            transition={{ type: 'spring', stiffness: 700, damping: 30 }}
+            transition={still(SPRING.reactive, reduced)}
           />
         )}
         <svg
