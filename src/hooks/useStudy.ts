@@ -15,10 +15,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import type { StudyConcept, StudyStart, StudyState, StudySubject } from '@/types/bridge'
+import type {
+  SessionSummary,
+  StudyConcept,
+  StudyStart,
+  StudyState,
+  StudySubject,
+} from '@/types/bridge'
 
 export interface UseStudy {
   subjects: StudySubject[]
+  /** Study chats, most recently active first. Grouped in the panel by the
+   *  subject each last worked on — a record of where a chat got to, not a
+   *  binding, since a study chat may roam. */
+  sessions: SessionSummary[]
   /** The subject currently shown, or null when nothing has ever been studied. */
   state: StudyState | null
   selected: number | null
@@ -49,6 +59,7 @@ export function needsRevision(concepts: StudyConcept[]): StudyConcept[] {
 
 export function useStudy(enabled: boolean): UseStudy {
   const [subjects, setSubjects] = useState<StudySubject[]>([])
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [state, setState] = useState<StudyState | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -61,7 +72,10 @@ export function useStudy(enabled: boolean): UseStudy {
     const ticket = ++latest.current
     setLoading(true)
     try {
-      const list = await window.aria.call<{ subjects: StudySubject[] }>('study.subjects', {})
+      const [list, chats] = await Promise.all([
+        window.aria.call<{ subjects: StudySubject[] }>('study.subjects', {}),
+        window.aria.call<{ sessions: SessionSummary[] }>('study.sessions', {}),
+      ])
       if (ticket !== latest.current) return
 
       // A selected subject that no longer exists means it was just deleted.
@@ -76,7 +90,11 @@ export function useStudy(enabled: boolean): UseStudy {
       })
       if (ticket !== latest.current) return
 
-      setSubjects(list.subjects)
+      setSubjects(list.subjects ?? [])
+      // `?? []` rather than trusting the shape: a panel that throws on an
+      // unexpected payload takes the whole rail section down, and an empty
+      // list is the honest fallback for "nothing came back".
+      setSessions(chats.sessions ?? [])
       setSelected(wanted)
       setState(next.subject ? next : null)
     } catch (cause) {
@@ -161,6 +179,7 @@ export function useStudy(enabled: boolean): UseStudy {
 
   return {
     subjects,
+    sessions,
     state,
     selected,
     select,

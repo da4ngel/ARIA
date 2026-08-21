@@ -9,6 +9,8 @@ sub-modes existed.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from sidecar.core import study_modes
@@ -241,3 +243,35 @@ def test_the_module_exposes_what_the_panel_needs() -> None:
     assert hasattr(study_modes, "POLICIES")
     assert hasattr(study_modes, "parse")
     assert hasattr(study_modes, "policy_for")
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_subject_keeps_the_conversations_about_it(database: Database) -> None:
+    """**`ON DELETE SET NULL`, and the reason it is not a cascade.** Deleting a
+    subject already destroys its map and every answer given against it. It must
+    not also delete the conversations you had while learning it — those are
+    yours, and they are still readable without the map.
+
+    Mutation-checked: making the reference cascade deletes the chat.
+    """
+    subject_id = await study.ensure_subject(database, "Kestrel")
+
+    def _seed(c: sqlite3.Connection) -> None:
+        with c:
+            c.execute(
+                "INSERT INTO sessions (id, started_at, kind, study_subject_id) "
+                "VALUES (?, ?, 'study', ?)",
+                ("s_study", "2026-08-21T00:00:00Z", subject_id),
+            )
+
+    await database.run(_seed)
+    await study.delete_subject(database, subject_id)
+
+    row = await database.run(
+        lambda c: c.execute(
+            "SELECT id, kind, study_subject_id FROM sessions WHERE id = 's_study'"
+        ).fetchone()
+    )
+    assert row is not None, "the conversation must survive its subject"
+    assert row["kind"] == "study"
+    assert row["study_subject_id"] is None

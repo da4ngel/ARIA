@@ -62,6 +62,7 @@ function mockBridge(handler: (method: string, params: Record<string, unknown>) =
 function defaults(concepts: StudyConcept[], overrides: Record<string, unknown> = {}) {
   return (method: string): unknown => {
     if (method === 'study.subjects') return { subjects: [subject()] }
+    if (method === 'study.sessions') return { sessions: [] }
     if (method === 'study.state') return state(concepts)
     if (method === 'study.start') {
       return { session_id: 's_1', sub_mode: 'learn', label: 'Learn', opener: 'Teach me.' }
@@ -74,7 +75,13 @@ const noop = (): void => {}
 
 function panel(props: Partial<Parameters<typeof StudyPanel>[0]> = {}) {
   return (
-    <StudyPanel onClose={noop} onStudy={noop} sessionId="s_1" {...props} />
+    <StudyPanel
+      onClose={noop}
+      onStudy={noop}
+      onNewStudyChat={() => Promise.resolve('s_new')}
+      onOpenSession={noop}
+      {...props}
+    />
   )
 }
 
@@ -100,13 +107,14 @@ describe('the map', () => {
     // names the two things that produce a map.
     mockBridge((method) => {
       if (method === 'study.subjects') return { subjects: [] }
+      if (method === 'study.sessions') return { sessions: [] }
       if (method === 'study.state') return { subject: null, concepts: [] }
       return { ok: true }
     })
 
     render(panel())
 
-    expect(await screen.findByText(/Attach a lecture/i)).toBeDefined()
+    expect(await screen.findByText(/Start a study chat/i)).toBeDefined()
   })
 
   it('separates what is shaky from the rest of the map', async () => {
@@ -131,16 +139,21 @@ describe('the map', () => {
 })
 
 describe('starting a session', () => {
-  it('sets the sub-mode and sends its opener', async () => {
+  it('opens a new study chat and starts it in that sub-mode', async () => {
+    // **A new chat every time, not the one that happens to be open.** A study
+    // session is a conversation; starting one inside yesterday's exam buries
+    // it. The sub-mode lands on the chat the button just created.
     const call = mockBridge(defaults([concept()]))
     const onStudy = vi.fn()
-    render(panel({ onStudy }))
+    const onNewStudyChat = vi.fn(() => Promise.resolve('s_new'))
+    render(panel({ onStudy, onNewStudyChat }))
     await screen.findByText('Information Security')
 
     fireEvent.click(screen.getByText('Exam'))
 
+    await waitFor(() => expect(onNewStudyChat).toHaveBeenCalled())
     await waitFor(() =>
-      expect(call).toHaveBeenCalledWith('study.start', { sub_mode: 'exam', session_id: 's_1' }),
+      expect(call).toHaveBeenCalledWith('study.start', { sub_mode: 'exam', session_id: 's_new' }),
     )
     // The opener the sidecar returned, not one invented here — the panel and
     // `study_modes.py` must not each have their own idea of what Exam says.

@@ -24,6 +24,7 @@ export function ModeSelector({
   onSelect,
   onEnableOnline,
   onDismissSuggestion,
+  onOpenStudyChat,
 }: {
   mode: ConversationMode
   label: string
@@ -34,10 +35,12 @@ export function ModeSelector({
    *  reset to Normal per conversation precisely so one cannot silently shape
    *  an answer, and a mode ARIA switched to itself is that same invisible
    *  shaping arriving faster. */
-  suggestion: { mode: ConversationMode; label: string } | null
+  suggestion: { mode: ConversationMode; label: string; opensChat?: boolean } | null
   onSelect: (next: ConversationMode) => void
   onEnableOnline: () => void
   onDismissSuggestion: () => void
+  /** Taken when the suggestion is one this control cannot perform. */
+  onOpenStudyChat: () => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const reduced = useReducedMotion()
@@ -127,15 +130,23 @@ export function ModeSelector({
           suit better. */}
       {suggestion && !needsOnline && !open && (
         <div className="absolute bottom-full left-0 mb-1 flex items-center gap-1 whitespace-nowrap rounded-md bg-aria-sunk px-1.5 py-0.5 text-micro">
+          {/* **Two offers, one chip.** Study can no longer be switched to —
+              it is a kind of conversation you open — so its suggestion opens
+              one instead of changing this one. `opensChat` is what tells them
+              apart; branching on the mode name would put the same knowledge
+              in two places. */}
           <button
             type="button"
             onClick={() => {
               onDismissSuggestion()
-              choose(suggestion.mode)
+              if (suggestion.opensChat) onOpenStudyChat()
+              else choose(suggestion.mode)
             }}
             className="interactive text-aria-accent"
           >
-            Switch to {suggestion.label}?
+            {suggestion.opensChat
+              ? `Open a ${suggestion.label} chat?`
+              : `Switch to ${suggestion.label}?`}
           </button>
           <button
             type="button"

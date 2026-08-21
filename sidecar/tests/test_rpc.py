@@ -452,13 +452,13 @@ def test_study_subjects_is_empty_before_anything_is_studied(client: TestClient) 
         assert _call(ws, "study.subjects")["result"] == {"subjects": []}
 
 
-def test_study_start_sets_the_mode_and_hands_back_the_opener(client: TestClient) -> None:
+def test_study_start_sets_the_sub_mode_and_hands_back_the_opener(client: TestClient) -> None:
     """**The RPC sets the state and the caller sends the message.** Sending it
     here would be less code and would make the thing that started an exam
     invisible in the transcript — pressing "Exam" is asking to be examined, and
     it belongs there in his own words."""
     with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
-        session_id = _call(ws, "chat.new")["result"]["session_id"]
+        session_id = _call(ws, "chat.new", {"kind": "study"})["result"]["session_id"]
         started = _call(
             ws, "study.start", {"session_id": session_id, "sub_mode": "exam"}, call_id=2
         )["result"]
@@ -474,12 +474,26 @@ def test_an_unknown_sub_mode_lands_on_learn_rather_than_failing_a_click(
     client: TestClient,
 ) -> None:
     with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
-        session_id = _call(ws, "chat.new")["result"]["session_id"]
+        session_id = _call(ws, "chat.new", {"kind": "study"})["result"]["session_id"]
         started = _call(
             ws, "study.start", {"session_id": session_id, "sub_mode": "nonsense"}, call_id=2
         )["result"]
 
     assert started["sub_mode"] == "learn"
+
+
+def test_an_ordinary_chat_cannot_be_turned_into_a_study_one(client: TestClient) -> None:
+    """The second door, refused. Study is opened, never switched on — so both
+    `chat.mode` and `study.start` turn this down."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        session_id = _call(ws, "chat.new")["result"]["session_id"]
+        started = _call(ws, "study.start", {"session_id": session_id}, call_id=2)
+        mode = _call(ws, "chat.mode", {"session_id": session_id, "mode": "study"}, call_id=3)[
+            "result"
+        ]
+
+    assert started["error"]["code"] == ErrorCode.INVALID_PARAMS
+    assert mode["mode"] == "normal", "chat.mode must not smuggle Study in either"
 
 
 def test_the_three_edits_reach_the_database(client: TestClient) -> None:
@@ -549,3 +563,56 @@ def test_a_row_id_that_is_not_a_number_is_named_rather_than_matching_nothing(
         message = _call(ws, "study.forget", {"subject_id": "seven"})
 
     assert message["error"]["code"] == ErrorCode.INVALID_PARAMS
+
+
+def test_study_start_refuses_to_guess_which_conversation_you_meant(client: TestClient) -> None:
+    """**The fallback `chat.mode` still has would be a bug here.**
+
+    With no session id the handler used to fall back to `latest_session_id()`,
+    so a sub-mode picked in a brand new study chat — before its first message,
+    when there is no row yet — was written to *yesterday's* conversation.
+    Cosmetic while modes were scratch state; wrong the moment a study chat is
+    a durable thing you created.
+
+    Mutation-checked: restoring the fallback fails exactly this.
+    """
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        _call(ws, "chat.new")
+        message = _call(ws, "study.start", {"sub_mode": "exam"}, call_id=2)
+
+    assert message["error"]["code"] == ErrorCode.INVALID_PARAMS
+    assert "session_id" in message["error"]["message"]
+
+
+def test_chat_new_can_open_a_study_chat(client: TestClient) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        started = _call(ws, "chat.new", {"kind": "study"})["result"]
+        mode = _call(ws, "chat.mode", {"session_id": started["session_id"]}, call_id=2)["result"]
+
+    assert started["kind"] == "study"
+    assert mode["mode"] == "study", "a study chat is Study before its first message"
+
+
+def test_a_study_chat_is_listed_and_badged(client: TestClient) -> None:
+    """Both places, per Eyaas's answer: badged in Chats and grouped in Study.
+    A *field* on the row rather than a filtered list — `chat.delete` looks a
+    session up through this same list, so narrowing it would 404 its own
+    delete."""
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        started = _call(ws, "chat.new", {"kind": "study"})["result"]
+        _call(ws, "chat.send", {"session_id": started["session_id"], "text": "hi"}, call_id=2)
+        sessions = _call(ws, "chat.sessions", call_id=3)["result"]["sessions"]
+        study = _call(ws, "study.sessions", call_id=4)["result"]["sessions"]
+
+    assert [s["kind"] for s in sessions] == ["study"]
+    assert [s["id"] for s in study] == [started["session_id"]]
+
+
+def test_an_ordinary_chat_is_not_a_study_chat(client: TestClient) -> None:
+    with client.websocket_connect("/rpc", headers=_auth(TOKEN)) as ws:
+        started = _call(ws, "chat.new")["result"]
+        _call(ws, "chat.send", {"session_id": started["session_id"], "text": "hi"}, call_id=2)
+        study = _call(ws, "study.sessions", call_id=3)["result"]["sessions"]
+
+    assert started["kind"] == "chat"
+    assert study == []

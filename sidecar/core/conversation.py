@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from sidecar.core import attachments as attach
 from sidecar.core import context as ctx
 from sidecar.core.agent import LoopState, exhausted_note, repeat_note, silent_reply_note
-from sidecar.core.modes import ModePolicy, policy_for, suggest
+from sidecar.core.modes import ModePolicy, policy_for, suggest, suggests_study_chat
 from sidecar.core.router import (
     RouteDecision,
     Router,
@@ -160,6 +160,10 @@ class ConversationHistory(BaseModel):
 
     session_id: str | None
     messages: list[StoredMessage]
+    #: "chat" or "study". The renderer needs this the moment a conversation is
+    #: reopened, so the composer can offer sub-modes rather than modes — and
+    #: so it never offers to switch a study chat out of Study.
+    kind: str = "chat"
 
 
 class SpeechStream:
@@ -343,6 +347,10 @@ class ConversationService:
         self._rolling_up: set[str] = set()
         # An id handed out by `new_session` that no message has landed in yet.
         self._pending_new: str | None = None
+        #: The kind the reserved session was opened as, held for the window
+        #: between New Chat and the first message — which is the whole time a
+        #: study chat has no row to store it in.
+        self._pending_kind: str = "chat"
         # Roll-up notes are per-session and rebuilt on demand, and deliberately
         # NOT moved into `episodes` by Phase 5. A roll-up is within-session
         # working state; an episode is cross-session memory. Merging them would
@@ -375,6 +383,15 @@ class ConversationService:
         #: last week's exam conditions on today's first question. LEARN is
         #: stored as an absence, the way NORMAL is.
         self._study_submodes: dict[str, StudySubMode] = {}
+        #: Which conversations are study chats. Explicit rather than inferred
+        #: from `_modes`, because the guarantee runs both ways — a study chat
+        #: cannot leave Study *and* a normal one cannot enter it — and reading
+        #: that off a mode dict would only ever catch one direction.
+        #:
+        #: Seeded by `new_session("study")` and by `history()`, which is what
+        #: keeps `mode_for` synchronous on a hot path while the row stays the
+        #: source of truth.
+        self._study_sessions: set[str] = set()
         self._attachment_reads: dict[str, asyncio.Task[list[attach.Attachment]]] = {}
         self._attachments: dict[str, list[attach.Attachment]] = {}
         # Phase 8: the name of the procedure most recently offered via
@@ -418,7 +435,7 @@ class ConversationService:
     def set_routing_bias(self, bias: RoutingBias) -> None:
         self._router.set_bias(bias)
 
-    async def new_session(self) -> str:
+    async def new_session(self, kind: str = "chat") -> str:
         """Start a fresh conversation, without writing anything yet.
 
         Returns a *reserved* id: no row exists behind it until the first
@@ -429,6 +446,12 @@ class ConversationService:
         The id matters. `send()` with no `session_id` continues the most recent
         conversation by design, so without one to hand back, the first message
         after New Chat would land in the previous conversation.
+
+        `kind` is `"study"` for a study chat. **It has nowhere durable to live
+        until the first message**, because the row is created by
+        `ensure_session` and not by this — so it is held beside `_pending_new`,
+        which already exists for exactly this window, and consumed when the row
+        is finally written.
         """
         # New Chat is the one explicit "I am done with that" the app ever
         # gets, so it is worth an episode. Fire-and-forget: the user is opening
@@ -445,7 +468,12 @@ class ConversationService:
         # Belt and braces on purpose: that failure is invisible until you
         # notice the assistant answering with context you thought you cleared.
         self._pending_new = session_id
-        log.info("session.new", session_id=session_id)
+        self._pending_kind = kind
+        # Marked before a row exists, so the UI reads Study from the moment the
+        # chat is opened rather than from its first reply.
+        if kind == "study":
+            self._study_sessions.add(session_id)
+        log.info("session.new", session_id=session_id, kind=kind)
         return session_id
 
     async def list_sessions(
@@ -495,6 +523,12 @@ class ConversationService:
         # inherit a summary of a conversation that no longer exists.
         self._summaries.pop(session_id, None)
         self._titled.discard(session_id)
+        # These two were leaking: `delete_session` cleaned the summary and the
+        # title flag and left the mode and sub-mode behind for the life of the
+        # process. Harmless while ids are never reused, wrong regardless.
+        self._modes.pop(session_id, None)
+        self._study_submodes.pop(session_id, None)
+        self._study_sessions.discard(session_id)
         return removed
 
     async def send(
@@ -530,10 +564,14 @@ class ConversationService:
             if resolved is not None:
                 return resolved
 
-        resolved_session = await self._store.ensure_session(
-            session_id or self._pending_new or await self._store.latest_session_id()
-        )
+        wanted = session_id or self._pending_new or await self._store.latest_session_id()
+        # The kind only applies to a row being created for the first time —
+        # `ensure_session` returns early for one that exists, so an existing
+        # conversation can never be turned into a study chat by this path.
+        kind = self._pending_kind if wanted == self._pending_new else "chat"
+        resolved_session = await self._store.ensure_session(wanted, kind)
         self._pending_new = None
+        self._pending_kind = "chat"
         turn_id = f"t_{uuid.uuid4().hex[:12]}"
 
         # Started before the write, not after: the embed then runs alongside
@@ -547,7 +585,8 @@ class ConversationService:
         # answer for almost every message, which is the design — §9's own
         # warning is that over-triggering is the fastest route to a feature
         # being switched off.
-        better = suggest(text, self.mode_for(resolved_session))
+        current_mode = self.mode_for(resolved_session)
+        better = suggest(text, current_mode)
         if better is not None:
             await self._bus.broadcast(
                 Event.MODE_SUGGESTED,
@@ -555,6 +594,20 @@ class ConversationService:
                     "session_id": resolved_session,
                     "mode": str(better),
                     "label": policy_for(better).label,
+                },
+            )
+        elif suggests_study_chat(text, current_mode):
+            # Study is not a mode you can switch to any more, so the same
+            # pattern offers the thing that now exists. `mode: "study"` is kept
+            # on the payload so one event and one chip serve both cases; the
+            # renderer branches on `opens_chat` rather than on the mode name.
+            await self._bus.broadcast(
+                Event.MODE_SUGGESTED,
+                {
+                    "session_id": resolved_session,
+                    "mode": str(ctx.ConversationMode.STUDY),
+                    "label": "Study",
+                    "opens_chat": True,
                 },
             )
 
@@ -609,10 +662,21 @@ class ConversationService:
 
         return TurnStarted(turn_id=turn_id, session_id=resolved_session)
 
+    def is_study_chat(self, session_id: str | None) -> bool:
+        """Whether this conversation *is* a study chat, as opposed to having
+        Study switched on — which is no longer a thing that can happen."""
+        return session_id is not None and session_id in self._study_sessions
+
     def mode_for(self, session_id: str | None) -> ctx.ConversationMode:
-        """This conversation's mode, NORMAL until it is set."""
+        """This conversation's mode, NORMAL until it is set.
+
+        A study chat is always STUDY, and not because something set it — it is
+        what the conversation is.
+        """
         if session_id is None:
             return ctx.ConversationMode.NORMAL
+        if session_id in self._study_sessions:
+            return ctx.ConversationMode.STUDY
         return self._modes.get(session_id, ctx.ConversationMode.NORMAL)
 
     def study_submode_for(self, session_id: str | None) -> StudySubMode:
@@ -631,7 +695,23 @@ class ConversationService:
     def set_mode(self, session_id: str, mode: ctx.ConversationMode) -> None:
         """Set it for one conversation. NORMAL is stored as an absence, so a
         session that has been set back to NORMAL is indistinguishable from one
-        that never moved — which is what it should be."""
+        that never moved — which is what it should be.
+
+        **A study chat refuses to move.** Study stopped being a mode you toggle
+        and became a kind of conversation you open, and this is where that is
+        enforced — not by leaving Study out of a list in the renderer, which a
+        second caller could route around. There is no RPC that changes a
+        session's kind either, so a normal chat can never become one.
+        """
+        # **Both directions, and this is the "one door" guarantee itself.**
+        # Study stopped being a mode you switch on and became a kind of
+        # conversation you open, so a study chat cannot leave Study and an
+        # ordinary chat cannot enter it. Enforced here rather than by leaving
+        # Study out of a list in the renderer, which is a convention a second
+        # caller can route around.
+        if session_id in self._study_sessions or mode is ctx.ConversationMode.STUDY:
+            log.info("chat.mode_refused", session_id=session_id, wanted=str(mode))
+            return
         if mode is ctx.ConversationMode.NORMAL:
             self._modes.pop(session_id, None)
         else:
@@ -665,10 +745,14 @@ class ConversationService:
             await procedures.discard(self._db, procedure_name)
             reply = "No problem, I won't remember it."
 
-        resolved_session = await self._store.ensure_session(
-            session_id or self._pending_new or await self._store.latest_session_id()
-        )
+        wanted = session_id or self._pending_new or await self._store.latest_session_id()
+        # The kind only applies to a row being created for the first time —
+        # `ensure_session` returns early for one that exists, so an existing
+        # conversation can never be turned into a study chat by this path.
+        kind = self._pending_kind if wanted == self._pending_new else "chat"
+        resolved_session = await self._store.ensure_session(wanted, kind)
         self._pending_new = None
+        self._pending_kind = "chat"
         turn_id = f"t_{uuid.uuid4().hex[:12]}"
 
         await self._store.add_message(resolved_session, Role.USER, text)
@@ -730,8 +814,20 @@ class ConversationService:
         resolved = session_id or await self._store.latest_session_id()
         if resolved is None:
             return ConversationHistory(session_id=None, messages=[])
+
+        # **This is where the durable kind becomes the in-memory mode again.**
+        # `mode_for` is on the hot path four times and `set_mode` is a plain
+        # dict write; making either async to read a row per turn would be
+        # invasive for no gain. Seeding `_modes` when the conversation is
+        # opened keeps reads synchronous while the row stays the source of
+        # truth — a study chat reopened after a restart is Study again.
+        kind = await self._store.session_kind(resolved) or "chat"
+        if kind == "study":
+            self._study_sessions.add(resolved)
+
         return ConversationHistory(
             session_id=resolved,
+            kind=kind,
             messages=await self._store.history(resolved, limit),
         )
 

@@ -88,6 +88,14 @@ class SessionSummary(BaseModel):
     # Last message time, which is what "recent" should mean — a long-running
     # conversation should not sink below a newer one that was abandoned.
     last_activity: str
+    #: "chat" or "study". A study chat is a kind of conversation rather than a
+    #: mode toggled onto one, so the list carries it as a *field* rather than
+    #: being filtered by it — `chat.delete` looks a session up through this same
+    #: list, and a narrowed list would 404 its own delete.
+    kind: str = "chat"
+    #: The subject this chat last worked on, or None. A record of where it got
+    #: to, not a binding: a study chat may roam between subjects.
+    study_subject_id: int | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> SessionSummary:
@@ -98,6 +106,8 @@ class SessionSummary(BaseModel):
             preview=row["preview"] or "",
             message_count=row["message_count"],
             last_activity=row["last_activity"] or row["started_at"],
+            kind=row["kind"] or "chat",
+            study_subject_id=row["study_subject_id"],
         )
 
 
@@ -107,13 +117,17 @@ class ConversationStore:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def ensure_session(self, session_id: str | None) -> str:
-        """Return an existing session id, or create one."""
+    async def ensure_session(self, session_id: str | None, kind: str = "chat") -> str:
+        """Return an existing session id, or create one.
+
+        `kind` is only ever applied at creation. **A conversation cannot change
+        kind afterwards** — that is the "one door" guarantee, enforced here
+        rather than by leaving Study out of a list in the renderer: an existing
+        row returns early and never sees this argument.
+        """
         if session_id:
             exists = await self._db.run(
-                lambda c: c.execute(
-                    "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
-                ).fetchone()
+                lambda c: c.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             )
             if exists:
                 return session_id
@@ -124,12 +138,12 @@ class ConversationStore:
         def _insert(conn: sqlite3.Connection) -> None:
             with conn:
                 conn.execute(
-                    "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
-                    (new_id, started),
+                    "INSERT INTO sessions (id, started_at, kind) VALUES (?, ?, ?)",
+                    (new_id, started, kind),
                 )
 
         await self._db.run(_insert)
-        log.info("session.created", session_id=new_id)
+        log.info("session.created", session_id=new_id, kind=kind)
         return new_id
 
     async def latest_session_id(self) -> str | None:
@@ -329,7 +343,7 @@ class ConversationStore:
         something you remember saying is the point.
         """
         sql = """
-            SELECT s.id, s.started_at, s.title,
+            SELECT s.id, s.started_at, s.title, s.kind, s.study_subject_id,
                    COUNT(m.id) AS message_count,
                    MAX(m.created_at) AS last_activity,
                    (SELECT content FROM messages
@@ -380,11 +394,39 @@ class ConversationStore:
 
     async def get_title(self, session_id: str) -> str | None:
         row = await self._db.run(
-            lambda c: c.execute(
-                "SELECT title FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
+            lambda c: c.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
         )
         return row["title"] if row else None
+
+    async def set_study_subject(self, session_id: str, subject_id: int) -> None:
+        """Note which subject this chat most recently worked on.
+
+        **A record, not a binding.** A study chat may roam — "now let's do
+        networking" — and which subject is live is still inferred per turn from
+        whichever was most recently touched. This exists so the Study tab can
+        group a chat under where it got to, and `ON DELETE SET NULL` means
+        deleting the subject leaves the conversation intact.
+
+        Silently does nothing for a session row that does not exist yet, which
+        is the normal case for the first tool call of a brand new chat: the row
+        appears with the first *message*, and the stamp lands on the next call.
+        """
+
+        def _stamp(conn: sqlite3.Connection) -> None:
+            with conn:
+                conn.execute(
+                    "UPDATE sessions SET study_subject_id = ? WHERE id = ?",
+                    (subject_id, session_id),
+                )
+
+        await self._db.run(_stamp)
+
+    async def session_kind(self, session_id: str) -> str | None:
+        """ "chat", "study", or None when there is no row yet."""
+        row = await self._db.run(
+            lambda c: c.execute("SELECT kind FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        )
+        return None if row is None else str(row["kind"] or "chat")
 
     async def delete_session(self, session_id: str) -> int:
         """Remove a conversation and everything in it. Returns messages deleted.
@@ -396,9 +438,7 @@ class ConversationStore:
 
         def _delete(conn: sqlite3.Connection) -> int:
             with conn:
-                cursor = conn.execute(
-                    "DELETE FROM messages WHERE session_id = ?", (session_id,)
-                )
+                cursor = conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 removed = cursor.rowcount
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             return int(removed)

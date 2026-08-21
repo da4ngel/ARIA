@@ -88,13 +88,15 @@ export interface UseConversation {
   send: (text: string, options?: { spoken?: boolean; attachments?: string[] }) => Promise<void>
   cancel: () => Promise<void>
   /** Clear the view and start a new session in the sidecar. */
-  newChat: () => Promise<void>
+  newChat: (kind?: 'chat' | 'study') => Promise<string>
   /** Load a past conversation and keep talking in it. */
   openSession: (sessionId: string) => Promise<void>
   /** Thumbs up or down on an answer. The same value again clears it. */
   rate: (messageId: number, rating: 1 | -1) => Promise<void>
   /** Which conversation is on screen, so the history panel can mark it. */
   sessionId: string | null
+  /** Whether the open conversation is a study chat. */
+  sessionKind: 'chat' | 'study'
   /** First-token latency of the last turn — the Phase 1 gate, visible in the UI. */
   lastFirstTokenMs: number | null
 }
@@ -130,6 +132,10 @@ export function useConversation(connected: boolean): UseConversation {
   // Mirrored into state as well as a ref: the ref keeps event handlers correct
   // without re-subscribing, the state lets the history panel mark what's open.
   const [activeSession, setActiveSession] = useState<string | null>(null)
+  //: "chat" or "study". Held here rather than fetched, because the composer
+  //: needs it the moment a study chat is opened — before its first message,
+  //: when there is no row to ask about.
+  const [sessionKind, setSessionKind] = useState<'chat' | 'study'>('chat')
   const sessionId = useRef<string | null>(null)
   const activeTurnId = useRef<string | null>(null)
   //: Stop pressed during the window between `setBusy(true)` and `chat.send`
@@ -144,11 +150,15 @@ export function useConversation(connected: boolean): UseConversation {
     let cancelled = false
 
     void window.aria
-      .call<{ session_id: string | null; messages: StoredMessage[] }>('chat.history', {})
+      .call<{ session_id: string | null; kind?: string; messages: StoredMessage[] }>(
+        'chat.history',
+        {},
+      )
       .then((history) => {
         if (cancelled) return
         sessionId.current = history.session_id
         setActiveSession(history.session_id)
+        setSessionKind(history.kind === 'study' ? 'study' : 'chat')
         setTurns(toTurns(history.messages))
         if (history.session_id) void loadRatings(history.session_id, setTurns)
       })
@@ -408,26 +418,43 @@ export function useConversation(connected: boolean): UseConversation {
     }
   }, [])
 
-  const newChat = useCallback(async () => {
+  const newChat = useCallback(async (kind: 'chat' | 'study' = 'chat'): Promise<string> => {
     // The id is reserved, not created — no row exists behind it until the first
     // message, so opening a new chat and walking away leaves nothing behind.
-    const started = await window.aria.call<{ session_id: string }>('chat.new', {})
+    const started = await window.aria.call<{ session_id: string; kind: string }>('chat.new', {
+      ...(kind === 'study' ? { kind } : {}),
+    })
     sessionId.current = started.session_id
-    setActiveSession(null) // nothing to mark as open in the history list yet
+    // **Held, not cleared.** This used to be `null`, on the reasoning that
+    // there is nothing to mark as open in the history list yet — true, and
+    // harmless either way, because no row matches a reserved id so nothing is
+    // wrongly highlighted. What clearing it *did* cost was real: with no
+    // session id, `chat.mode` and `study.start` fell back server-side to the
+    // most recent conversation, so a sub-mode picked in a brand new study chat
+    // landed on yesterday's. Cosmetic while modes were scratch state; a bug
+    // the moment a study chat is a durable thing you created.
+    setActiveSession(started.session_id)
+    setSessionKind(started.kind === 'study' ? 'study' : 'chat')
     activeTurnId.current = null
     setBusy(false)
     setLastFirstTokenMs(null)
     setTurns([])
+    // Returned so a caller that needs to name this conversation immediately —
+    // the Study panel, setting a sub-mode before the first message — can do so
+    // rather than letting the sidecar guess at "the latest one".
+    return started.session_id
   }, [])
 
   const openSession = useCallback(async (id: string) => {
     const history = await window.aria.call<{
       session_id: string | null
+      kind?: string
       messages: StoredMessage[]
     }>('chat.history', { session_id: id })
 
     sessionId.current = history.session_id ?? id
     setActiveSession(history.session_id ?? id)
+    setSessionKind(history.kind === 'study' ? 'study' : 'chat')
     activeTurnId.current = null
     setBusy(false)
     setLastFirstTokenMs(null)
@@ -469,6 +496,7 @@ export function useConversation(connected: boolean): UseConversation {
     openSession,
     rate,
     sessionId: activeSession,
+    sessionKind,
     lastFirstTokenMs,
   }
 }

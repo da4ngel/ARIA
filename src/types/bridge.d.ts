@@ -95,6 +95,13 @@ export interface SessionSummary {
   preview: string
   message_count: number
   last_activity: string
+  /** "chat" or "study". A study chat is a kind of conversation rather than a
+   *  mode switched on, so this is a field on every row rather than a filter —
+   *  `chat.delete` looks a session up through this same list. */
+  kind?: string
+  /** The subject this study chat last worked on. A record of where it got to,
+   *  not a binding: a study chat may roam between subjects. */
+  study_subject_id?: number | null
 }
 
 /** One thing she has learned, as `memory.list` returns it (BUILD_SPEC §7.3). */

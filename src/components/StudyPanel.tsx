@@ -3,11 +3,16 @@
  *
  * Eyaas asked for this as a rail section beside Chats, Voice, Files, Tools and
  * Memory rather than as something you have to ask her about. It is a console,
- * not a viewer: the buttons put the conversation into a sub-mode
- * (`sidecar/core/study_modes.py`) and send the opener, so studying still
- * happens where every other conversation does.
+ * not a viewer.
  *
- * **A button sends a visible message.** It could set the state and say nothing,
+ * **A sub-mode button opens a study chat.** Study stopped being a mode you
+ * switch on and became a kind of conversation you open — *"another type of
+ * chat, dedicated fully for studies purpose"* — so pressing Exam here starts a
+ * study chat in Exam rather than reaching into whatever conversation happens
+ * to be in front of you. Switching sub-mode *within* a session is the
+ * composer's picker; this is how a session begins.
+ *
+ * **And it sends a visible message.** It could set the state and say nothing,
  * which would be less code — but then the thing that started an exam would be
  * invisible in the transcript, and pressing "Exam" *is* asking to be examined.
  * It belongs there in his own words.
@@ -185,12 +190,15 @@ function SubjectHeader({
 export function StudyPanel({
   onClose,
   onStudy,
-  sessionId,
+  onNewStudyChat,
+  onOpenSession,
 }: {
   onClose: () => void
   /** Sends the sub-mode's opener as an ordinary message. */
   onStudy: (text: string) => void
-  sessionId: string | null
+  /** Opens a fresh study chat and returns its reserved id. */
+  onNewStudyChat: () => Promise<string | null>
+  onOpenSession: (sessionId: string) => void
 }): JSX.Element {
   const study = useStudy(true)
   const concepts = study.state?.concepts ?? []
@@ -198,11 +206,23 @@ export function StudyPanel({
   const covered = concepts.filter((c) => c.level > 0)
   const subject = study.subjects.find((s) => s.id === study.selected)
 
+  // Grouped by where each chat got to, not by what it is bound to — a study
+  // chat may roam, and `study_subject_id` records rather than constrains.
+  const chats = study.sessions.filter(
+    (s) => study.selected === null || s.study_subject_id === study.selected,
+  )
+
   const asked = concepts.reduce((sum, c) => sum + c.asked, 0)
   const right = concepts.reduce((sum, c) => sum + c.correct, 0)
 
   async function run(subMode: string): Promise<void> {
-    const started = await study.start(subMode, sessionId)
+    // **A new chat every time, not the one that happens to be open.** A study
+    // session is a conversation, and starting one inside yesterday's exam
+    // would bury it. The id is reserved rather than created, so a button
+    // pressed and abandoned leaves nothing behind.
+    const fresh = await onNewStudyChat()
+    if (!fresh) return
+    const started = await study.start(subMode, fresh)
     if (!started) return
     // Closed before sending: a sheet over the reply you just asked for is in
     // the way of the thing you asked for.
@@ -222,10 +242,22 @@ export function StudyPanel({
 
   return (
     <Panel title="Study" onClose={onClose} width="max-w-lg">
+      <button
+        type="button"
+        onClick={() => {
+          void onNewStudyChat().then((id) => {
+            if (id) onClose()
+          })
+        }}
+        className="rim interactive mt-1 w-full rounded px-2 py-1.5 text-micro text-aria-muted hover:text-aria-text"
+      >
+        + New study chat
+      </button>
+
       {concepts.length === 0 && !study.loading ? (
         <p className="mt-4 text-micro text-aria-faint">
-          Nothing on the map yet. Attach a lecture, slides or notes to the conversation and ask her
-          to teach you it — she will break it into concepts and keep track of how each one is
+          Nothing on the map yet. Start a study chat, attach a lecture, slides or notes, and ask
+          her to teach you it — she will break it into concepts and keep track of how each one is
           going.
         </p>
       ) : (
@@ -288,6 +320,33 @@ export function StudyPanel({
               ))}
             </ul>
           </section>
+
+          {chats.length > 0 && (
+            <section className="mt-4">
+              <h3 className="text-tiny font-strong text-aria-text">Sessions</h3>
+              <ul className="mt-1.5 space-y-1">
+                {chats.map((chat) => (
+                  <li key={chat.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose()
+                        onOpenSession(chat.id)
+                      }}
+                      className="raised rim interactive flex w-full items-center gap-2 rounded px-2 py-1 text-left text-micro"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-aria-text">
+                        {chat.title || chat.preview || 'Untitled study chat'}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-aria-faint">
+                        {chat.message_count} msgs
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           {asked > 0 && (
             <p className="mt-3 text-micro text-aria-faint">

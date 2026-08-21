@@ -53,8 +53,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import websockets
 
-from sidecar.core.context import ConversationMode
-
 URL = "ws://127.0.0.1:8765/rpc"
 
 TURN_TIMEOUT_S = 300.0
@@ -228,9 +226,15 @@ class Client:
 
 
 async def study_session(client: Client) -> str:
-    session_id = (await client.call("chat.new"))["session_id"]
-    await client.call("chat.mode", {"session_id": session_id, "mode": str(ConversationMode.STUDY)})
-    return str(session_id)
+    """Open a study chat.
+
+    **Created, not switched into.** Study stopped being a mode you toggle and
+    became a kind of conversation — `chat.mode` refuses it now, in both
+    directions, so this gate would fail at its first line if it still tried.
+    """
+    started = await client.call("chat.new", {"kind": "study"})
+    assert started["kind"] == "study", "chat.new did not open a study chat"
+    return str(started["session_id"])
 
 
 def concepts_in(state: dict[str, Any]) -> list[dict[str, Any]]:

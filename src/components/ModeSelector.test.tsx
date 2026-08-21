@@ -19,23 +19,52 @@ const BASE = {
   disabled: false,
   onSelect: () => {},
   onEnableOnline: () => {},
-      suggestion: null,
-      onDismissSuggestion: () => {},
+  suggestion: null,
+  onDismissSuggestion: () => {},
+  onOpenStudyChat: () => {},
 }
 
 describe('ModeSelector', () => {
   it('names the current mode without opening anything', () => {
-    render(<ModeSelector {...BASE} mode="study" label="Study" />)
+    render(<ModeSelector {...BASE} mode="research" label="Research" />)
 
-    expect(screen.getByRole('button', { name: 'Answer mode: Study' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Answer mode: Research' })).toBeDefined()
   })
 
-  it('describes each mode rather than just listing names', () => {
-    // "Study" alone does not tell you it will ask you questions back.
+  it('does not offer Study, which is a kind of chat rather than a mode', () => {
+    // Study left this list when it became something you *open*. Offering it
+    // here would propose a switch the sidecar refuses — `set_mode` will not
+    // move a study chat, and nothing turns a normal chat into one.
     render(<ModeSelector {...BASE} />)
     fireEvent.click(screen.getByRole('button', { name: 'Answer mode: Normal' }))
 
-    expect(screen.getByText(/asks? a question back|question back/i)).toBeDefined()
+    expect(screen.queryByText('Study')).toBeNull()
+  })
+
+  it('offers to open a study chat when that is what the turn wanted', () => {
+    const onOpenStudyChat = vi.fn()
+    const onSelect = vi.fn()
+    render(
+      <ModeSelector
+        {...BASE}
+        onSelect={onSelect}
+        onOpenStudyChat={onOpenStudyChat}
+        suggestion={{ mode: 'study', label: 'Study', opensChat: true }}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Open a Study chat?'))
+
+    expect(onOpenStudyChat).toHaveBeenCalled()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('describes each mode rather than just listing names', () => {
+    // "Critic" alone does not tell you it will attack the idea.
+    render(<ModeSelector {...BASE} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Answer mode: Normal' }))
+
+    expect(screen.getByText(/weakest assumption/i)).toBeDefined()
     expect(screen.getByText(/cites them/i)).toBeDefined()
   })
 
@@ -97,6 +126,7 @@ describe('the mode suggestion', () => {
     const onSelect = vi.fn()
     render(
       <ModeSelector
+        {...BASE}
         mode="normal"
         label="Normal"
         needsOnline={false}
@@ -116,6 +146,7 @@ describe('the mode suggestion', () => {
     const onSelect = vi.fn()
     render(
       <ModeSelector
+        {...BASE}
         mode="normal"
         label="Normal"
         needsOnline={false}
@@ -137,6 +168,7 @@ describe('the mode suggestion', () => {
     const onDismiss = vi.fn()
     render(
       <ModeSelector
+        {...BASE}
         mode="normal"
         label="Normal"
         needsOnline={false}
@@ -158,6 +190,7 @@ describe('the mode suggestion', () => {
     // A mode that cannot work yet outranks a mode that might suit better.
     render(
       <ModeSelector
+        {...BASE}
         mode="research"
         label="Research"
         needsOnline

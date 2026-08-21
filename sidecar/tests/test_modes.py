@@ -17,6 +17,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from sidecar.core import modes
 from sidecar.core.context import ConversationMode
 from sidecar.core.modes import POLICIES, ModePolicy, ToolPolicy, policy_for, suggest
 from sidecar.core.router import RoutingBias
@@ -123,8 +124,6 @@ def test_read_only_stops_below_the_tier_where_damage_starts() -> None:
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        ("teach me how TCP congestion control works", ConversationMode.STUDY),
-        ("quiz me on the renal system", ConversationMode.STUDY),
         ("compare XGBoost vs random forest for this", ConversationMode.RESEARCH),
         ("is Postgres or SQLite better here", ConversationMode.RESEARCH),
         ("why does my test keep failing", ConversationMode.CODE),
@@ -133,10 +132,33 @@ def test_read_only_stops_below_the_tier_where_damage_starts() -> None:
         ("what am I missing here", ConversationMode.CRITIC),
     ],
 )
-def test_it_recognises_the_shapes_it_claims_to(
-    message: str, expected: ConversationMode
-) -> None:
+def test_it_recognises_the_shapes_it_claims_to(message: str, expected: ConversationMode) -> None:
     assert suggest(message, ConversationMode.NORMAL) is expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["teach me how TCP congestion control works", "quiz me on the renal system"],
+)
+def test_a_teaching_shaped_message_offers_a_study_chat_not_a_mode(message: str) -> None:
+    """**Study left `_SUGGESTIONS` when it stopped being a mode.** Suggesting it
+    would propose a switch nothing can perform — a normal conversation cannot
+    become a study one. The pattern is unchanged; the offer is now to open a
+    study chat instead."""
+    assert suggest(message, ConversationMode.NORMAL) is not ConversationMode.STUDY
+    assert modes.suggests_study_chat(message, ConversationMode.NORMAL) is True
+
+
+def test_a_study_chat_is_not_offered_another_one() -> None:
+    """Inside a study chat the answer is obviously yes, and the offer is noise."""
+    assert modes.suggests_study_chat("teach me this", ConversationMode.STUDY) is False
+
+
+def test_an_ordinary_message_offers_nothing() -> None:
+    assert (
+        modes.suggests_study_chat("what is the capital of Australia", ConversationMode.NORMAL)
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -170,7 +192,7 @@ def test_it_never_suggests_the_mode_already_in_use() -> None:
 
 
 def test_critique_beats_code_when_a_message_is_both() -> None:
-    """"What's wrong with my code" is a request to be argued with. Code mode
+    """ "What's wrong with my code" is a request to be argued with. Code mode
     would answer it by silently fixing the thing, which is a different and
     less useful reply."""
     assert suggest("what's wrong with my code here", ConversationMode.NORMAL) is (

@@ -201,12 +201,20 @@ async def question_answer(params: dict[str, Any]) -> dict[str, Any]:
 
 
 @method("chat.new")
-async def chat_new(_params: dict[str, Any]) -> dict[str, Any]:
-    """Start a fresh conversation. The previous one stays in SQLite."""
+async def chat_new(params: dict[str, Any]) -> dict[str, Any]:
+    """Start a fresh conversation. The previous one stays in SQLite.
+
+    `kind` is `"study"` for a study chat — a conversation that *is* Study
+    rather than one with Study switched on. It is chosen here and nowhere else:
+    there is no method that changes a session's kind afterwards, which is what
+    makes "a normal chat can never become a study chat" a property of the
+    system rather than of a list in the renderer.
+    """
     from sidecar.state import runtime
 
-    session_id = await runtime.require_conversation().new_session()
-    return {"session_id": session_id}
+    kind = "study" if params.get("kind") == "study" else "chat"
+    session_id = await runtime.require_conversation().new_session(kind)
+    return {"session_id": session_id, "kind": kind}
 
 
 # ── models (Phase 1.5) ────────────────────────────────────────────────
@@ -1236,6 +1244,26 @@ async def study_subjects(_params: dict[str, Any]) -> dict[str, Any]:
     return {"subjects": await study.list_subjects(db)}
 
 
+@method("study.sessions")
+async def study_sessions(_params: dict[str, Any]) -> dict[str, Any]:
+    """Study chats, grouped by the subject each last worked on.
+
+    Read off the same `list_sessions` the history panel uses rather than a
+    query of its own — one definition of "a conversation worth listing", so a
+    study chat cannot appear in one place and not the other. `list_sessions`
+    joins `messages`, so a study chat opened and abandoned shows in neither,
+    which is the existing deliberate behaviour.
+
+    `subject_id` is `None` for a study chat that has not reached a subject yet.
+    """
+    from sidecar.state import runtime
+
+    service = runtime.require_conversation()
+    sessions = await service.store.list_sessions(limit=200)
+    study = [s for s in sessions if s.kind == "study"]
+    return {"sessions": [s.model_dump(mode="json") for s in study]}
+
+
 @method("study.start")
 async def study_start(params: dict[str, Any]) -> dict[str, Any]:
     """Put a conversation into Study mode with a sub-mode, and say what to send.
@@ -1247,18 +1275,34 @@ async def study_start(params: dict[str, Any]) -> dict[str, Any]:
     returned `opener` through the ordinary `chat.send` path.
     """
     from sidecar.core import study_modes
-    from sidecar.core.context import ConversationMode
     from sidecar.state import runtime
 
     service = runtime.require_conversation()
+    # **No "latest session" fallback**, unlike `chat.mode`. That fallback is a
+    # correctness bug here: a sub-mode picked in a brand new study chat, before
+    # its first message, would be written to *yesterday's* conversation. The
+    # caller knows which chat it means and has to say so.
     session_id = params.get("session_id")
     if not isinstance(session_id, str) or not session_id:
-        session_id = await service.store.latest_session_id()
-    if not session_id:
-        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "There is no conversation to study in.")
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            "session_id is required — guessing which conversation you meant is how "
+            "a sub-mode ends up on the wrong one.",
+        )
+
+    # **This sets how a study chat runs; it does not make one.** Study is a kind
+    # of conversation you open (`chat.new` with `kind: "study"`), and turning an
+    # ordinary chat into one here would be the second door the whole design
+    # exists to avoid — `set_mode` refuses it anyway, so this says so plainly
+    # rather than failing silently.
+    if not service.is_study_chat(session_id):
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            "That is not a study chat. Open one with chat.new(kind='study') first — "
+            "an ordinary conversation cannot be turned into one.",
+        )
 
     sub_mode = study_modes.parse(params.get("sub_mode")) or study_modes.StudySubMode.LEARN
-    service.set_mode(session_id, ConversationMode.STUDY)
     service.set_study_submode(session_id, sub_mode)
 
     policy = study_modes.policy_for(sub_mode)

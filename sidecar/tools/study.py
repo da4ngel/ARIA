@@ -80,6 +80,28 @@ wrong options plausible: an obviously silly option removes itself and turns
 four choices into two."""
 
 
+async def _remember_subject(db: object, ctx: ToolContext, subject_id: int) -> None:
+    """Note on this conversation which subject it last worked on.
+
+    **A record, not a binding.** The chat may roam and the live subject is
+    still whichever was most recently touched anywhere; this only lets the
+    Study tab group a chat under where it got to. It is why deleting a subject
+    uses `ON DELETE SET NULL` rather than cascading into conversations.
+
+    Off the critical path in the sense that matters: a failure here costs a
+    grouping, and must never cost the tool call that was actually asked for.
+    """
+    from sidecar.state import runtime
+
+    service = runtime.conversation
+    if service is None or ctx.session_id is None:
+        return
+    try:
+        await service.store.set_study_subject(ctx.session_id, subject_id)
+    except Exception:  # noqa: BLE001 — a grouping is not worth failing a turn
+        log.warning("study.subject_stamp_failed", exc_info=True)
+
+
 def _resolve_material(conn: sqlite3.Connection, material: str) -> str | None:
     """A file name or path as the model gave it, resolved to an indexed path.
 
@@ -150,6 +172,7 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
         state = await study.state(db, existing)
         if state is not None and state.concepts:
             await study.touch(db, existing)
+            await _remember_subject(db, ctx, existing)
             return ToolResult(
                 ok=True,
                 summary=f"Resuming. {_describe(state)}",
@@ -199,6 +222,7 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
         )
 
     await study.touch(db, report.subject_id)
+    await _remember_subject(db, ctx, report.subject_id)
     state = await study.state(db, report.subject_id)
     described = _describe(state) if state is not None else ""
     return ToolResult(
@@ -335,6 +359,7 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
 
     if subject_id is not None:
         await study.touch(db, subject_id)
+        await _remember_subject(db, ctx, subject_id)
 
     unanswered = len(prepared) - len(asked.answers)
     if unanswered > 0:

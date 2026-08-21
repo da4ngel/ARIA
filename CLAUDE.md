@@ -3555,6 +3555,144 @@ eleven tests.
 **1404 sidecar tests (+34), 204 renderer (+23), ruff, mypy, typecheck and the
 renderer build all clean.**
 
+## Study became a kind of chat, not a mode on one (2026-08-21)
+    pytest sidecar/tests -v            # 1419
+    npm test                           # 212
+    python scripts/gate_study.py       # needs the sidecar running
+
+Eyaas: *"study mode is another type of chat, where everything i mention above
+happens, dedicated fully for studies purpose, if i wanna learn something a topic
+or any material to be clarified i would use it."*
+
+A correction to what had shipped that morning. Study was one of six modes you
+toggle onto an ordinary conversation, with a panel reaching into whichever chat
+happened to be open. He wanted the opposite: you open a study chat *because you
+are going to study*.
+
+Three answers, and the second and third pull against each other:
+
+- **Study leaves the mode picker.** One door.
+- **Study chats appear in both places** — badged in Chats, grouped by subject in
+  the Study tab.
+- **A study chat is not bound to a subject.** It roams, and which subject is
+  live stays inferred from whichever was most recently touched.
+
+**Roaming and grouping-by-subject reconcile only if the column is a record
+rather than a binding.** `sessions.study_subject_id` holds *where this chat got
+to*, stamped as study tools touch a subject. Nothing constrains the chat; the
+panel groups it under where it ended up. Migration 008, `SCHEMA_VERSION` 7 → 8.
+**42 tools, unchanged.**
+
+### `ON DELETE SET NULL`, and why it is not a cascade
+Deleting a subject from the panel already destroys its map and every answer
+given against it. It must not also delete the conversations you had while
+learning it — those are yours, and still readable without the map.
+
+SQLite requires a column added with a `REFERENCES` clause to default to NULL,
+which is what this wanted anyway. **The action was verified rather than
+assumed** — `ALTER TABLE ... ADD COLUMN ... REFERENCES` is exactly the case
+where an FK action might not fire — and it does: the chat survives with a null
+subject. Mutation-checked: changing it to `CASCADE` deletes the chat and fails
+exactly its own test.
+
+### The durable mode contradicts a recorded rule, and does not
+`ConversationMode` resets on New Chat because *"a mode set last week cannot
+silently shape today's answers"*. A study chat is durable — and the resolution
+is that **the danger was always invisibility**. A study chat is the opposite of
+invisible: you created it deliberately, it is badged in Chats and listed in the
+Study tab. The rule was about hidden state, not about persistence.
+
+- **`mode_for` stays synchronous.** It is on the hot path four times and
+  `set_mode` is a plain dict write; making either async to read a row per turn
+  would be invasive for no gain. `_study_sessions` is seeded by `new_session`
+  and by `history()` — so the row is the source of truth and reads cost nothing.
+  A study chat reopened after a restart is Study again because opening it is
+  what re-seeds it.
+- **The guard runs both ways, and the first version only ran one.** It refused
+  to move a study chat *out* of Study and happily let an ordinary chat *into*
+  it — which is the second door the whole design exists to remove. Inferring
+  study-ness from `_modes` could only ever catch one direction; an explicit
+  `_study_sessions` set catches both. `study.start` now *requires* a study chat
+  and says so rather than quietly making one.
+
+### A session row does not exist when you open a chat
+`reserve_session_id()` mints an id and writes nothing; `ensure_session` INSERTs
+on the **first message**. So a kind chosen at New Chat has nowhere durable to
+live for the whole time the chat is empty — which is exactly when the UI needs
+to know it is a study chat. `_pending_kind` sits beside `_pending_new`, which
+already existed for that same window. Tested both ways: the kind survives the
+first message, and does not leak into the next chat.
+
+### The `session_id: undefined` fallback was already wrong and about to be a bug
+`setMode` sent `session_id: sessionId ?? undefined` and the handler fell back to
+`latest_session_id()`, so **a mode set before the first message of a new chat
+was written to the previous conversation**. Cosmetic while modes were scratch
+state; a real bug the moment a study chat is a durable thing you created — the
+sub-mode you picked lands on yesterday's chat.
+
+Two halves: `newChat` keeps the reserved id in `activeSession` rather than
+clearing it (the old comment worried about marking a non-existent row as open in
+History, which is harmless — no row matches, so nothing is wrongly highlighted),
+and the study RPCs stop guessing entirely. Mutation-checked: restoring the
+fallback fails exactly its own test.
+
+### The composer's control changes with the kind of chat
+**`SubModeSelector` takes `ModeSelector`'s slot in a study chat.** That is what
+makes it another *type* of chat rather than an ordinary one with a badge: the
+control you reach for is Learn / Practice / Revision / Rapid review / Exam /
+Teach-back, not Normal / Quick / Research / Code / Critic.
+
+Deliberately not one component with a flag — `ModeSelector` carries an online
+warning, a suggestion chip and a "Normal is the absence of a mode" rule that
+none of this has, and folding two controls into one with three flags makes both
+hard to change. The sub-mode picker is always dotted for the mirror-image
+reason: there is no absence of a sub-mode to avoid marking.
+
+**`suggest()` stopped offering Study**, or the chip would propose a switch
+nothing can perform. `_WANTS_TEACHING` is unchanged and now feeds
+`suggests_study_chat`, which offers to *open* one — same event, same chip, and
+the renderer branches on `opens_chat` rather than on the mode name so the
+knowledge lives in one place.
+
+### The panel starts sessions rather than reaching into one
+A sub-mode button now opens a **new** study chat and starts it in that
+sub-mode. A study session is a conversation, and starting one inside yesterday's
+exam buries it. Switching sub-mode *within* a session is the composer's job.
+
+`study.sessions` reads the same `list_sessions` the history panel uses rather
+than a query of its own — one definition of "a conversation worth listing", so a
+study chat cannot appear in one place and not the other. It joins `messages`, so
+a study chat opened and abandoned shows in neither, which is the existing
+deliberate behaviour.
+
+**The badge is a field, not a filter.** `chat.delete` looks a session up through
+`list_sessions()`, so narrowing that list server-side would 404 its own delete.
+
+### A fragility found by a test's own gap
+A test mock without `study.sessions` returned `{ok: true}`, so `chats.sessions`
+was `undefined` and the panel threw. Guarded with `?? []` in the hook rather
+than only fixing the mock: **a panel that throws on an unexpected payload takes
+the whole rail section down**, and an empty list is the honest answer to
+"nothing came back".
+
+### Migration 008 against the real database
+Verified on a `sqlite3.backup` snapshot — copying `aria.db` alone gives an
+inconsistent read, which this project learned yesterday. 114 sessions, 835
+messages, 107 episodes and 51 facts intact; every existing row defaults to
+`kind = 'chat'`; `integrity_check` ok and `foreign_key_check` clean.
+
+**1419 sidecar tests (+15), 212 renderer (+8), ruff, mypy, typecheck and the
+renderer build all clean.** All three mutation checks hold, each failing exactly
+the test written for it.
+
+**Still not looked at on screen, and `gate_study.py` has still never been run
+live** — it was updated for this (a study chat is created, not switched into,
+and `chat.mode` would now refuse it) but not executed.
+
+**This is the third design for Study in three days.** What survives untouched is
+everything underneath: the map, mastery, the sub-mode policies, the two tools.
+Only the way in changed.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -3684,6 +3822,13 @@ See the section above for what is proven live and what is not. **That entry
 said 42 and the registry held 40** — the count had been wrong here since
 somewhere around Phase 8 and nothing checked it. It is now genuinely 42.
 
+**Study became a kind of chat 2026-08-21** — `sessions.kind` (**schema 8**),
+a study chat created rather than switched into, Study out of the mode picker,
+and the composer offering sub-modes instead of modes inside one. The durable
+kind does not contradict "a mode cannot outlive its conversation": that rule was
+about *invisible* state, and a study chat is the opposite of invisible.
+**42 tools, unchanged.**
+
 **The Study tab landed 2026-08-21** — a rail section beside Chats, Voice,
 Files, Tools and Memory, with the six sub-modes behind its buttons
 (`core/study_modes.py`) and five `study.*` RPCs. Exam is the only sub-mode with
@@ -3741,6 +3886,7 @@ when `ModePolicy` was built — each is a session, and each hangs off it:
   answer, and (since 2026-08-21) Revision and Exam — and needs one run with the
   sidecar up. The line most likely to fail is the first: whether the concepts
   really come out of the material.
+- **Nothing about Study has been looked at on screen** — not the panel, the six sub-mode buttons, the rail item, the study-chat badge in Chats, or the composer swapping its picker inside a study chat. Three days of it builds and its tests pass, which is exactly the state the retheme was in when it shipped a blank window.
 - **The Study panel has not been looked at on screen**, and neither have the
   six sub-mode buttons. It builds and its 12 tests pass, which is exactly the
   state the retheme was in when it shipped a blank window.

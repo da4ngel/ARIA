@@ -262,7 +262,11 @@ _SUGGESTIONS: tuple[tuple[re.Pattern[str], ConversationMode], ...] = (
     # Code mode would answer it by silently fixing the thing.
     (_WANTS_CRITIQUE, ConversationMode.CRITIC),
     (_DEBUGGING, ConversationMode.CODE),
-    (_WANTS_TEACHING, ConversationMode.STUDY),
+    # **STUDY is deliberately absent.** It stopped being a mode you can switch
+    # to and became a kind of conversation you open, so suggesting it here
+    # would propose a switch nothing is able to perform. `_WANTS_TEACHING`
+    # still exists and is still tested — it now feeds `suggests_study_chat`
+    # below, which offers to open one instead of to change this one.
     (_WANTS_EVIDENCE, ConversationMode.RESEARCH),
 )
 
@@ -279,6 +283,19 @@ def suggest(message: str, current: ConversationMode) -> ConversationMode | None:
         if mode is not current and pattern.search(message):
             return mode
     return None
+
+
+def suggests_study_chat(message: str, current: ConversationMode) -> bool:
+    """Whether this turn reads like it wanted a study chat rather than this one.
+
+    The other half of taking STUDY out of `_SUGGESTIONS`. The pattern that used
+    to offer "switch to Study" is unchanged; what changes is the offer, because
+    a normal conversation can no longer become a study one. Never fires inside
+    a study chat, where the answer is obviously yes and the offer is noise.
+    """
+    if current is ConversationMode.STUDY:
+        return False
+    return bool(_WANTS_TEACHING.search(message))
 
 
 __all__ = ["POLICIES", "ModePolicy", "ToolPolicy", "policy_for", "suggest"]

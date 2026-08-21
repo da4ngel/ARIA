@@ -1660,3 +1660,104 @@ async def test_no_session_is_learn_rather_than_an_error(service) -> None:
     svc, _, _ = service
 
     assert svc.study_submode_for(None) is StudySubMode.LEARN
+
+
+# ── a study chat is a kind of conversation ────────────────────────────
+
+
+async def test_a_study_chat_is_study_from_the_moment_it_is_opened(service) -> None:
+    """Before its first message, so the composer can offer sub-modes rather
+    than modes while the chat is still empty. The row does not exist yet —
+    `reserve_session_id` mints an id and writes nothing — so this is the
+    in-memory half of the same fact."""
+    svc, _, _ = service
+
+    session = await svc.new_session("study")
+
+    assert svc.mode_for(session) is ctx.ConversationMode.STUDY
+
+
+async def test_a_study_chat_refuses_to_stop_being_one(service) -> None:
+    """**The "one door" guarantee, enforced where it cannot be routed around.**
+
+    Study left the mode picker when it became a kind of conversation. Leaving
+    it out of a list in the renderer is a convention; this is the property —
+    a second caller reaching `set_mode` directly gets the same answer.
+
+    Mutation-checked: dropping the refusal fails exactly this.
+    """
+    svc, _, _ = service
+    session = await svc.new_session("study")
+
+    svc.set_mode(session, ctx.ConversationMode.NORMAL)
+    svc.set_mode(session, ctx.ConversationMode.QUICK)
+
+    assert svc.mode_for(session) is ctx.ConversationMode.STUDY
+
+
+async def test_an_ordinary_chat_can_still_change_mode(service) -> None:
+    """Or the refusal above is just a broken setter."""
+    svc, _, _ = service
+    session = await svc.new_session()
+
+    svc.set_mode(session, ctx.ConversationMode.QUICK)
+
+    assert svc.mode_for(session) is ctx.ConversationMode.QUICK
+
+
+async def test_the_kind_survives_the_first_message(service) -> None:
+    """The row appears with the first message, and the kind chosen at New Chat
+    has to reach it — `_pending_kind` exists for exactly that window."""
+    svc, _, _ = service
+    session = await svc.new_session("study")
+
+    await svc.send("teach me something", session_id=session)
+    await _drain(svc)
+
+    assert await svc.store.session_kind(session) == "study"
+
+
+async def test_the_pending_kind_does_not_leak_into_the_next_chat(service) -> None:
+    """One study chat must not make the next ordinary one a study chat."""
+    svc, _, _ = service
+    first = await svc.new_session("study")
+    await svc.send("hello", session_id=first)
+    await _drain(svc)
+
+    second = await svc.new_session()
+    await svc.send("hello", session_id=second)
+    await _drain(svc)
+
+    assert await svc.store.session_kind(second) == "chat"
+
+
+async def test_reopening_a_study_chat_makes_it_study_again(service) -> None:
+    """After a restart the in-memory mode is gone and the row is all there is.
+    `history()` is where the durable kind becomes the mode again, which is what
+    keeps `mode_for` synchronous on a hot path."""
+    svc, _, _ = service
+    session = await svc.new_session("study")
+    await svc.send("hello", session_id=session)
+    await _drain(svc)
+
+    svc._modes.clear()  # noqa: SLF001 — stand in for a restart
+    loaded = await svc.history(session)
+
+    assert loaded.kind == "study"
+    assert svc.mode_for(session) is ctx.ConversationMode.STUDY
+
+
+async def test_deleting_a_conversation_forgets_its_mode_and_sub_mode(service) -> None:
+    """These two were leaking: `delete_session` cleaned the summary and the
+    title flag and left the mode behind for the life of the process."""
+    svc, _, _ = service
+    session = await svc.new_session()
+    await svc.send("hello", session_id=session)
+    await _drain(svc)
+    svc.set_mode(session, ctx.ConversationMode.QUICK)
+    svc.set_study_submode(session, StudySubMode.EXAM)
+
+    await svc.delete_session(session)
+
+    assert session not in svc._modes  # noqa: SLF001
+    assert session not in svc._study_submodes  # noqa: SLF001

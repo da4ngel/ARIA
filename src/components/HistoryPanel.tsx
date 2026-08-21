@@ -125,6 +125,16 @@ function Row({ session, active, onOpen, onRename, onAskDelete, onDelete }: RowPr
           <span className="font-mono">{clockTime(session.last_activity)}</span>
           <span aria-hidden>·</span>
           <span>{session.message_count} messages</span>
+          {/* A study chat is a different kind of conversation, not one with a
+              setting on it, and the list you look through for "that thing I
+              was learning" should say so. Not a filter — `chat.delete` looks a
+              session up through this same list, so narrowing it would 404 its
+              own delete. */}
+          {session.kind === 'study' && (
+            <span className="text-aria-accent" title="A study chat">
+              · study
+            </span>
+          )}
           {active && <span className="text-aria-ok">· open</span>}
         </span>
       </button>

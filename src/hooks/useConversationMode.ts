@@ -56,11 +56,11 @@ export const MODE_OPTIONS: Array<{
   hint: string
 }> = [
   { value: 'normal', label: 'Normal', hint: 'How she usually answers.' },
-  {
-    value: 'study',
-    label: 'Study',
-    hint: 'Teaches it: an example, then a question back. Not just the answer.',
-  },
+  // **Study is deliberately absent.** It stopped being a mode you switch on and
+  // became a kind of conversation you open, from the Study tab. `'study'` is
+  // still a member of `ConversationMode` and still what a study chat reports —
+  // it is simply not something this control can select, so a normal chat can
+  // never become one and a study chat can never stop being one.
   {
     value: 'research',
     label: 'Research',
@@ -91,7 +91,7 @@ export interface UseConversationMode {
   /** A mode this turn would suit better, offered once. Cleared when it is
    *  taken or dismissed, and by a mode change — an offer that outlived the
    *  message that prompted it would be advice about the wrong turn. */
-  suggestion: { mode: ConversationMode; label: string } | null
+  suggestion: { mode: ConversationMode; label: string; opensChat?: boolean } | null
   dismissSuggestion: () => void
   setMode: (next: ConversationMode) => Promise<void>
   error: string | null
@@ -117,13 +117,21 @@ export function useConversationMode(
   const [suggestion, setSuggestion] = useState<{
     mode: ConversationMode
     label: string
+    opensChat?: boolean
   } | null>(null)
 
   useEffect(() => {
     return window.aria.onEvent((event) => {
       if (event.method !== 'mode.suggested') return
-      const params = event.params as { mode: ConversationMode; label: string }
-      setSuggestion({ mode: params.mode, label: params.label })
+      const params = event.params as {
+        mode: ConversationMode
+        label: string
+        opens_chat?: boolean
+      }
+      // One event and one chip serve both offers. `opens_chat` is what tells
+      // them apart: Study can no longer be switched to, so its offer opens a
+      // new study chat instead of changing this one.
+      setSuggestion({ mode: params.mode, label: params.label, opensChat: params.opens_chat })
     })
   }, [])
 

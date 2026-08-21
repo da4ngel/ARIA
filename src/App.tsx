@@ -29,6 +29,7 @@ import { MemoryPanel } from '@/components/MemoryPanel'
 import { StudyPanel } from '@/components/StudyPanel'
 import { FilesPanel } from '@/components/FilesPanel'
 import { ModeSelector } from '@/components/ModeSelector'
+import { SubModeSelector, type SubMode } from '@/components/SubModeSelector'
 import { QuestionCard } from '@/components/QuestionCard'
 import { PermissionModeChip } from '@/components/PermissionModeChip'
 import { ToolsPanel } from '@/components/ToolsPanel'
@@ -58,7 +59,18 @@ type Overlay = Section | 'shortcuts' | null
 export default function App(): JSX.Element {
   const { status, assistantState, lastLog, restartBrain } = useRpc()
   const connected = status === 'connected'
-  const { turns, busy, send, cancel, newChat, openSession, rate, sessionId, lastFirstTokenMs } =
+  const {
+    turns,
+    busy,
+    send,
+    cancel,
+    newChat,
+    openSession,
+    rate,
+    sessionId,
+    sessionKind,
+    lastFirstTokenMs,
+  } =
     useConversation(connected)
   const models = useModels(connected)
   // Lifted so the header chip, the Tools panel and Settings all read one
@@ -96,6 +108,38 @@ export default function App(): JSX.Element {
   // labels and an expanded one could not hide them.
   const sidebar = useSidebar()
   const [overlay, setOverlay] = useState<Overlay>(null)
+  //: How the open study chat is being run. Lifted here because two surfaces
+  //: read it — the composer's picker and the Study panel's buttons — and two
+  //: independent copies could disagree about what is running.
+  const [subMode, setSubMode] = useState<SubMode>('learn')
+
+  /** Open a fresh study chat and hand back its id.
+   *
+   *  `newChat` holds the reserved id in state, so reading it straight back is
+   *  the same value the sidecar just minted — which is what the caller needs
+   *  in order to name the session it means rather than letting the sidecar
+   *  guess at "the latest one". */
+  const openStudyChat = useCallback(async (): Promise<string | null> => {
+    setSubMode('learn')
+    return newChat('study')
+  }, [newChat])
+
+  /** Set the sub-mode on the open study chat and send its opener.
+   *
+   *  The opener comes back from the sidecar rather than being written here, so
+   *  `study_modes.py` is the only place that decides what each one asks for. */
+  const startStudy = useCallback(
+    async (next: SubMode) => {
+      if (!sessionId) return
+      setSubMode(next)
+      const started = await window.aria.call<{ opener: string }>('study.start', {
+        session_id: sessionId,
+        sub_mode: next,
+      })
+      if (started?.opener) void send(started.opener)
+    },
+    [sessionId, send],
+  )
 
   const started = turns.length > 0
   // Real playback beats the sidecar's own state here: `speaking` should mean
@@ -366,16 +410,31 @@ export default function App(): JSX.Element {
                 {/* In the composer, not the header: the mode belongs to the
                     message about to be sent, and the header already carries
                     four controls in a 420px window. */}
-                <ModeSelector
-                  mode={answerMode.mode}
-                  label={answerMode.label}
-                  needsOnline={answerMode.needsOnline}
-                  disabled={!connected}
-                  suggestion={answerMode.suggestion}
-                  onSelect={(next) => void answerMode.setMode(next)}
-                  onEnableOnline={() => setOverlay('settings')}
-                  onDismissSuggestion={answerMode.dismissSuggestion}
-                />
+                {/* **The control changes with the kind of chat.** In a study
+                    chat the useful question is not how she should answer but
+                    how you are studying, so the same slot carries the six
+                    sub-modes instead of the five modes. A study chat has no
+                    mode to pick: it is Study, and the sidecar refuses to move
+                    it. */}
+                {sessionKind === 'study' ? (
+                  <SubModeSelector
+                    subMode={subMode}
+                    disabled={!connected}
+                    onSelect={(next) => void startStudy(next)}
+                  />
+                ) : (
+                  <ModeSelector
+                    mode={answerMode.mode}
+                    label={answerMode.label}
+                    needsOnline={answerMode.needsOnline}
+                    disabled={!connected}
+                    suggestion={answerMode.suggestion}
+                    onSelect={(next) => void answerMode.setMode(next)}
+                    onEnableOnline={() => setOverlay('settings')}
+                    onDismissSuggestion={answerMode.dismissSuggestion}
+                    onOpenStudyChat={() => void newChat('study')}
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => setOverlay('shortcuts')}
@@ -445,7 +504,8 @@ export default function App(): JSX.Element {
                 key="study"
                 onClose={() => setOverlay(null)}
                 onStudy={(text) => void send(text)}
-                sessionId={sessionId}
+                onNewStudyChat={openStudyChat}
+                onOpenSession={(id) => void openSession(id)}
               />
             )}
             {overlay === 'settings' && (
