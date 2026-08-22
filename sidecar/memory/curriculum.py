@@ -91,6 +91,34 @@ MATERIAL:
 <<SOURCE>>""".replace("{max_concepts}", str(MAX_CONCEPTS))
 
 
+_PLAN_PROMPT = """The user wants to learn something and has given you a goal
+rather than any material. Plan a roadmap for it.
+
+Return JSON only:
+{
+  "subject": "a short name for the whole topic",
+  "concepts": [
+    {"name": "...", "summary": "one sentence on what it covers and why it is here"}
+  ]
+}
+
+Rules:
+- A concept is something that can be taught in one sitting, explained back, and
+  tested. NOT a phase ("week 1"), a chapter heading, or "Introduction".
+- Order them so each one only needs the ones before it. This is a study order,
+  not a table of contents.
+- Between 5 and {max_concepts}. A roadmap of three is not a roadmap; one of
+  forty is a syllabus nobody finishes.
+- Aim at the goal as stated. If it names a purpose — an interview, an exam, a
+  project — pick what that purpose actually tests and leave out what it does
+  not, even if it is normally taught alongside.
+- Do not invent specifics you cannot support. Name the concept, not a claim
+  about it.
+
+GOAL:
+<<GOAL>>""".replace("{max_concepts}", str(MAX_CONCEPTS))
+
+
 class ExtractedConcept(BaseModel):
     name: str
     summary: str = ""
@@ -111,10 +139,22 @@ class CurriculumReport(BaseModel):
     model: str = ""
     local: bool = False
     error: str | None = None
+    #: True when the map came from the goal rather than from his material.
+    #: **Provenance, and it is not decoration.** A map read out of a lecture is
+    #: a claim about that lecture; one planned from a goal is her own view of
+    #: the topic, and the difference is exactly the kind of thing this codebase
+    #: refuses to blur. `study_subjects.source_path` is NULL for these, so
+    #: nothing new had to be stored to tell them apart.
+    planned: bool = False
 
 
 def build_prompt(source: str) -> list[ChatMessage]:
     return [ChatMessage(role=Role.USER, content=_PROMPT.replace("<<SOURCE>>", source))]
+
+
+def plan_prompt(goal: str) -> list[ChatMessage]:
+    """The roadmap prompt, for a goal with no material behind it."""
+    return [ChatMessage(role=Role.USER, content=_PLAN_PROMPT.replace("<<GOAL>>", goal))]
 
 
 def choose_model(usable: set[str], local_models: Sequence[str]) -> ModelInfo:
@@ -163,12 +203,23 @@ class CurriculumBuilder:
     async def build(
         self,
         *,
-        source: str,
+        source: str = "",
+        goal: str = "",
         subject_hint: str = "",
         source_path: str | None = None,
         usable_models: set[str] | None = None,
     ) -> CurriculumReport:
-        """Extract concepts from `source` and write them to a subject.
+        """Build a map, from material if there is any and from a goal if not.
+
+        **Two prompts, one path.** Everything after the model call — the JSON
+        salvage, the cap, the subject naming, the additive write — is identical,
+        and duplicating it for a second entry point is how two things that
+        should agree stop agreeing.
+
+        What differs is the claim being made. A map read out of a lecture says
+        *this is what that lecture teaches*; a roadmap planned from a goal says
+        *this is what I think that goal needs*. `report.planned` carries the
+        difference so the tool above can say which one he is looking at.
 
         Never raises. A failure comes back as a report with `error` set, so the
         tool above can say what went wrong rather than dying inside a turn.
@@ -176,18 +227,23 @@ class CurriculumBuilder:
         report = CurriculumReport(subject=subject_hint.strip())
 
         trimmed = source.strip()[:MAX_SOURCE_CHARS]
-        if len(trimmed) < 200:
+        planned = len(trimmed) < 200
+        if planned and not goal.strip():
             report.error = (
-                "There is not enough text in that material to build a map from. "
-                "If it is a scanned PDF or an image-only deck there is no text "
-                "layer to read — export it with text, or paste the content in."
+                "There is not enough text in that material to build a map from, "
+                "and no goal to plan one around. If it is a scanned PDF or an "
+                "image-only deck there is no text layer to read — export it with "
+                "text, or say what you want to learn and I will plan it."
             )
             return report
+        report.planned = planned
 
         info = choose_model(usable_models or set(), self._local_models)
         report.model, report.local = info.id, info.local
 
-        raw = await self._generate(info, trimmed, report)
+        raw = await self._generate(
+            info, goal.strip() if planned else trimmed, report, planned=planned
+        )
         if raw is None:
             return report
 
@@ -204,7 +260,11 @@ class CurriculumBuilder:
         concepts = [c for c in output.concepts if c.name.strip()][:MAX_CONCEPTS]
         report.concepts_found = len(concepts)
         if not concepts:
-            report.error = "No teachable concepts came back from that material."
+            report.error = (
+                "No roadmap came back for that goal."
+                if report.planned
+                else "No teachable concepts came back from that material."
+            )
             return report
 
         # The model's own name for the topic, unless the caller named it. The
@@ -223,10 +283,18 @@ class CurriculumBuilder:
             found=report.concepts_found,
             added=report.concepts_added,
             model=report.model,
+            planned=report.planned,
         )
         return report
 
-    async def _generate(self, info: ModelInfo, source: str, report: CurriculumReport) -> str | None:
+    async def _generate(
+        self,
+        info: ModelInfo,
+        source: str,
+        report: CurriculumReport,
+        *,
+        planned: bool = False,
+    ) -> str | None:
         """Ask the chosen model, falling back to local on a provider failure.
 
         `report.model` is rewritten on the fallback path. `reflection` records
@@ -234,7 +302,7 @@ class CurriculumBuilder:
         the very log line recording it working.
         """
         try:
-            return await self._stream(info, source)
+            return await self._stream(info, source, planned=planned)
         except ProviderError as exc:
             if info.local:
                 report.error = f"The local model could not read that material: {exc}"
@@ -245,20 +313,20 @@ class CurriculumBuilder:
         fallback = catalog.default_local(self._local_models)
         report.model, report.local = fallback.id, True
         try:
-            return await self._stream(fallback, source)
+            return await self._stream(fallback, source, planned=planned)
         except ProviderError as exc:
             report.error = f"No model could read that material: {exc}"
             log.warning("curriculum.local_failed", error=str(exc))
             return None
 
-    async def _stream(self, info: ModelInfo, source: str) -> str:
+    async def _stream(self, info: ModelInfo, source: str, *, planned: bool = False) -> str:
         provider = self._providers.get(info.provider)
         if provider is None:
             raise ProviderError(f"No provider configured for {info.provider}.")
 
         chunks: list[str] = []
         async for delta in provider.stream_chat(
-            build_prompt(source),
+            plan_prompt(source) if planned else build_prompt(source),
             model=info.id,
             options=GenerationOptions(
                 num_ctx=info.context_tokens, max_tokens=CURRICULUM_MAX_TOKENS

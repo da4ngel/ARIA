@@ -3693,6 +3693,95 @@ and `chat.mode` would now refuse it) but not executed.
 everything underneath: the map, mastery, the sub-mode policies, the two tools.
 Only the way in changed.
 
+## She asked in prose, because the tool told her to (2026-08-22)
+    pytest sidecar/tests -v            # 1429
+    python scripts/gate_study.py       # line 7 is this bug, end to end
+
+Eyaas, with a screenshot: *"i tried to learn something in new, and first it gave
+me an quick question, but it wasnt in the option selecting mode. and also i
+wanted to have plan stuff, before studyung something, which will plan out the
+roadmap to study and then it starts teaching accordingly."*
+
+Two complaints, **one cause**, and it was not the model.
+
+    330  study_begin  ok=0  error=no_material
+         args: {"subject": "data science internship technical interview",
+                "material": ""}
+
+`study_begin` required a file. Without one it refused, and its failure text
+said *"Ask him to attach the lecture, slides or notes... then call this again
+with the file name."* So she asked — and since nothing in that instruction
+mentioned `ask_user`, she asked in prose:
+
+> **A)** Mostly ML/statistics + coding … **D)** A mix (tell me the breakdown)
+> Reply with **the option letter (A/B/C/D)** and attach the material.
+
+- **`ask_user` was offered to her the whole time.** Checked directly rather
+  than assumed: Study's `READ_ONLY` ceiling is `Tier.SAFE`, `ask_user` is
+  `Tier.AUTO`, and 29 tools reach that turn including it. This was not a
+  filtering bug. **A tool result is an instruction to a model**, and the one
+  she had said "ask him" without saying how.
+- **The second complaint is the same dead end from the other side.** There was
+  no path at all from a stated goal to a plan — material or nothing.
+
+### One path, two prompts
+`CurriculumBuilder.build` now takes `goal` as well as `source`, and picks
+`_PLAN_PROMPT` when there is no material to read. Everything after the model
+call — the JSON salvage, the cap, the subject naming, the additive write — is
+shared, because duplicating it for a second entry point is how two things that
+should agree stop agreeing.
+
+The prompts differ in what they forbid, which is why they cannot be one.
+`_PROMPT` says *"include ONLY concepts the material actually covers"*; a
+roadmap has no material, so asking through that prompt would forbid the whole
+answer. `_PLAN_PROMPT` asks for a **study order** rather than a table of
+contents, aims at the stated purpose ("pick what that purpose actually tests"),
+and says *"name the concept, not a claim about it"* — the roadmap is a list of
+what to learn, not a set of assertions about it.
+
+- **Provenance is carried, not blurred.** `report.planned` says whether the map
+  came from his material or from her own view of the topic, and the summary
+  makes her say so: *"say plainly that you planned it rather than read it out
+  of his own notes."* A roadmap presented as though it came from his notes is
+  exactly the quiet claim every anti-invention clause in `context.py` exists to
+  stop.
+- **Nothing new is stored to tell them apart.** `study_subjects.source_path` is
+  already NULL for a planned map. No migration.
+- **Material still wins when there is any**, with a test — a goal alongside a
+  real lecture must not quietly become a roadmap.
+
+### Show it, then check — and the options go through the tool
+His own answer to the one question worth asking. A roadmap is a claim about
+what he should spend weeks on, and ten sessions built on the wrong one is
+expensive. So `study_begin`'s planned branch tells her to show the roadmap,
+offer *start here / reorder / too broad / add something* through `ask_user`,
+and **not start teaching until he has answered** — with `never as A) B) C) in
+your reply` named in the instruction, because that is the shape of the bug.
+
+Mutation-checked: forcing the branch off fails exactly its three tests.
+
+### Two dead ends removed, not one
+A named file she cannot find used to refuse outright too. It now offers to plan
+from the subject instead. **A dead end is what caused this whole bug once**, and
+a second one in the same tool would have produced the same failure by a
+different route.
+
+### The prompt budget had no room for a general guard, and that is the honest
+### reason there is not one
+The clean general fix would be a line in Study's mode block — *put multiple
+choice through the tool, never A) B) C)*. Study sits at **147 of its 150-token
+cap and 798 of the 800-token local prefix budget**: two tokens of headroom.
+Buying ~12 would mean cutting one of the sentences that is now actually true
+("bring back an earlier mistake when it becomes relevant") to guard a case
+whose cause has just been removed. The fix stays at the source. If prose
+options show up again somewhere without a tool result behind them, that is when
+the trade is worth making.
+
+**1429 sidecar tests (+10), 212 renderer, ruff, mypy, typecheck and the build
+all clean.** `gate_study.py` gains a seventh line carrying this exact bug — a
+bare goal must plan a roadmap, and the reply must contain no `A)` `B)` `C)`
+`D)` — and **still has never been run live**.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -3821,6 +3910,13 @@ mode is a style, so neither is a tool.
 See the section above for what is proven live and what is not. **That entry
 said 42 and the registry held 40** — the count had been wrong here since
 somewhere around Phase 8 and nothing checked it. It is now genuinely 42.
+
+**Study plans a roadmap now, and asks by click 2026-08-22** — `study_begin`
+required a file, refused without one, and its failure text told her to ask him
+for material; she asked in prose with A) B) C) D) options nobody could click.
+One dead end behind both of Eyaas's complaints. It plans from a stated goal now,
+marks the map as planned rather than read, and its instruction names `ask_user`.
+**42 tools, no migration.**
 
 **Study became a kind of chat 2026-08-21** — `sessions.kind` (**schema 8**),
 a study chat created rather than switched into, Study out of the mode picker,

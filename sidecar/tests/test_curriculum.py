@@ -218,3 +218,73 @@ async def test_indexed_chunks_are_read_back_in_order(database: Database) -> None
 @pytest.mark.asyncio
 async def test_a_file_that_was_never_indexed_reads_as_empty(database: Database) -> None:
     assert await curriculum.source_text(database, "C:/nothing/here.pdf") == ""
+
+
+# ── a roadmap, when there is no material ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_goal_with_no_material_still_produces_a_map(database: Database) -> None:
+    """The bug this fixes: `study_begin` used to refuse without a file, so
+    "teach me for a data science interview" dead-ended into a question about
+    attachments."""
+    report = await _builder(database, StubProvider(GOOD_REPLY)).build(
+        source="", goal="prepare me for a data science internship interview"
+    )
+
+    assert report.error is None
+    assert report.concepts_added == 3
+    assert report.planned is True
+
+
+@pytest.mark.asyncio
+async def test_a_planned_map_is_marked_as_planned(database: Database) -> None:
+    """**Provenance, and it is not decoration.** A map read out of a lecture is
+    a claim about that lecture; one planned from a goal is her own view of the
+    topic. `source_path` stays NULL for a planned map, which is how they are
+    told apart without storing anything new."""
+    planned = await _builder(database, StubProvider(GOOD_REPLY)).build(
+        source="", goal="data science interviews", subject_hint="DS interview"
+    )
+    read = await _builder(database, StubProvider(GOOD_REPLY)).build(
+        source=LECTURE, subject_hint="Kestrel", source_path="C:/lectures/k.txt"
+    )
+
+    assert planned.planned is True
+    assert read.planned is False
+    state = await study.state(database, planned.subject_id or 0)
+    assert state is not None and state.source_path is None
+
+
+@pytest.mark.asyncio
+async def test_material_is_used_when_there_is_any(database: Database) -> None:
+    """A goal alongside real material must not quietly become a roadmap — the
+    material is the better source and the whole reason source priority exists."""
+    report = await _builder(database, StubProvider(GOOD_REPLY)).build(
+        source=LECTURE, goal="learn kestrel", source_path="C:/lectures/k.txt"
+    )
+
+    assert report.planned is False
+
+
+@pytest.mark.asyncio
+async def test_neither_material_nor_goal_says_what_to_do(database: Database) -> None:
+    provider = StubProvider(GOOD_REPLY)
+    report = await _builder(database, provider).build(source="", goal="")
+
+    assert report.error is not None
+    assert "plan it" in report.error
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_the_two_prompts_are_different(database: Database) -> None:
+    """One path, two prompts — and a planned map asked from the material prompt
+    would tell the model to only include what "the material actually covers",
+    of which there is none."""
+    goal_text = curriculum.plan_prompt("data science interviews")[0].content
+    source_text = curriculum.build_prompt(LECTURE)[0].content
+
+    assert "GOAL:" in goal_text and "MATERIAL:" not in goal_text
+    assert "MATERIAL:" in source_text and "GOAL:" not in source_text
+    assert "study order" in goal_text

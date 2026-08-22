@@ -47,18 +47,23 @@ class QuizQuestion(BaseModel):
 
 _BEGIN_DESCRIPTION = """Start or resume teaching a subject.
 
-Call this at the start of a study session — when he attaches lecture material
-and asks to be taught it, or when he says to carry on with something ("carry on
-with information security", "back to networking"). It builds a map of what the
-material teaches, or brings back the map and his progress if the subject
-already exists.
+Call this at the start of a study session, and give it whatever he gave you:
+
+- **A file he attached** — pass its name as `material`. The map is then built
+  from what that material actually teaches.
+- **Just a goal** — "prepare me for a data science interview", "teach me
+  transformers". Leave `material` empty and it plans a roadmap for the goal.
+  **Do not ask him for a file first.** A roadmap is a better answer than a
+  question, and he can attach material later; it merges into the same map.
+- **Neither, because he is carrying on** — "back to networking". It brings
+  back the map and his progress.
 
 Call it ONCE per session, before teaching. It is not needed to answer a
 one-off question, and calling it again mid-session wastes a step — after the
 first call, what he knows is already in front of you.
 
-`material` is the file he attached. Give its name exactly as he gave it; the
-path is worked out here."""
+`subject` should be what he actually said he wants to learn, in his words. It
+is what resuming matches on later."""
 
 
 _CHECK_DESCRIPTION = f"""Ask him a question about what you just taught, and
@@ -147,11 +152,13 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
     """Build or resume a subject's concept map.
 
     Args:
-        subject: What he is studying, in his own words — "information
-            security", "week 3 networking". Used to find the subject again
-            when he asks to carry on.
+        subject: What he wants to learn, in his own words — "information
+            security", "week 3 networking", "prepare me for a data science
+            interview". Used to find the subject again when he asks to carry
+            on, and used as the goal when there is no material to read.
         material: The lecture or notes to build the map from, by file name.
-            Leave empty to resume a subject that already has a map.
+            Leave empty when he has not given you a file — a roadmap is then
+            planned from the subject itself. Never ask him for a file first.
     """
     from sidecar.state import runtime
 
@@ -180,29 +187,27 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
                 display={"kind": "study_map", "subject": state.subject, "resumed": True},
             )
 
-    if not material.strip():
-        return ToolResult(
-            ok=False,
-            summary=(
-                f"There is no map for '{subject}' yet and no material was named. "
-                "Ask him to attach the lecture, slides or notes he wants to work "
-                "from, then call this again with the file name."
-            ),
-            error="no_material",
-        )
+    # **No material is not a dead end any more, and that was the bug.** This
+    # used to refuse and tell her to ask him for a file — so she asked, in
+    # prose, with A) B) C) D) options that could not be clicked. A goal is
+    # enough to plan a roadmap from, and planning one is a better answer to
+    # "teach me for my interview" than a question about attachments.
+    path: str | None = None
+    if material.strip():
+        path = await db.run(lambda c: _resolve_material(c, material))
+        if path is None:
+            return ToolResult(
+                ok=False,
+                summary=(
+                    f"I could not find '{material}' among the files I have read. "
+                    "Ask him to attach it to the conversation, then try again — "
+                    "or call this again with no material and I will plan a "
+                    "roadmap from the subject instead."
+                ),
+                error="not_found",
+            )
 
-    path = await db.run(lambda c: _resolve_material(c, material))
-    if path is None:
-        return ToolResult(
-            ok=False,
-            summary=(
-                f"I could not find '{material}' among the files I have read. "
-                "Ask him to attach it to the conversation, then try again."
-            ),
-            error="not_found",
-        )
-
-    text = await curriculum.source_text(db, path)
+    text = await curriculum.source_text(db, path) if path else ""
     # Which cloud models have a key, so extraction can prefer one. Absent
     # availability is not an error — it means local, which is what
     # `choose_model` falls back to anyway.
@@ -210,6 +215,7 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
     builder = curriculum.CurriculumBuilder(db, runtime.providers, runtime.local_models)
     report = await builder.build(
         source=text,
+        goal=subject,
         subject_hint=subject,
         source_path=path,
         usable_models=usable,
@@ -225,17 +231,42 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
     await _remember_subject(db, ctx, report.subject_id)
     state = await study.state(db, report.subject_id)
     described = _describe(state) if state is not None else ""
-    return ToolResult(
-        ok=True,
-        summary=(
+    if report.planned:
+        # **Show it, then check — his own answer.** A roadmap is a claim about
+        # what he should spend weeks on, and ten sessions built on the wrong one
+        # is expensive. The options go through `ask_user`, never written out as
+        # A) B) C) in the reply: that is the whole point of having the tool, and
+        # writing them as letters is the bug this branch exists to stop.
+        summary = (
+            f"Planned a roadmap for {report.subject} — {report.concepts_added} "
+            f"concepts, from the goal rather than from any material of his.\n"
+            f"{described}\n"
+            "Show him the roadmap as a numbered list, say plainly that you planned "
+            "it rather than read it out of his own notes, then call `ask_user` once "
+            "with options like: start with the first one / reorder it / it is too "
+            "broad, narrow it / add something missing. **Write the options through "
+            "`ask_user`, never as A) B) C) in your reply, and do not start teaching "
+            "until he has answered.**"
+        )
+    else:
+        summary = (
             f"Built a map of {report.subject} from {material} "
             f"({report.concepts_added} new concepts).\n{described}\n"
             "Teach the first one now. Do not list the map back at him — start teaching."
-        ),
-        data={"subject_id": report.subject_id, "added": report.concepts_added},
+        )
+
+    return ToolResult(
+        ok=True,
+        summary=summary,
+        data={
+            "subject_id": report.subject_id,
+            "added": report.concepts_added,
+            "planned": report.planned,
+        },
         display={
             "kind": "study_map",
             "subject": report.subject,
+            "planned": report.planned,
             "concepts": [c.name for c in (state.concepts if state else ())],
         },
     )

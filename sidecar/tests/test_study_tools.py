@@ -20,7 +20,7 @@ from sidecar.memory import study
 from sidecar.memory.db import Database
 from sidecar.tools import registry
 from sidecar.tools.registry import Tier, Tool, ToolContext
-from sidecar.tools.study import QuizQuestion, study_check
+from sidecar.tools.study import QuizQuestion, study_begin, study_check
 
 CTX = ToolContext(session_id="s_1", turn_id="t_1")
 
@@ -367,3 +367,99 @@ async def test_an_ordinary_quiz_still_says_what_the_answer_was(
     result = await study_check(CTX, [quiz(correct="Availability")])
 
     assert "Availability" in result.summary
+
+
+# ── planning from a goal, which is where the A) B) C) bug came from ───
+
+
+@pytest.fixture
+def planner(monkeypatch: pytest.MonkeyPatch):
+    """Stand in for the model call, so this tests the tool rather than a 7B."""
+    from sidecar.memory import curriculum
+    from sidecar.state import runtime
+
+    class FakeBuilder:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def build(self, **kwargs: object) -> curriculum.CurriculumReport:
+            report = curriculum.CurriculumReport(
+                subject=str(kwargs.get("subject_hint") or "Study"),
+                concepts_found=3,
+                concepts_added=3,
+                planned=not str(kwargs.get("source") or "").strip(),
+                model="stub",
+            )
+            db = runtime.require_db()
+            report.subject_id = await study.ensure_subject(db, report.subject)
+            await study.add_concepts(
+                db, report.subject_id, [("Probability", ""), ("SQL", ""), ("ML", "")]
+            )
+            return report
+
+    monkeypatch.setattr(curriculum, "CurriculumBuilder", FakeBuilder)
+
+
+@pytest.mark.asyncio
+async def test_a_goal_with_no_file_plans_instead_of_refusing(
+    wired: Database, planner: None
+) -> None:
+    """**The reported bug.** "hey im preparing for a data science internship
+    technical interview, i want you to teach me in proper way" returned
+    `no_material`, and the failure text told her to ask him for a file — so she
+    asked, in prose, with A) B) C) D) options he could not click."""
+    result = await study_begin(CTX, subject="data science internship technical interview")
+
+    assert result.ok, result.error
+    assert result.data is not None and result.data["planned"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_planned_roadmap_is_shown_and_checked_before_teaching(
+    wired: Database, planner: None
+) -> None:
+    """His own answer: show it, then check. A roadmap is a claim about what he
+    should spend weeks on, and ten sessions built on the wrong one is
+    expensive."""
+    result = await study_begin(CTX, subject="data science interview")
+
+    assert "ask_user" in result.summary
+    assert "do not start teaching" in result.summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_planned_roadmap_forbids_writing_the_options_as_letters(
+    wired: Database, planner: None
+) -> None:
+    """The exact shape of the bug, named in the instruction that replaces it —
+    a tool result is an instruction to a model, and this is the moment she was
+    following one that did not mention the tool at all."""
+    result = await study_begin(CTX, subject="data science interview")
+
+    assert "A) B) C)" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_a_planned_roadmap_says_it_was_planned_not_read(
+    wired: Database, planner: None
+) -> None:
+    """Provenance reaches the model, not just the database. A roadmap presented
+    as though it came from his own notes is the kind of quiet claim every
+    anti-invention clause in `context.py` exists to stop."""
+    result = await study_begin(CTX, subject="data science interview")
+
+    assert "rather than from any material" in result.summary
+    assert "planned it rather than read it" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_a_named_file_that_is_missing_offers_to_plan_instead(
+    wired: Database, planner: None
+) -> None:
+    """A dead end is what caused this whole bug once. Naming a file she cannot
+    find should not produce a second one."""
+    result = await study_begin(CTX, subject="networking", material="nope.pptx")
+
+    assert not result.ok
+    assert result.error == "not_found"
+    assert "plan a roadmap" in result.summary

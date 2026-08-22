@@ -22,6 +22,8 @@ Five lines, in the order they have to work:
 6. A sub-mode changes the session: Revision works on what is shaky, and
    **an Exam does not give the answers away**, which is the one lever that is
    mechanical rather than a prompt line a model may ignore.
+7. A bare goal with no material plans a roadmap and asks about it **by click**
+   rather than writing A) B) C) D) into the reply.
 
 **Its own sessions, its own scratch lecture, and it answers its own
 questions.** `chat.send` with no session continues whatever conversation was
@@ -400,6 +402,33 @@ async def main() -> int:
         else:
             observed.append("6. no study_check ran during the exam turn")
             print("    OBSERVED  she did not reach for study_check — read the reply above")
+
+        print("\n" + "=" * 72)
+        print("7. A GOAL WITH NO MATERIAL PLANS A ROADMAP, AND ASKS BY CLICK")
+        print("=" * 72)
+        goal_session = await study_session(client)
+        result = await client.ask(
+            goal_session,
+            "hey im preparing for a gate transport security exam, teach me properly",
+        )
+        reply = (result.get("full_text") or "").strip()
+        print(f"    tools: {client.tools_used()}")
+        print(f"    reply:\n      {reply[:400]}")
+
+        # The reported bug, end to end. She used to refuse for want of a file
+        # and then write A) B) C) D) into the reply, which cannot be clicked.
+        if "study_begin" not in client.tools_used():
+            failures.append("7. she did not reach for study_begin on a bare goal")
+        letters = [m for m in ("A)", "B)", "C)", "D)") if m in reply]
+        if letters:
+            failures.append(f"7. she wrote the options as {letters} instead of asking by click")
+        elif client.questions_asked:
+            print(
+                f"    PASS  roadmap planned, {len(client.questions_asked[0])} clickable option(s)"
+            )
+        else:
+            observed.append("7. no question was put on screen after the roadmap")
+            print("    OBSERVED  no clickable question — read the reply above and judge")
 
     finally:
         # The subject this gate created is left in place deliberately: it is
