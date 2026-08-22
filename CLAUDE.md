@@ -3959,12 +3959,9 @@ before it is written. What it still wants:
 - Its acceptance gate needs a **clean Windows 11 VM**, and code signing needs a
   certificate this project does not have.
 
-**The three deep mode features**, designed with Eyaas and deliberately deferred
-when `ModePolicy` was built — each is a session, and each hangs off it:
-- **Study's knowledge map**: per-topic mastery, a migration, and a panel. The
-  one piece here that is a new subsystem rather than a policy, so it lands with
-  its writer wired and a test that fails if nothing writes to it — this project
-  has shipped four tables nobody wrote to.
+**Two of the three deep mode features** designed with Eyaas when `ModePolicy`
+was built. **Study's is done** — knowledge map, mastery, sub-modes, the panel
+and study chats, 2026-08-20 to 2026-08-22. The other two are each a session:
 - **Research's evidence pipeline**: decompose → gather → cross-check →
   synthesise, with source labels **derived rather than scored**. No number out
   of ten: what is checkable is whether a source is old, vendor-published, a
@@ -3977,15 +3974,12 @@ when `ModePolicy` was built — each is a session, and each hangs off it:
 - **`READ_ONLY` in Quick and Study is unmeasured.** Per-mode tool sets are
   argued to be safe where relevance filtering was not, and that argument has
   not been tested. `gate_tool_selection.py` is the instrument.
-- **The Study loop is unproven against a real model.** `gate_study.py` covers
-  it end to end — map, teach, quiz, resume, a question the lecture does not
-  answer, and (since 2026-08-21) Revision and Exam — and needs one run with the
-  sidecar up. The line most likely to fail is the first: whether the concepts
-  really come out of the material.
-- **Nothing about Study has been looked at on screen** — not the panel, the six sub-mode buttons, the rail item, the study-chat badge in Chats, or the composer swapping its picker inside a study chat. Three days of it builds and its tests pass, which is exactly the state the retheme was in when it shipped a blank window.
-- **The Study panel has not been looked at on screen**, and neither have the
-  six sub-mode buttons. It builds and its 12 tests pass, which is exactly the
-  state the retheme was in when it shipped a blank window.
+- **The Study loop is unproven against a real model, and it is now seven gate
+  lines deep.** `gate_study.py` covers map → teach → quiz → resume → a question
+  the lecture does not answer → Revision and Exam → a bare goal planning a
+  roadmap and asking by click. It has never been run. **Three sessions have now
+  ended with this as the outstanding item.** The line most likely to fail is
+  the first: whether the concepts really come out of the material.
 - **No free model has been *adopted* yet.** `gemma-4-26b` reached 12 of 20
   probes before the 50-a-day allowance ran out. **The scheduler only starts at
   startup**, so ARIA needs a restart with the key in place.
@@ -3995,12 +3989,17 @@ when `ModePolicy` was built — each is a session, and each hangs off it:
   blocked on that quota.
 
 **Not observed working, for reasons that are not code:**
-- **The UI has still not been looked at.** The renderer builds and mounts, but
-  nobody has seen the new palette, the mode control, the Critic option, the
-  suggestion chip or the attachment chips on screen. **Restart `npm run dev`
-  fully** — main and preload never hot-reload — then check every panel, both
-  window sizes, all five orb states, and the window over a bright white editor,
-  which is the case the 0.62 glass alpha was chosen for.
+- **The UI has still not been looked at, and this is now the oldest open item
+  in the file.** The renderer builds and mounts and 212 tests pass; nobody has
+  seen the green palette, the snippet boxes, the maximised window, the mode
+  control, the Critic option, the suggestion chip, the attachment chips, or any
+  of three days of Study — the rail item, the panel, the six sub-mode buttons,
+  the study-chat badge in Chats, or the composer swapping its picker inside a
+  study chat. **Restart `npm run dev` fully** — main and preload never
+  hot-reload — then check every panel, both window sizes, all five orb states,
+  and the window over a bright white editor, which is the case the 0.62 glass
+  alpha was chosen for. The retheme passed every test and shipped a blank
+  window; that is what this debt costs when it is left.
 - **`type_text` has not been exercised on a real desktop** since the rewrite.
   Unit tests and a mutation check cover the window claim, the paste path and
   the clipboard restore, but no automated test opens a real Notepad.
