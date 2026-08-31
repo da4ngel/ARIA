@@ -1,6 +1,16 @@
 # PyInstaller spec for the sidecar (BUILD_SPEC §9 Phase 9).
 #
+#     npm run dist:sidecar
+#
+# which is:
+#
 #     pyinstaller packaging/sidecar.spec --noconfirm
+#         --distpath packaging/dist --workpath packaging/build
+#
+# **The paths are not optional.** PyInstaller defaults to `./dist` and
+# `./build` relative to the working directory, and `./dist` is where
+# electron-builder puts the installer — two different things under one
+# name. `npm run dist:sidecar` passes them; run it that way.
 #
 # **`--onedir`, not `--onefile`**, which §9 already specifies and which is not
 # a preference: a onefile build unpacks itself to a temp directory on every
@@ -19,7 +29,11 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
 
 # The spec is executed with `SPECPATH` set to its own directory; the repo is
 # one level up. `__file__` is not defined in a spec file.
@@ -35,13 +49,30 @@ hidden = [
     "onnxruntime",
     "onnxruntime.capi",
     "onnxruntime.capi._pybind_state",
-    # **`ctranslate2` is deliberately NOT listed.** Naming it here makes
-    # PyInstaller register the frozen module *and* leave the on-disk
-    # `_ext.cp311-win_amd64.pyd` reachable, so the extension is loaded twice
-    # under two names and Python raises `cannot load module more than once
-    # per process` — which killed speech recognition and the wake word in an
-    # otherwise working bundle. PyInstaller ships its own ctranslate2 hook;
-    # letting it do the work is the fix. Found by running the bundle.
+    # **The bundle's speech failure was numpy, not ctranslate2.**
+    #
+    # For weeks this bundle raised `cannot load module more than once per
+    # process` and the blame sat on ctranslate2. It never belonged there. That
+    # string is compiled into `numpy/_core/_multiarray_umath.pyd` and re-raised
+    # verbatim by `numpy/_core/__init__.py`; it is numpy's own guard against a
+    # C extension being initialised twice.
+    #
+    # What actually happened: PyInstaller 6.10's numpy hook does not understand
+    # numpy 2.4's layout and left `numpy._core._exceptions` out of the bundle
+    # entirely. The *first* `import numpy` therefore died with
+    # `ModuleNotFoundError: No module named 'numpy._core._exceptions'` — after
+    # the C extension had already initialised — and numpy was evicted from
+    # `sys.modules`. Every later import was a *second* initialisation, which
+    # numpy refuses. **The famous error was the symptom of the second attempt;
+    # nobody ever saw the first, because `main.py` logged `str(exc)` without a
+    # traceback and the shipped exe has no console.**
+    #
+    # `collect_submodules` rather than naming `_exceptions` alone: the hook is
+    # simply older than the library, so the next missing submodule would fail
+    # the same way. Same for scipy, which is reached through sklearn from
+    # openwakeword and was missing `scipy._cyutility`.
+    *collect_submodules("numpy"),
+    *collect_submodules("scipy"),
     # Reached by name from `providers/tts.py` and `providers/wakeword.py`.
     "kokoro_onnx",
     "openwakeword",
@@ -76,15 +107,46 @@ datas = [
 # The .dll sqlite-vec loads by path, and onnxruntime's own native libraries.
 datas += collect_data_files("sqlite_vec")
 
-# **`ctranslate2` is deliberately not collected here.** Adding it produced a
-# bundle that built cleanly and then failed at runtime with
-# `cannot load module more than once per process` — faster-whisper could not
-# start, so speech recognition and the wake word were both dead in the
-# packaged app while everything else worked. PyInstaller already ships a hook
-# for it; collecting the DLLs a second time puts the same native module at two
-# paths and loading it twice is what that error is. Found by running the
-# bundle, not by building it.
-binaries = collect_dynamic_libs("onnxruntime")
+# **The Silero VAD weights faster-whisper ships as package data.**
+# `providers/vad.py:92` calls `get_vad_model()`, which resolves
+# `faster_whisper/assets/silero_vad.onnx` relative to its own `__file__`, and
+# `stt.py:219` passes `vad_filter=True` for the same file. Nothing imports it,
+# so static analysis cannot see it and the bundle shipped without it — which
+# broke hands-free independently of the numpy fault below, and would have kept
+# it broken after that was fixed.
+datas += collect_data_files("faster_whisper")
+
+# **Her voice drags in a whole text-processing stack, and all of it reads data
+# files at import time.** `kokoro_onnx/config.json` was the first; behind it sit
+# `csvw` -> `language_tags` -> `language_tags/data/json/index.json`, the espeak
+# phonemiser and its DLLs, and Babel's locale tables. Every one of them fails as
+# an *ImportError*, not a runtime error, so the whole of TTS is absent from the
+# bundle if any single file is.
+#
+# Enumerated in one pass rather than discovered one rebuild at a time: import
+# `kokoro_onnx` in the dev venv, diff `sys.modules`, and look for packages
+# carrying non-.py files. That is worth remembering — each rebuild is five
+# minutes, and this chain is five deep.
+for _voice_package in (
+    "kokoro_onnx",
+    "espeakng_loader",  # 365 files, including the espeak-ng DLLs
+    "phonemizer",
+    "language_tags",
+    "jsonschema",
+    "jsonschema_specifications",
+    "babel",  # locale tables, ~1000 .dat files
+):
+    datas += collect_data_files(_voice_package)
+
+# `ctranslate2` needs no special handling. Two long comments used to stand here
+# claiming it did — that naming it in `hiddenimports` or collecting its DLLs
+# caused `cannot load module more than once per process`, and that PyInstaller
+# ships a hook for it. **Both were wrong**, and they cost three separate
+# attempts at the wrong library: there is no `hook-ctranslate2.py` in
+# PyInstaller 6.10, and the error was never ctranslate2's. See `hidden` below.
+# espeak-ng ships as DLLs beside its Python loader; `collect_data_files`
+# takes the data but not the shared libraries.
+binaries = collect_dynamic_libs("onnxruntime") + collect_dynamic_libs("espeakng_loader")
 
 a = Analysis(  # noqa: F821
     [str(ROOT / "sidecar" / "main.py")],
@@ -118,8 +180,31 @@ exe = EXE(  # noqa: F821
     console=False,
 )
 
+# **A console twin, and it is the whole reason the numpy fault took weeks.**
+#
+# The shipped exe has no console, so a traceback raised before structlog is set
+# up — or one swallowed into `log.warning(error=str(exc))` — goes nowhere at
+# all. The *first* numpy failure, the one naming the actually-missing module,
+# was never seen by anybody for exactly that reason.
+#
+# This shares every binary and data file with the real exe (COLLECT emits one
+# `_internal/`), so it costs about a megabyte. Run it with `--selftest` to
+# import every optional subsystem and print a full traceback per failure.
+debug_exe = EXE(  # noqa: F821
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="aria-sidecar-debug",
+    debug=False,
+    strip=False,
+    upx=False,
+    console=True,
+)
+
 coll = COLLECT(  # noqa: F821
     exe,
+    debug_exe,
     a.binaries,
     a.datas,
     strip=False,

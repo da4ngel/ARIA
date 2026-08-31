@@ -13,7 +13,10 @@ program already indexed, the other puts a question on screen.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import sqlite3
+from pathlib import Path
 
 import structlog
 from pydantic import BaseModel, Field, ValidationError
@@ -107,6 +110,27 @@ async def _remember_subject(db: object, ctx: ToolContext, subject_id: int) -> No
         log.warning("study.subject_stamp_failed", exc_info=True)
 
 
+def _attached_this_turn(material: str, attachments: tuple[str, ...]) -> str | None:
+    """The file he attached *in this message*, matched by name.
+
+    Checked **before** `file_index`, because the index is filled by a
+    throttled background sweep that pauses while she is answering and skips
+    `AppData` entirely — so a lecture attached seconds ago, or one living
+    under `%TEMP%`, is not in it. The turn was handed the absolute path;
+    requiring the indexer to have caught up first is the same "a file she
+    just touched is invisible for 45 seconds" trap `finder._Cache` already
+    had, arriving from a different direction.
+    """
+    clean = material.strip().strip('"').casefold()
+    if not clean or not attachments:
+        return None
+    for raw in attachments:
+        name = Path(raw).name.casefold()
+        if clean in (name, raw.casefold()) or clean in name:
+            return raw
+    return None
+
+
 def _resolve_material(conn: sqlite3.Connection, material: str) -> str | None:
     """A file name or path as the model gave it, resolved to an indexed path.
 
@@ -194,7 +218,9 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
     # "teach me for my interview" than a question about attachments.
     path: str | None = None
     if material.strip():
-        path = await db.run(lambda c: _resolve_material(c, material))
+        path = _attached_this_turn(material, ctx.attachments) or await db.run(
+            lambda c: _resolve_material(c, material)
+        )
         if path is None:
             return ToolResult(
                 ok=False,
@@ -230,7 +256,30 @@ async def study_begin(ctx: ToolContext, subject: str, material: str = "") -> Too
     await study.touch(db, report.subject_id)
     await _remember_subject(db, ctx, report.subject_id)
     state = await study.state(db, report.subject_id)
-    described = _describe(state) if state is not None else ""
+
+    # **A map with nothing on it is not a map, and reporting it as one is how
+    # a whole session goes wrong quietly.** Observed live: `study_begin`
+    # returned ok with `concepts_added=0` (the extraction produced nothing
+    # usable), she read "Built a map — 0 new concepts. Teach the first one
+    # now", found nothing to teach, called the same tool again with the same
+    # arguments, and the loop guard's own note became her entire reply.
+    #
+    # `report.error` did not fire because the subject row *was* created. The
+    # subject is not the map; the concepts are.
+    if state is None or not state.concepts:
+        return ToolResult(
+            ok=False,
+            summary=(
+                f"A subject for {report.subject!r} exists but nothing could be "
+                f"read into it — no concepts were extracted"
+                + (f" from {material}." if not report.planned else " from that goal.")
+                + " Do not call this again with the same arguments. Ask him for "
+                "the material, or for a narrower goal, and say what happened."
+            ),
+            error="no_concepts",
+        )
+
+    described = _describe(state)
     if report.planned:
         # **Show it, then check — his own answer.** A roadmap is a claim about
         # what he should spend weeks on, and ten sessions built on the wrong one
@@ -316,7 +365,32 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
             error="malformed",
         )
 
-    subject_id = await study.latest_subject_id(db)
+    # **This chat's own subject, never the most recent one anywhere.**
+    #
+    # It used to be `latest_subject_id`, and on 2026-09-01 that graded a quiz
+    # about Vantril transport security against Eyaas's real data-engineering
+    # map — `Data Pipelines` went to level 1 on the strength of an answer
+    # about something else entirely. `sessions.study_subject_id` exists to
+    # stop precisely this and the *prompt* path was fixed to read it on
+    # 2026-08-29; the tool that actually writes mastery was not, so the same
+    # bug carried on writing to the same table by a different route.
+    #
+    # **Refusing is the only safe answer when there is none.** Mastery is
+    # evidence, not a setting: a row written against the wrong subject cannot
+    # be told from a real one afterwards.
+    subject_id = (
+        await study.session_subject_id(db, ctx.session_id) if ctx.session_id else None
+    )
+    if subject_id is None:
+        return ToolResult(
+            ok=False,
+            summary=(
+                "Nothing has been started in this chat, so there is no map to "
+                "record answers against. Call study_begin with his material or "
+                "his goal first — do not grade against another chat's subject."
+            ),
+            error="no_subject",
+        )
     # **Exam's one mechanical lever** (`core/study_modes.py`). Everything else
     # about a sub-mode is prompt text a model may or may not follow; this
     # cannot be, because a tool result is an instruction to a model, and
@@ -344,6 +418,11 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
             for q in prepared
         ],
         turn_id=ctx.turn_id,
+        # **Across a room there is no screen to click.** The options are still
+        # broadcast and still clickable — whichever answer arrives first wins —
+        # but on a spoken turn they are read out too, and the listener resolves
+        # the question from speech instead of starting a new turn.
+        spoken=ctx.spoken,
     )
 
     if asked.timed_out:
@@ -377,8 +456,6 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
             # question, not his answer, and above all not the right one.
             missed.append(question.concept)
 
-        if subject_id is None:
-            continue
         concept_id = await study.concept_by_name(db, subject_id, question.concept)
         if concept_id is None:
             # A question about something not on the map is still a fair
@@ -419,3 +496,108 @@ async def study_check(ctx: ToolContext, questions: list[QuizQuestion]) -> ToolRe
             "asked": len(asked.answers),
         },
     )
+
+
+#: Where an export lands. A named folder rather than wherever the sidecar
+#: happens to be running, which is the repo.
+EXPORT_FOLDER = "Documents"
+EXPORT_SUBFOLDER = "ARIA Study"
+
+
+@tool(
+    name="study_export",
+    # **SAFE, not CONFIRM, and the difference is the never-overwrite
+    # guarantee.** `write_file` is CONFIRM because it takes an arbitrary path
+    # and replaces whatever is there; rule 5 names overwriting. This writes a
+    # generated name into one folder and steps aside if that name is taken, so
+    # nothing of his can be destroyed by it.
+    tier=Tier.SAFE,
+    description=(
+        "Save a subject's roadmap or knowledge map to a file he can keep. "
+        "format 'md' for Markdown, or 'html' for a page that prints to PDF "
+        "with Ctrl+P. Use when asked to export, save, download or print what "
+        "he is studying."
+    ),
+)
+async def study_export(ctx: ToolContext, subject: str = "", format: str = "md") -> ToolResult:
+    """Save a knowledge map to a file.
+
+    Args:
+        subject: Which subject, by name. Leave empty for the current one.
+        format: "md" for Markdown, or "html" for a printable page
+    """
+    from sidecar.memory import study_export as render
+    from sidecar.state import runtime
+
+    db = runtime.db
+    if db is None:
+        return ToolResult(
+            ok=False, summary="Study is not available in this session.", error="unavailable"
+        )
+
+    # Same rule as `study_check`: this chat's subject, not the most recently
+    # touched one anywhere. Exporting somebody else's map is a smaller harm
+    # than grading against it, and it is the same mistake.
+    subject_id = (
+        await study.find_subject(db, subject)
+        if subject.strip()
+        else (await study.session_subject_id(db, ctx.session_id) if ctx.session_id else None)
+    )
+    if subject_id is None:
+        return ToolResult(
+            ok=False,
+            summary=(
+                f"I have no map for {subject!r}. Call study_begin first, or ask "
+                f"him which subject he means."
+                if subject.strip()
+                else "Nothing has been studied yet, so there is no map to export."
+            ),
+            error="no_subject",
+        )
+
+    state = await study.state(db, subject_id)
+    if state is None or not state.concepts:
+        return ToolResult(
+            ok=False, summary="That subject has no concepts to export yet.", error="empty"
+        )
+
+    chosen = "html" if format.strip().lower() in {"html", "pdf", "print"} else "md"
+    text, extension = render.render(state, chosen)
+    path = await asyncio.to_thread(_write_export, state.subject, text, extension)
+    if path is None:
+        return ToolResult(
+            ok=False,
+            summary="I could not find your Documents folder to save it in.",
+            error="no_folder",
+        )
+
+    printable = (
+        " Open it and press Ctrl+P to save it as a PDF." if chosen == "html" else ""
+    )
+    return ToolResult(
+        ok=True,
+        data={"path": str(path), "format": chosen, "concepts": len(state.concepts)},
+        summary=(
+            f"Saved {state.subject} ({len(state.concepts)} concepts) to {path}.{printable}"
+        ),
+        display={"kind": "export", "path": str(path), "format": chosen},
+    )
+
+
+def _write_export(subject: str, text: str, extension: str) -> Path | None:
+    """Write it, never over anything. Blocking, so callers use a thread."""
+    from sidecar.tools.files import known_folder
+    from sidecar.tools.organize import _unique
+
+    root = known_folder(EXPORT_FOLDER)
+    if root is None:
+        return None
+    folder = root / EXPORT_SUBFOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+
+    # A subject name is free text and reaches the filesystem here.
+    safe = re.sub(r'[<>:"/\|?*]', "-", subject).strip() or "study"
+    target = _unique(folder / f"{safe}{extension}", set())
+    target.write_text(text, encoding="utf-8")
+    log.info("study.exported", path=str(target), chars=len(text))
+    return target

@@ -34,9 +34,19 @@ def broker(monkeypatch: pytest.MonkeyPatch):
             self.shown: list[list[Question]] = []
             self.picks: list[str] = []
             self.timed_out = False
+            #: Whether the last ask was told to read itself out. Recorded
+            #: rather than ignored so the voice path is covered here too.
+            self.spoken: bool | None = None
 
-        async def ask(self, questions: list[Question], *, turn_id: str | None = None) -> Any:
+        async def ask(
+            self,
+            questions: list[Question],
+            *,
+            turn_id: str | None = None,
+            spoken: bool = False,
+        ) -> Any:
             self.shown.append(questions)
+            self.spoken = spoken
             if self.timed_out:
                 return Asked(answers=[], timed_out=True)
             picks = self.picks or [q.options[0].label for q in questions]
@@ -62,12 +72,27 @@ def wired(monkeypatch: pytest.MonkeyPatch, database: Database) -> Database:
     return database
 
 
-async def _mapped(db: Database) -> int:
+async def _mapped(db: Database, session_id: str | None = CTX.session_id) -> int:
+    """A mapped subject, **stamped onto a session the way the real tool does.**
+
+    `study_check` used to find its subject with `latest_subject_id` — the most
+    recently touched one anywhere — and these tests relied on it, which is why
+    none of them caught the leak: on 2026-09-01 a live quiz about transport
+    security recorded `Data Pipelines` against a real data-engineering map in
+    the real database. Setting up the way the product does is what makes the
+    refusal testable at all.
+    """
     subject_id = await study.ensure_subject(db, "Information Security")
     await study.add_concepts(
         db, subject_id, [("CIA Triad", ""), ("Access Control", ""), ("Replay Attacks", "")]
     )
     await study.touch(db, subject_id)
+    if session_id is not None:
+        from sidecar.memory.messages import ConversationStore
+
+        store = ConversationStore(db)
+        await store.ensure_session(session_id, kind="study")
+        await store.set_study_subject(session_id, subject_id)
     return subject_id
 
 
@@ -463,3 +488,244 @@ async def test_a_named_file_that_is_missing_offers_to_plan_instead(
     assert not result.ok
     assert result.error == "not_found"
     assert "plan a roadmap" in result.summary
+
+
+# ── quizzing out loud (2026-08-24) ────────────────────────────────────
+
+
+async def test_a_typed_quiz_is_not_read_aloud(wired: Database, broker: Any) -> None:
+    """The screen path is unchanged, which is the whole point of the flag."""
+    await _mapped(wired)
+    await study_check(CTX, [quiz()])
+    assert broker.spoken is False
+
+
+async def test_a_spoken_quiz_asks_out_loud(wired: Database, broker: Any) -> None:
+    """**The gap that made hands-free study impossible.**
+
+    `study_check` puts options on a screen and waits for a click; across a room
+    there is neither. `ToolContext.spoken` is how the tool finds out, and the
+    on-screen path stays live either way — whichever answer arrives first wins.
+    """
+    await _mapped(wired)
+    await study_check(ToolContext(session_id="s_1", turn_id="t_1", spoken=True), [quiz()])
+    assert broker.spoken is True
+
+
+# ── a new study chat is not mid-session, and must not be told it is ────
+#
+# Every one of these carries the 2026-08-29 gate failure. `_study_block` used
+# `latest_subject_id` — the most recently touched subject *globally* — so a
+# brand-new study chat opened `[studying: <last week's subject>. next: ...]`.
+# The model read that as a session already underway, carried on teaching the
+# old subject, and never called `study_begin`. The lecture attached to the new
+# chat was never mapped, and its quiz answers were recorded against the old
+# subject's concepts, in the real database.
+
+
+async def test_a_chat_that_has_started_nothing_is_not_told_it_is_studying(
+    wired: Database,
+) -> None:
+    """The exact false claim, asserted against rather than around."""
+    await _mapped(wired)  # a subject exists, touched by somebody else's chat
+    block = study.render_not_started((("Information Security", 0, 3),))
+
+    assert "studying:" not in block
+    assert "next:" not in block
+    assert "no subject started" in block
+    # And it must point at the way out, or the model has nothing to do.
+    assert "study_begin" in block
+
+
+async def test_it_still_names_what_could_be_resumed(wired: Database) -> None:
+    """Not-started is not the same as knowing nothing. "carry on with
+    information security" has to keep working, so the prior subjects are
+    named — as something to resume, never as something in progress."""
+    block = study.render_not_started((("Information Security", 2, 7),))
+    assert "Information Security" in block
+    assert "2 of 7" in block
+    assert "resume" in block
+
+
+async def test_with_no_prior_subjects_it_asks_for_material_or_a_goal(
+    wired: Database,
+) -> None:
+    block = study.render_not_started(())
+    assert "study_begin" in block
+    # A first-ever study chat has nothing to resume, and saying "previously:"
+    # with an empty list is the kind of sentence that reads as a bug.
+    assert "previously" not in block
+
+
+async def test_the_session_owns_its_subject_not_the_clock(wired: Database) -> None:
+    """`sessions.study_subject_id` is stamped by both study tools and was read
+    by nothing until this bug. Two chats, two subjects, no bleed."""
+    from sidecar.memory.messages import ConversationStore
+
+    store = ConversationStore(wired)
+    mine = await _mapped(wired)
+
+    theirs = await store.ensure_session(None, kind="study")
+    assert await study.session_subject_id(wired, theirs) is None
+
+    await store.set_study_subject(theirs, mine)
+    assert await study.session_subject_id(wired, theirs) == mine
+
+    other = await store.ensure_session(None, kind="study")
+    # The other chat is untouched by the first one's subject — which is the
+    # whole property the global `latest_subject_id` could not provide.
+    assert await study.session_subject_id(wired, other) is None
+
+
+# ── a file attached this turn does not need the indexer ────────────────
+
+
+def test_material_matches_a_file_attached_this_turn() -> None:
+    """**The indexer cannot be a precondition for reading what he just gave.**
+
+    `_resolve_material` looks in `file_index`, which a throttled background
+    sweep fills — and which skips `AppData`, so nothing under `%TEMP%` is ever
+    in it. `study_begin` therefore returned `not_found` for a file whose
+    absolute path the turn had been handed, and the model fell back to
+    planning a roadmap from the lecture's title.
+    """
+    from sidecar.tools.study import _attached_this_turn
+
+    attached = (r"C:\Temp\aria\Vantril Transport Security Lecture 1.txt",)
+    assert _attached_this_turn("Vantril Transport Security Lecture 1.txt", attached) == attached[0]
+    # By full path, and by a partial name, which is what a model actually sends.
+    assert _attached_this_turn(attached[0], attached) == attached[0]
+    assert _attached_this_turn("Vantril Transport Security", attached) == attached[0]
+    # And it does not invent a match.
+    assert _attached_this_turn("some other lecture.pdf", attached) is None
+    assert _attached_this_turn("anything", ()) is None
+
+
+async def test_unindexed_material_is_read_from_disk(wired: Database, tmp_path) -> None:
+    """`source_text` returned "" for anything with no chunks, and "no chunks"
+    is the normal state of a file attached seconds ago."""
+    from sidecar.memory import curriculum
+
+    lecture = tmp_path / "lecture.txt"
+    lecture.write_text("The drift window is 400 milliseconds.", encoding="utf-8")
+
+    text = await curriculum.source_text(wired, str(lecture))
+    assert "drift window" in text
+
+    # An unreadable path is "no material", not an exception.
+    assert await curriculum.source_text(wired, str(tmp_path / "gone.txt")) == ""
+
+
+def _state(source_path: str | None) -> study.StudyState:
+    return study.StudyState(
+        subject_id=1,
+        subject="Vantril Transport Security",
+        source_path=source_path,
+        concepts=(
+            study.Concept(
+                id=1, name="Drift Window", summary="", position=0, level=1, asked=1, correct=1
+            ),
+        ),
+    )
+
+
+def test_the_block_says_the_map_is_the_boundary_of_the_material() -> None:
+    """**Observed live, and it is the worst failure this project has.**
+
+    Asked "how does Vantril handle certificate revocation?" — a topic the
+    lecture does not touch — she answered *"From what was in the document,
+    Vantril uses OCSP..."*, attributing invented content to his own file, and
+    the next sub-mode then examined him on it. Nothing anywhere had said that
+    the map is all the material covers.
+    """
+    block = study.render(_state("C:/x/lecture.txt"))
+    assert "the whole of this material" in block
+    assert "not on it" in block
+    # **On its own line, outside the bracket.** The first attempt put it
+    # inside, as one more clause in a line that otherwise reads as status,
+    # and the next live run still described OCSP as Vantril's own. An
+    # instruction buried in a state blob reads as state.
+    assert block.splitlines()[0].endswith("]")
+    assert "The map above" in block.splitlines()[1]
+
+
+def test_a_planned_roadmap_says_there_is_no_document_to_quote() -> None:
+    """The two cases are not the same falsehood.
+
+    A planned roadmap has no file behind it at all, so "from what was in the
+    document" is invention twice over — and `source_path` being NULL is the
+    only thing that tells them apart.
+    """
+    block = study.render(_state(None))
+    assert "planned from his goal, not read from a file" in block
+    assert "no document here" in block
+    assert "the whole of this material" not in block
+
+
+async def test_a_quiz_never_grades_against_another_chats_subject(
+    wired: Database, broker: Any
+) -> None:
+    """**The leak, asserted against.**
+
+    `study_check` resolved its subject with `latest_subject_id` — the most
+    recently touched subject *anywhere* — so a quiz in a chat that had started
+    nothing was graded against somebody else's map. Observed live on
+    2026-09-01: a run about transport security moved `Data Pipelines` to
+    level 1 in a real data-engineering subject, in the real database.
+
+    **Refusing is the only safe answer.** Mastery is evidence, not a setting,
+    and a row written against the wrong subject cannot be told from a real one
+    afterwards.
+    """
+    # A subject exists and was touched most recently — by a different chat.
+    theirs = await _mapped(wired, session_id="s_theirs")
+    before = await study.state(wired, theirs)
+    assert before is not None
+
+    broker.picks = ["Availability"]
+    result = await study_check(
+        ToolContext(session_id="s_mine", turn_id="t_1"), [quiz()]
+    )
+
+    assert not result.ok
+    assert result.error == "no_subject"
+    assert "study_begin" in result.summary
+
+    # And nothing was written. This is the half that matters: a refusal that
+    # still recorded the answer would be a worse bug wearing an error message.
+    after = await study.state(wired, theirs)
+    assert after is not None
+    assert [(c.name, c.level, c.asked) for c in after.concepts] == [
+        (c.name, c.level, c.asked) for c in before.concepts
+    ]
+
+
+async def test_a_map_with_no_concepts_is_reported_as_a_failure(
+    wired: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A subject row is not a map, and saying otherwise wastes a whole session.
+
+    Observed live: `study_begin` returned ok with `concepts_added=0`, she read
+    "Built a map — 0 new concepts. Teach the first one now", found nothing to
+    teach, called the same tool again with identical arguments, and the loop
+    guard's note became her entire reply. `report.error` never fired, because
+    the *subject* had been created — the subject is not the map.
+    """
+    from sidecar.memory import curriculum
+
+    subject_id = await study.ensure_subject(wired, "Empty")
+
+    async def _empty(self: object, **_kwargs: object) -> curriculum.CurriculumReport:
+        return curriculum.CurriculumReport(
+            subject="Empty", subject_id=subject_id, concepts_added=0, planned=True
+        )
+
+    monkeypatch.setattr(curriculum.CurriculumBuilder, "build", _empty)
+
+    result = await study_begin(CTX, subject="something", material="")
+
+    assert not result.ok
+    assert result.error == "no_concepts"
+    # The instruction matters as much as the flag: the live failure was her
+    # retrying the identical call, which the loop guard then had to stop.
+    assert "same arguments" in result.summary

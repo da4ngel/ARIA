@@ -896,6 +896,11 @@ class ConversationService:
         # swap: each attempt after the first tells the user what happened.
         chain: list[ModelInfo] = [decision.model, *decision.fallbacks]
         note: str | None = None
+        # Token counts for the whole turn, summed across every agent-loop
+        # step and every fallback attempt. Left empty by any provider that
+        # reports no usage, which is what keeps 'nobody counted' distinct
+        # from 'zero' all the way to the column.
+        usage: dict[str, int] = {}
 
         try:
             await self._bus.set_state(AssistantState.THINKING)
@@ -916,6 +921,7 @@ class ConversationService:
                         spoken=spoken,
                         state=state,
                         policy=policy,
+                        usage=usage,
                     )
                 except (ProviderUnavailable, ProviderRateLimited) as exc:
                     self._health.record_failure(
@@ -954,6 +960,7 @@ class ConversationService:
                     asked=user_text,
                     tool_called=tool_name,
                     tool_ok=tool_ok,
+                    usage=usage,
                 )
                 return
 
@@ -978,13 +985,24 @@ class ConversationService:
         started: float,
         *,
         tool_calls: list[ToolCall] | None = None,
+        usage: dict[str, int] | None = None,
         offer_tools: bool = True,
         policy: ModePolicy | None = None,
         spoken: bool = False,
     ) -> float | None:
         """Stream one model's reply into `collected`. Returns TTFT in ms.
 
-        `tool_calls` collects anything the model asked to run. `offer_tools`
+        `tool_calls` collects anything the model asked to run, and `usage`
+        collects the token counts the final delta carries — both mutable
+        out-parameters rather than a wider return type, because a turn can
+        stream more than once and the caller wants the sum.
+
+        **The token counts have been arriving since Phase 1 and going
+        nowhere.** Every provider that reports usage populates them on the
+        done delta; until this parameter existed nothing in the repo read
+        either field outside one test.
+
+        `offer_tools`
         is False once `_agent_loop`'s step budget is spent (BUILD_SPEC §9
         Phase 6) — a model handed its own tools with no budget left to run
         one would just be asked to describe the call it cannot make.
@@ -992,6 +1010,10 @@ class ConversationService:
         provider = self._registry.for_model(info)
         await self._free_vram_for(info)
         first_token_ms: float | None = None
+        # This call's own usage, kept separate from the turn's running
+        # total — see the note where they are combined below.
+        call_prompt: int | None = None
+        call_completion: int | None = None
         # **Only a turn she was *spoken to* answers aloud.** Eyaas: "when an
         # output is generated, it starts to speak, i dont want that way."
         # Reading a typed reply back is noise — he is looking at it — and it is
@@ -1036,8 +1058,29 @@ class ConversationService:
                 # reading that aloud would be the worst bug this project has.
                 speech.feed(delta.text)
                 await speech.drain(turn_id)
+            # **Not inside `if delta.done`, and that was a real bug.** Gemini
+            # sets `done=False` on every delta it ever sends — its stream ends
+            # by ending — so a collection that only fired on a done delta
+            # recorded nothing at all for it. Every routing row written before
+            # this had NULL tokens.
+            if delta.prompt_tokens is not None:
+                call_prompt = delta.prompt_tokens
+            if delta.completion_tokens is not None:
+                call_completion = delta.completion_tokens
             if delta.done:
                 break
+
+        # **Last-wins within a call, summed across calls.** The three providers
+        # disagree about shape: Ollama reports once on the final chunk, OpenAI
+        # once in a trailing usage chunk, and Gemini repeats a *cumulative*
+        # total on many chunks. Summing every delta would multiply Gemini's
+        # figure by the number of chunks; taking only the last would lose the
+        # earlier steps of an agent loop. This does both correctly.
+        if usage is not None:
+            if call_prompt is not None:
+                usage["prompt"] = usage.get("prompt", 0) + call_prompt
+            if call_completion is not None:
+                usage["completion"] = usage.get("completion", 0) + call_completion
 
         await speech.finish(turn_id)
         return first_token_ms
@@ -1128,6 +1171,7 @@ class ConversationService:
         spoken: bool,
         state: LoopState,
         policy: ModePolicy,
+        usage: dict[str, int] | None = None,
     ) -> tuple[float | None, ModelInfo, str | None]:
         """Run steps until a text answer, loop detection, or the step budget
         ends it (BUILD_SPEC §9 Phase 6). Returns `(first_token_ms, model that
@@ -1187,6 +1231,7 @@ class ConversationService:
                     collected,
                     started,
                     tool_calls=requested,
+                    usage=usage,
                     offer_tools=state.offer_tools,
                     policy=policy,
                     spoken=spoken,
@@ -1292,7 +1337,14 @@ class ConversationService:
             result = await self._permissions.run(
                 call.name,
                 call.arguments,
-                ToolContext(session_id=session_id, turn_id=turn_id),
+                ToolContext(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    spoken=spoken,
+                    attachments=tuple(
+                        str(a.path) for a in self._attachments.get(turn_id or "", ())
+                    ),
+                ),
                 rationale="".join(collected).strip()[:400],
                 # §11: a call right after reading untrusted content is forced
                 # through confirmation regardless of its own registered tier.
@@ -1436,6 +1488,7 @@ class ConversationService:
         asked: str = "",
         tool_called: str | None = None,
         tool_ok: bool | None = None,
+        usage: dict[str, int] | None = None,
     ) -> None:
         full_text = "".join(collected)
         total_ms = int((time.perf_counter() - started) * 1000)
@@ -1458,6 +1511,7 @@ class ConversationService:
             asked=asked,
             tool_called=tool_called,
             tool_ok=tool_ok,
+            usage=usage,
         )
         if self._db is not None and asked:
             # Off the turn path, same as `_log_route` above — the reply is
@@ -1507,6 +1561,7 @@ class ConversationService:
         asked: str,
         tool_called: str | None,
         tool_ok: bool | None,
+        usage: dict[str, int] | None = None,
     ) -> None:
         """Record the decision for §9.7's labelled dataset. Off the turn path.
 
@@ -1536,6 +1591,11 @@ class ConversationService:
             latency_ms=latency_ms,
             tool_called=tool_called,
             tool_ok=tool_ok,
+            # `.get` rather than `or 0`: a provider that reported nothing
+            # must reach the column as NULL, not as a zero nobody can tell
+            # apart from a free turn.
+            prompt_tokens=(usage or {}).get("prompt"),
+            completion_tokens=(usage or {}).get("completion"),
         )
         spawn(self._routing_log.record(record), "routing.record")
 
@@ -1830,8 +1890,11 @@ class ConversationService:
         composer would sit silent while several images make cloud round trips.
         """
         read: list[attach.Attachment] = []
+        # Several files share one prompt budget, so five PDFs do not
+        # crowd out the conversation they were attached to.
+        budget = attach.share_budget(len(paths))
         for path in paths:
-            one = await attach.read_one(Path(path), describe)
+            one = await attach.read_one(Path(path), describe, budget)
             read.append(one)
             await self._bus.broadcast(
                 Event.ATTACHMENT_READ,
@@ -1937,19 +2000,43 @@ class ConversationService:
         `asyncio.gather` in `_build_context`, so it overlaps the history read
         rather than adding to it.
 
-        The subject is the one most recently touched (`study.touch`, called by
-        both study tools), not a per-session pointer. That means two study
-        conversations open at once would share one — accepted, because the
-        alternative is a second piece of session state that can disagree with
-        the database, and studying two subjects in parallel is not a thing
-        anyone does.
+        **The subject is this session's own**, read from the
+        `sessions.study_subject_id` both study tools have stamped since
+        migration 008 — a column nothing had ever read.
+
+        It used to be "whichever subject was most recently touched", globally,
+        and that was wrong in the one case it mattered: a **brand-new** study
+        chat has touched nothing, so it inherited last week's subject and was
+        told `studying: X — next: Y`. That is a claim a session is underway,
+        and the model believed it — it carried on teaching the old subject and
+        never called `study_begin`, so a lecture attached to the new chat was
+        never mapped and its quiz answers were recorded against the *old*
+        subject's concepts. Three of `gate_study.py`'s lines failed on exactly
+        that, and it had corrupted real mastery data before anyone noticed.
+
+        A chat with no subject of its own now gets `render_not_started`, which
+        says so and names the prior subjects as something to resume rather
+        than as something in progress.
         """
         if self._db is None or mode is not ctx.ConversationMode.STUDY:
             return None
         try:
-            subject_id = await study.latest_subject_id(self._db)
+            subject_id = (
+                None
+                if session_id is None
+                else await study.session_subject_id(self._db, session_id)
+            )
             if subject_id is None:
-                return None
+                # Nothing started here. Offer the map, never assert one.
+                previous = await study.list_subjects(self._db)
+                return study.render_not_started(
+                    tuple(
+                        # `list_subjects` is typed for the panel, which takes
+                        # anything JSON-shaped; these three are ints and a str.
+                        (str(s["name"]), int(str(s["covered"])), int(str(s["total"])))
+                        for s in previous[:2]
+                    )
+                )
             state = await study.state(self._db, subject_id)
         except Exception:  # noqa: BLE001 — never let this fail a turn
             log.warning("study.state_failed", exc_info=True)

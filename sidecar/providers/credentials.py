@@ -29,6 +29,25 @@ class CredentialKey(StrEnum):
     GEMINI = "gemini_api_key"
     #: One key reaching many vendors, and the only source of free models here.
     OPENROUTER = "openrouter_api_key"
+    #: Amazon Bedrock accepts **either** of two credential shapes, and which
+    #: one a user holds is not knowable from here — so both have a home and
+    #: `providers/bedrock.py` prefers the narrower one. A Bedrock API key is a
+    #: bearer token scoped to Bedrock alone; an AWS access key is a general IAM
+    #: credential that has to be signed with (`providers/sigv4.py`).
+    BEDROCK = "bedrock_api_key"
+    AWS_ACCESS_KEY_ID = "aws_access_key_id"
+    AWS_SECRET_ACCESS_KEY = "aws_secret_access_key"
+    #: Only set for temporary credentials. Part of the signature when present,
+    #: not merely sent alongside it.
+    AWS_SESSION_TOKEN = "aws_session_token"
+    #: The mailbox `read_email` reads, read-only. **The password is an app
+    #: password**, not the account password: Google and Microsoft both
+    #: require one and both need two-factor authentication on first. Host
+    #: and address are not secrets, but they live here so a mailbox is
+    #: configured or removed in one place rather than two.
+    IMAP_HOST = "imap_host"
+    IMAP_USER = "imap_user"
+    IMAP_PASSWORD = "imap_password"
     #: Web search, for `research`. Either one is enough — see
     #: `providers/search.py` for why there are two rather than a choice.
     BRAVE = "brave_api_key"

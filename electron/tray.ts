@@ -13,6 +13,9 @@ export interface TrayCallbacks {
   onShow: () => void
   onSettings: () => void
   onRestartBrain: () => void
+  /** Here as well as in Settings: the moment you need it is the moment the
+   *  window may not be working. */
+  onExportDiagnostics: () => void
   onQuit: () => void
 }
 
@@ -76,6 +79,7 @@ export function createTray(callbacks: TrayCallbacks): TrayHandle {
         { label: 'Show', click: callbacks.onShow },
         { label: 'Settings', click: callbacks.onSettings },
         { label: 'Restart Brain', click: callbacks.onRestartBrain },
+        { label: 'Export diagnostics', click: callbacks.onExportDiagnostics },
         { type: 'separator' },
         { label: 'Quit', click: callbacks.onQuit },
       ]),

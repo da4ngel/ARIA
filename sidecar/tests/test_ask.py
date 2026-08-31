@@ -262,3 +262,19 @@ def test_it_stays_available_for_a_quiz() -> None:
         for s in service._tool_schemas(spoken=True) or []  # noqa: SLF001
     }
     assert "ask_user" not in silent
+
+
+def test_the_description_does_not_reintroduce_a_per_turn_cap() -> None:
+    """The cap itself (`LoopState.asked_already`) is gone — see the test
+    above — but the description shipped with it once said *"because you get
+    one of these per turn"*. That sentence survived the code change and told
+    the model the opposite of what `test_it_stays_available_for_a_quiz`
+    proves: a quiz is repeated calls in one turn, bounded only by the step
+    budget. A stale restriction in the prompt is as effective at stopping the
+    behaviour as the removed cap was — the model reads what it is told, not
+    what agent.py actually enforces.
+    """
+    description = " ".join(ask_tool().description.lower().split())
+
+    assert "one of these per turn" not in description
+    assert "more than once in a turn" in description

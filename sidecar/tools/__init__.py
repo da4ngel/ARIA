@@ -16,12 +16,16 @@ from sidecar.tools import browser as browser
 from sidecar.tools import clipboard as clipboard
 from sidecar.tools import files as files
 from sidecar.tools import finder as finder
+from sidecar.tools import introspect as introspect
+from sidecar.tools import mail as mail
 from sidecar.tools import memory as memory
 from sidecar.tools import organize as organize
+from sidecar.tools import reminders as reminders
 from sidecar.tools import research as research
 from sidecar.tools import screen as screen
 from sidecar.tools import study as study
 from sidecar.tools import system as system
+from sidecar.tools import undo_tool as undo_tool
 
 __all__ = [
     "apps",
@@ -30,10 +34,14 @@ __all__ = [
     "clipboard",
     "files",
     "finder",
+    "introspect",
+    "mail",
     "memory",
     "organize",
+    "reminders",
     "research",
     "screen",
     "study",
     "system",
+    "undo_tool",
 ]

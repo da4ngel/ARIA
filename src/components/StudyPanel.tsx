@@ -102,15 +102,18 @@ function SubjectHeader({
   onSelect,
   onRename,
   onForget,
+  onExport,
 }: {
   subject: StudySubject | undefined
   subjects: StudySubject[]
   onSelect: (id: number) => void
   onRename: (name: string) => void
   onForget: () => void
+  onExport: (format: 'md' | 'html') => Promise<string | null>
 }): JSX.Element | null {
   const [editing, setEditing] = useState<string | null>(null)
   const [armed, setArmed] = useState(false)
+  const [saved, setSaved] = useState<string | null>(null)
 
   if (!subject) return null
   const pct = subject.total > 0 ? Math.round((subject.covered / subject.total) * 100) : 0
@@ -148,6 +151,25 @@ function SubjectHeader({
         <span className="shrink-0 tabular-nums text-micro text-aria-muted">
           {subject.covered}/{subject.total}
         </span>
+        {/* Two formats and no PDF library. The HTML is styled for paper, so
+            Ctrl+P in any browser produces one — see `memory/study_export.py`
+            for why that beat adding reportlab or weasyprint. */}
+        <button
+          type="button"
+          onClick={() => void onExport('md').then(setSaved)}
+          title="Save the map as Markdown"
+          className="interactive shrink-0 rounded px-1 text-micro text-aria-faint hover:text-aria-text"
+        >
+          .md
+        </button>
+        <button
+          type="button"
+          onClick={() => void onExport('html').then(setSaved)}
+          title="Save as a page you can print to PDF with Ctrl+P"
+          className="interactive shrink-0 rounded px-1 text-micro text-aria-faint hover:text-aria-text"
+        >
+          .html
+        </button>
         <button
           type="button"
           onClick={() => (armed ? onForget() : setArmed(true))}
@@ -160,6 +182,10 @@ function SubjectHeader({
           {armed ? 'Sure?' : 'Delete'}
         </button>
       </div>
+
+      {/* Where it went, because a file saved somewhere you cannot find is a
+          file you did not get. */}
+      {saved && <p className="mt-1 truncate text-micro text-aria-ok">Saved to {saved}</p>}
 
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-aria-sunk">
         <div className="h-full rounded-full bg-aria-accent" style={{ width: `${pct}%` }} />
@@ -201,6 +227,21 @@ export function StudyPanel({
   onOpenSession: (sessionId: string) => void
 }): JSX.Element {
   const study = useStudy(true)
+
+  /** Save the map, and hand back where it landed. A refusal is a message
+   *  rather than an exception — `useStudy`'s rule for `rename`. */
+  async function exportMap(format: 'md' | 'html'): Promise<string | null> {
+    if (study.selected === null) return null
+    try {
+      const result = await window.aria.call<{ path: string }>('study.export', {
+        subject_id: study.selected,
+        format,
+      })
+      return result.path ?? null
+    } catch {
+      return null
+    }
+  }
   const concepts = study.state?.concepts ?? []
   const shaky = needsRevision(concepts)
   const covered = concepts.filter((c) => c.level > 0)
@@ -268,6 +309,7 @@ export function StudyPanel({
             onSelect={study.select}
             onRename={(name) => subject && void study.rename(subject.id, name)}
             onForget={() => subject && void study.forget(subject.id)}
+          onExport={exportMap}
           />
 
           {shaky.length > 0 && (

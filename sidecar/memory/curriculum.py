@@ -24,8 +24,10 @@ already stores and simply never looked at.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import structlog
 from pydantic import BaseModel, Field
@@ -175,6 +177,14 @@ async def source_text(db: Database, path: str) -> str:
     repeated 200 characters cost a little of the budget and removing them
     correctly would mean trusting that every chunk was written by the current
     chunker. A model reading a sentence twice is not a failure mode.
+
+    **Falls back to reading the file.** "Never indexed" is a normal state
+    for a file attached seconds ago: the indexer is throttled to 20 files a
+    minute, pauses while she is answering, and skips `AppData` entirely, so
+    a lecture handed over this turn may have no chunks at all. Returning an
+    empty string there makes `study_begin` plan a roadmap from the title
+    instead of mapping the material it was handed, which reads as her
+    ignoring the file.
     """
 
     def _read(c: sqlite3.Connection) -> list[str]:
@@ -184,7 +194,17 @@ async def source_text(db: Database, path: str) -> str:
         ).fetchall()
         return [str(r["text"]) for r in rows]
 
-    return "\n".join(await db.run(_read))
+    chunks = await db.run(_read)
+    if chunks:
+        return "\n".join(chunks)
+
+    from sidecar.core import extract
+
+    try:
+        return await asyncio.to_thread(extract.extract_or_raise, Path(path))
+    except Exception:  # noqa: BLE001 - an unreadable file is 'no material'
+        log.info("curriculum.source_unreadable", path=path, exc_info=True)
+        return ""
 
 
 class CurriculumBuilder:

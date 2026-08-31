@@ -45,6 +45,20 @@ WATCHED_PROJECTS = "watched_projects"
 DISCOVERED_MODELS = "discovered_models"
 # When that listing was fetched, ISO-8601. Read to decide whether it is stale.
 DISCOVERED_AT = "discovered_at"
+# Which AWS region Bedrock is reached in. **Not a preference — a correctness
+# setting.** The region is in the hostname, model availability differs between
+# regions, and a Bedrock API key issued in one region is refused in another.
+# Defaults to `providers.bedrock.DEFAULT_REGION` when unset.
+BEDROCK_REGION = "bedrock_region"
+# Whether the first-run wizard has been through once. **A settings row, not
+# localStorage** (rule 1) — and because a wizard that reappears when somebody
+# clears the renderer's storage is worse than no wizard at all.
+FIRST_RUN_DONE = "first_run_done"
+# How confidently the wake model has to score a frame before she wakes.
+# **A `Settings` field since Phase 2 stage 3 with nothing able to write it** —
+# the only way to move it was an environment variable and a restart. Stored
+# here so the calibration step can change it live and have it stick.
+WAKE_WORD_THRESHOLD = "wake_word_threshold"
 
 
 class SettingsStore:

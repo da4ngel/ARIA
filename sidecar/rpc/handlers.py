@@ -107,6 +107,22 @@ async def system_health(_params: dict[str, Any]) -> dict[str, Any]:
     return report.model_dump()
 
 
+@method("system.diagnostics")
+async def system_diagnostics(_params: dict[str, Any]) -> dict[str, Any]:
+    """Write a diagnostics zip and return where it went (§9 Phase 9).
+
+    **The sidecar builds it, not Electron.** Node has no built-in zip, Python
+    has `zipfile`, and `data/` is the sidecar's (rule 1) — which is also the
+    only side that knows where the logs are once frozen. Nothing in the
+    archive is a credential value; see `core/diagnostics.py`.
+    """
+    from sidecar.core import diagnostics
+
+    path = await diagnostics.export()
+    diagnostics.reveal(path)
+    return {"path": str(path), "bytes": path.stat().st_size}
+
+
 # ── chat (Phase 1) ────────────────────────────────────────────────────
 
 
@@ -327,6 +343,48 @@ async def models_adoption(_params: dict[str, Any]) -> dict[str, Any]:
         # figure accounts for the key being used from anywhere.
         report["quota"] = provider.rate_limit.as_dict()
     return report
+
+
+@method("models.bedrock")
+async def models_bedrock(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set which AWS region Bedrock is reached in.
+
+    **A correctness setting, not a preference**, which is why it is exposed at
+    all: the region is in the hostname, different regions carry different
+    models, and a Bedrock API key issued in one region is refused in another.
+    Somebody whose key works perfectly in `eu-west-2` would otherwise see every
+    model greyed out with no way to find out why.
+
+    Setting it re-lists the models, detached — the picker's contents are a
+    property of the region, and leaving the old region's listing on screen
+    would offer models this account cannot reach. Same shape as
+    `settings.set_key`: the round-trip does not wait on the network.
+    """
+    from sidecar.memory.settings_store import BEDROCK_REGION
+    from sidecar.providers import bedrock
+    from sidecar.state import runtime
+
+    raw = params.get("region")
+    if isinstance(raw, str) and raw.strip():
+        bedrock.set_region(raw.strip())
+        if runtime.settings is not None:
+            await runtime.settings.set(BEDROCK_REGION, bedrock.current_region())
+            if runtime.availability is not None:
+                from sidecar.core.tasks import spawn
+
+                spawn(
+                    runtime.availability.refresh_discovered(runtime.settings),
+                    "discovery",
+                )
+
+    credentials = bedrock.load_credentials()
+    return {
+        "region": bedrock.current_region(),
+        # "api_key", "sigv4" or "none" — the difference between "no credential"
+        # and "a credential that is not working" is the first thing anyone
+        # debugging this needs, and it names no secret.
+        "credential": credentials.kind,
+    }
 
 
 @method("models.bias")
@@ -1174,8 +1232,15 @@ async def study_state(params: dict[str, Any]) -> dict[str, Any]:
     recorded an answer and a row that actually changed are different claims,
     and only the second is what the next session reads.
 
-    Defaults to the subject most recently studied, which is the same one the
-    prompt block shows.
+    **Pass `session_id` to get what that chat is actually studying**, which is
+    what the prompt block shows. Without one this falls back to the most
+    recently studied subject globally — fine for the panel, which is asking
+    "what was I last doing", and wrong for anyone checking a particular
+    conversation: `gate_study.py` read it with no session and was handed a
+    subject from a chat weeks earlier, then printed it as though the map it
+    had just asked for had been built.
+
+    Named `subject` still wins over both, for resuming by name.
     """
     from sidecar.memory import study
     from sidecar.state import runtime
@@ -1185,11 +1250,13 @@ async def study_state(params: dict[str, Any]) -> dict[str, Any]:
         return {"subject": None, "concepts": []}
 
     raw = params.get("subject")
-    subject_id = (
-        await study.find_subject(db, raw)
-        if isinstance(raw, str) and raw.strip()
-        else await study.latest_subject_id(db)
-    )
+    session_id = params.get("session_id")
+    if isinstance(raw, str) and raw.strip():
+        subject_id = await study.find_subject(db, raw)
+    elif isinstance(session_id, str) and session_id:
+        subject_id = await study.session_subject_id(db, session_id)
+    else:
+        subject_id = await study.latest_subject_id(db)
     if subject_id is None:
         return {"subject": None, "concepts": []}
 
@@ -1391,6 +1458,248 @@ async def memory_stats(_params: dict[str, Any]) -> dict[str, Any]:
         "reflecting": bool(runtime.reflector and runtime.reflector.running),
         "embeddings_ready": runtime.embeddings_ready,
     }
+
+
+# ── clipboard history, reminders, usage (2026-08-24) ─────────────────
+# Three panels' worth of read surface over things the sidecar already records.
+# The write paths here are all "clicks are not tool calls": a confirmation
+# dialog in front of a button somebody just pressed is asking them to confirm
+# the thing they just did. `files.delete` established that and the reasoning
+# is unchanged.
+
+
+@method("clipboard.history")
+async def clipboard_history(params: dict[str, Any]) -> dict[str, Any]:
+    """What was copied recently, newest first."""
+    from sidecar.memory import clipboard_store
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        return {"entries": [], "watching": False}
+    raw_limit = params.get("limit")
+    limit = int(raw_limit) if isinstance(raw_limit, int) else 50
+    entries = await clipboard_store.recent(runtime.db, limit)
+    watcher = runtime.clipboard_watcher
+    return {
+        "entries": [clipboard_store.as_dict(e) for e in entries],
+        # So the panel can tell "nothing copied yet" from "not running".
+        "watching": watcher is not None,
+        # Counted rather than claimed. A run where this never moves means the
+        # credential filter has regressed to letting everything through.
+        "skipped_secrets": watcher.skipped_secrets if watcher is not None else 0,
+    }
+
+
+@method("clipboard.copy")
+async def clipboard_copy(params: dict[str, Any]) -> dict[str, Any]:
+    """Put a history entry back on the clipboard."""
+    import asyncio
+
+    from sidecar.memory import clipboard_store
+    from sidecar.state import runtime
+    from sidecar.tools.clipboard import write_text
+
+    entry_id = params.get("id")
+    if not isinstance(entry_id, int) or runtime.db is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "Pass the id of a history entry.")
+
+    entry = await clipboard_store.get(runtime.db, entry_id)
+    if entry is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, f"No clipboard entry {entry_id}.")
+    await asyncio.to_thread(write_text, entry.content)
+    return {"ok": True, "chars": entry.chars}
+
+
+@method("clipboard.forget")
+async def clipboard_forget(params: dict[str, Any]) -> dict[str, Any]:
+    """Drop one entry, or the whole ring when `all` is true."""
+    from sidecar.memory import clipboard_store
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "No database in this session.")
+
+    if params.get("all") is True:
+        return {"ok": True, "removed": await clipboard_store.clear(runtime.db)}
+
+    entry_id = params.get("id")
+    if not isinstance(entry_id, int):
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "Pass an id, or all=true.")
+    return {"ok": await clipboard_store.forget(runtime.db, entry_id)}
+
+
+@method("reminders.list")
+async def reminders_list(_params: dict[str, Any]) -> dict[str, Any]:
+    """Reminders set and not yet fired."""
+    from sidecar.memory import reminders as store
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        return {"reminders": []}
+    pending = await store.pending(runtime.db)
+    return {"reminders": [store.as_dict(r) for r in pending]}
+
+
+@method("reminders.cancel")
+async def reminders_cancel(params: dict[str, Any]) -> dict[str, Any]:
+    """Cancel one. No dialog — the button *is* the decision."""
+    from sidecar.memory import reminders as store
+    from sidecar.state import runtime
+
+    reminder_id = params.get("id")
+    if not isinstance(reminder_id, int) or runtime.db is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "Pass the id of a reminder.")
+    return {"ok": await store.cancel(runtime.db, reminder_id)}
+
+
+@method("usage.today")
+async def usage_today(params: dict[str, Any]) -> dict[str, Any]:
+    """Turns, tokens and an **estimated** cost since local midnight.
+
+    Estimated is not a hedge. The token counts are real and come from the
+    providers themselves; the rates come from a hand-maintained table in
+    `providers/pricing.py` carrying the date it was true. `unpriced` counts the
+    turns those rates do not cover, and `uncounted` the turns where no usage
+    was reported at all — surfacing both is what stops a total that is
+    knowingly short from reading as complete.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sidecar.providers import pricing
+    from sidecar.state import runtime
+
+    if runtime.routing_log is None:
+        return {"turns": 0, "models": [], "estimated_usd": 0.0}
+
+    raw_days = params.get("days")
+    days = int(raw_days) if isinstance(raw_days, int) and raw_days > 0 else 1
+    # Local midnight, because "today" is the user's day and not UTC's. Stored
+    # stamps are UTC, so the boundary is converted rather than assumed.
+    start_local = datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(days=days - 1)
+    since = start_local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    report = await runtime.routing_log.usage_since(since)
+    total = 0.0
+    unpriced = 0
+    local_turns = 0
+    cloud_turns = 0
+    for row in report["models"]:
+        if row["local"]:
+            local_turns += row["turns"]
+        else:
+            cloud_turns += row["turns"]
+        cost = pricing.estimate(
+            row["model"], row["prompt_tokens"], row["completion_tokens"], local=row["local"]
+        )
+        if cost is None:
+            unpriced += row["turns"]
+            row["estimated_usd"] = None
+        else:
+            total += cost
+            row["estimated_usd"] = round(cost, 4)
+
+    return {
+        "since": since,
+        "days": days,
+        "turns": report["turns"],
+        "local_turns": local_turns,
+        "cloud_turns": cloud_turns,
+        "models": report["models"],
+        "prompt_tokens": sum(r["prompt_tokens"] for r in report["models"]),
+        "completion_tokens": sum(r["completion_tokens"] for r in report["models"]),
+        "uncounted": sum(r["uncounted"] for r in report["models"]),
+        "estimated_usd": round(total, 4),
+        "unpriced_turns": unpriced,
+        "prices_as_of": pricing.PRICES_AS_OF.isoformat(),
+    }
+
+
+@method("usage.recent")
+async def usage_recent(params: dict[str, Any]) -> dict[str, Any]:
+    """Recent turns and tool calls, for "why did it do that".
+
+    Two independent lists rather than a join: a turn can route without calling
+    a tool and a tool can run on a turn whose routing row is still being
+    written (`_log_route` is spawned, not awaited). Joining them in SQL would
+    silently drop whichever half arrived second.
+    """
+    from sidecar.state import runtime
+
+    raw_limit = params.get("limit")
+    limit = int(raw_limit) if isinstance(raw_limit, int) else 20
+
+    turns = await runtime.routing_log.recent_turns(limit) if runtime.routing_log else []
+    calls = await runtime.tool_journal.recent(limit) if runtime.tool_journal else []
+    return {"turns": turns, "tools": calls}
+
+
+@method("study.export")
+async def study_export_rpc(params: dict[str, Any]) -> dict[str, Any]:
+    """Save a subject's map to Documents/ARIA Study, and say where it went.
+
+    The panel button and the `study_export` tool share `_write_export`, so a
+    file saved either way lands in the same place with the same never-overwrite
+    guarantee.
+    """
+    import asyncio
+
+    from sidecar.memory import study, study_export
+    from sidecar.state import runtime
+    from sidecar.tools.study import _write_export
+
+    subject_id = params.get("subject_id")
+    if not isinstance(subject_id, int) or runtime.db is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "Pass the id of a subject.")
+
+    state = await study.state(runtime.db, subject_id)
+    if state is None or not state.concepts:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "That subject has nothing to export.")
+
+    fmt = "html" if str(params.get("format", "md")).lower() in {"html", "pdf"} else "md"
+    text, extension = study_export.render(state, fmt)
+    path = await asyncio.to_thread(_write_export, state.subject, text, extension)
+    if path is None:
+        raise RpcMethodError(ErrorCode.INTERNAL_ERROR, "Could not find your Documents folder.")
+    return {"ok": True, "path": str(path), "format": fmt}
+
+
+@method("undo.list")
+async def undo_list(params: dict[str, Any]) -> dict[str, Any]:
+    """The timeline, newest first."""
+    from sidecar.memory import undo
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        return {"entries": []}
+    raw = params.get("limit")
+    limit = int(raw) if isinstance(raw, int) else 25
+    entries = await undo.recent(runtime.db, limit)
+    return {"entries": [e.as_dict() for e in entries]}
+
+
+@method("undo.apply")
+async def undo_apply(params: dict[str, Any]) -> dict[str, Any]:
+    """Reverse one entry.
+
+    No confirmation round-trip, because the button *is* the decision — the
+    `files.delete` rule. The tool path (`undo_last`) is CONFIRM, because there
+    a model chose the entry rather than a person.
+    """
+    from sidecar.memory import undo
+    from sidecar.state import runtime
+
+    entry_id = params.get("id")
+    if not isinstance(entry_id, int) or runtime.db is None:
+        raise RpcMethodError(ErrorCode.INVALID_PARAMS, "Pass the id of a timeline entry.")
+
+    ok, message = await undo.apply(runtime.db, entry_id)
+    if ok:
+        from sidecar.tools.files import _scan_changed
+
+        _scan_changed()
+    return {"ok": ok, "message": message}
 
 
 # ── proactivity (Phase 8) ────────────────────────────────────────────
@@ -1726,3 +2035,198 @@ async def chat_mode(params: dict[str, Any]) -> dict[str, Any]:
         "max_steps": policy.max_steps,
         "tools": str(policy.tools),
     }
+
+
+@method("voice.wake_threshold")
+async def voice_wake_threshold(params: dict[str, Any]) -> dict[str, Any]:
+    """Read or set the wake-word threshold, and arm calibration (§9 Phase 9).
+
+    One method for both, the house pattern (`voice.listen`, `settings.online`,
+    `models.bias`). **The number was configurable and unreachable**: it has
+    been a `Settings` field since Phase 2 stage 3 with no RPC anywhere, so the
+    only way to change it was an environment variable and a restart - which is
+    not a thing a wizard can offer.
+
+    Lower catches more and false-fires more. The gate it has to meet is §9's:
+    20 triggers with under 2 misses, and an hour idle with no false positive.
+    Neither can be measured from here, which is exactly why `calibrate` exists
+    - the person in the room is the instrument.
+
+    Applied to the running listener *and* persisted. Only one of those would
+    give the two a way to disagree, and a slider that does not take effect
+    until a restart is a slider that looks broken.
+    """
+    from sidecar.memory.settings_store import WAKE_WORD_THRESHOLD
+    from sidecar.providers.wakeword import THRESHOLD as DEFAULT_THRESHOLD
+    from sidecar.state import runtime
+
+    listener = runtime.listener
+    requested = params.get("threshold")
+
+    if isinstance(requested, int | float):
+        value = round(float(requested), 3)
+        if not 0.0 < value <= 1.0:
+            raise RpcMethodError(
+                ErrorCode.INVALID_PARAMS,
+                f"The wake threshold must be above 0 and at most 1; got {value}. "
+                f"Lower catches more and false-fires more; {DEFAULT_THRESHOLD} "
+                f"is the measured default.",
+            )
+        if listener is not None and listener.wake is not None:
+            listener.wake.threshold = value
+        if runtime.settings is not None:
+            await runtime.settings.set(WAKE_WORD_THRESHOLD, value)
+        log.info("wakeword.threshold_set", threshold=value)
+
+    seconds = params.get("calibrate_for")
+    if isinstance(seconds, int | float) and listener is not None:
+        listener.calibrate(float(seconds))
+
+    stored = None
+    if runtime.settings is not None:
+        stored = await runtime.settings.get(WAKE_WORD_THRESHOLD, None)
+    live = listener.wake.threshold if listener is not None and listener.wake else None
+
+    return {
+        # **Three separate facts, not one.** A wake model that is not loaded
+        # has no threshold to change, and a UI that cannot tell "set to 0.4"
+        # from "there is nothing listening" would show a working slider on a
+        # machine with no weights on it.
+        "available": live is not None,
+        "threshold": live if live is not None else (stored or DEFAULT_THRESHOLD),
+        "default": DEFAULT_THRESHOLD,
+        "mode": str(listener.mode) if listener is not None else None,
+    }
+
+# ── first run (Phase 9) ───────────────────────────────────────────────
+
+
+@method("setup.state")
+async def setup_state(_params: dict[str, Any]) -> dict[str, Any]:
+    """What the first-run wizard needs, in one round trip.
+
+    Never raises on a missing subsystem: a wizard whose whole job is to
+    report what is absent cannot fail because something is absent.
+    """
+    from sidecar.core import setup
+
+    return await setup.state()
+
+
+@method("setup.done")
+async def setup_done(params: dict[str, Any]) -> dict[str, Any]:
+    """Read, or mark, the wizard as finished.
+
+    Kept in `settings` rather than in the renderer (rule 1). It is also the
+    difference between "seen once" and "seen again every time somebody clears
+    their storage", which is the wizard version of an app asking a question
+    it has already been answered.
+    """
+    from sidecar.memory.settings_store import FIRST_RUN_DONE
+    from sidecar.state import runtime
+
+    if runtime.settings is None:
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "Settings are not available yet - the database has not finished "
+            "opening. Try again in a moment.",
+        )
+    if params.get("done") is True:
+        await runtime.settings.set(FIRST_RUN_DONE, True)
+    return {"done": bool(await runtime.settings.get(FIRST_RUN_DONE, False))}
+
+
+async def _stream_setup(source: Any, kind: str) -> dict[str, Any]:
+    """Drain a progress generator onto the event bus and report the outcome.
+
+    **The RPC returns when the work is finished; the progress arrives as
+    events in the meantime.** A pull answered as one reply would sit silent
+    for minutes on a 4.7GB model, which is the exact failure a wizard exists
+    to prevent - and Electron's IPC layer times out at 30s regardless.
+
+    `PullProgress` counts `completed`, `FetchProgress` counts `received`.
+    Both are normalised here rather than renamed at the source: one is the
+    word Ollama's own API uses and the other is the word an HTTP download
+    uses, and making either lie about its origin is worse than one line here.
+
+    Errors are **returned, not raised**. The user is looking at a wizard step;
+    "could not reach Ollama" belongs under that step, not in a toast with the
+    step still spinning.
+    """
+    from sidecar.rpc.events import Event, bus
+
+    last: Any = None
+    try:
+        async for progress in source:
+            last = progress
+            received = getattr(progress, "received", None)
+            if received is None:
+                received = getattr(progress, "completed", None)
+            await bus.broadcast(
+                Event.SETUP_PROGRESS,
+                {
+                    "kind": kind,
+                    "what": getattr(progress, "what", None) or getattr(progress, "status", ""),
+                    "received": received,
+                    "total": progress.total,
+                    "percent": progress.percent,
+                    "done": progress.done,
+                    "note": getattr(progress, "note", None),
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - reported to the step, not raised
+        log.warning("setup.failed", kind=kind, exc_info=True)
+        return {"ok": False, "kind": kind, "error": str(exc)}
+    return {"ok": True, "kind": kind, "done": bool(last is not None and last.done)}
+
+
+@method("setup.pull_model")
+async def setup_pull_model(params: dict[str, Any]) -> dict[str, Any]:
+    """Pull an Ollama model, reporting progress on the event bus.
+
+    **The first caller of `/api/pull` in this repo.** Until now the only way
+    to get a local model onto a machine was to open a terminal, which is not
+    something an installer can reasonably ask of anybody.
+    """
+    from sidecar.providers.ollama import OllamaProvider
+    from sidecar.state import runtime
+
+    model = str(params.get("model", "")).strip()
+    if not model:
+        raise RpcMethodError(
+            ErrorCode.INVALID_PARAMS,
+            'Name the model to pull, e.g. {"model": "qwen2.5:7b"}.',
+        )
+
+    provider = runtime.providers.get("ollama")
+    if not isinstance(provider, OllamaProvider):
+        raise RpcMethodError(
+            ErrorCode.INTERNAL_ERROR,
+            "The Ollama provider is not registered in this session, so there "
+            "is nothing to pull with. Check the log for ollama.unavailable.",
+        )
+
+    result = await _stream_setup(provider.pull(model), "model")
+    if result.get("ok"):
+        # The picker greys out local models by `runtime.local_models`, so a
+        # model pulled here stays greyed out until this is refreshed - which
+        # looks exactly like the pull having failed.
+        with contextlib.suppress(Exception):
+            runtime.local_models = list(await provider.list_models())
+    return {**result, "model": model}
+
+
+@method("setup.fetch_voice")
+async def setup_fetch_voice(_params: dict[str, Any]) -> dict[str, Any]:
+    """Download the Kokoro weights, ~330MB. Progress on the event bus."""
+    from sidecar.core import setup
+
+    return await _stream_setup(setup.fetch_voice(), "voice")
+
+
+@method("setup.fetch_wake_word")
+async def setup_fetch_wake_word(_params: dict[str, Any]) -> dict[str, Any]:
+    """Download the wake-word weights, ~3.5MB. Progress on the event bus."""
+    from sidecar.core import setup
+
+    return await _stream_setup(setup.fetch_wake_word(), "wake_word")

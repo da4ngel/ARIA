@@ -2090,16 +2090,14 @@ it rather than only written the spec:
   — read-only for a normal user, and wiped by the next upgrade, taking the
   conversation history and every learned fact with it. Now
   `%LOCALAPPDATA%\\ARIA\\data` when frozen, verified in the rebuilt bundle.
-- **Speech recognition and the wake word do not load in the bundle**, and this
-  is **open**. `ctranslate2` raises `cannot load module more than once per
-  process`, so `faster-whisper` cannot start; everything else works. Two
-  hypotheses were tested and disproven by rebuilding — a duplicate
-  `collect_dynamic_libs("ctranslate2")`, and naming `ctranslate2` in
-  `hiddenimports` (both since removed, both correct changes regardless). A
-  third, multiple OpenMP runtimes in the bundle (`VCOMP140.DLL` beside
-  `sklearn/.libs/vcomp140.dll` and `libiomp5md.dll`), was tested by renaming
-  the duplicate in a built bundle and is also **not** the cause. Recorded here
-  rather than left as a surprise for whoever runs the installer first.
+- ~~Speech recognition and the wake word do not load in the bundle.~~
+  **Fixed 2026-08-24 — and every word of the diagnosis that stood here was
+  wrong.** It was not ctranslate2, which is why all three hypotheses failed:
+  they were about the wrong library. The error string belongs to **numpy**, and
+  PyInstaller's hook had left `numpy._core._exceptions` out of the bundle. See
+  the Phase 9 section below. Left visible rather than deleted, because "three
+  things ruled out" reads as progress and it was three things ruled out about
+  a library that was never involved.
 
 **The rest of Phase 9 is not built** and should not be mistaken for started:
 electron-builder `extraResources` wiring, the NSIS installer, the first-run
@@ -3782,6 +3780,1622 @@ all clean.** `gate_study.py` gains a seventh line carrying this exact bug — a
 bare goal must plan a roadmap, and the reply must contain no `A)` `B)` `C)`
 `D)` — and **still has never been run live**.
 
+## Amazon Bedrock — a fifth provider, and no new dependency (2026-08-23)
+    pytest sidecar/tests -v          # 1505
+    python scripts/gate_bedrock.py   # needs the key; **never run**
+
+Eyaas: *"i got an amazon bedrock api, where i have got 100$ credit, i wanna use
+the model for aria can u setup me"*. **42 tools unchanged** — a provider is not
+a tool. No migration; the region is a settings row.
+
+**Bedrock could not borrow OpenAI's wire format the way OpenRouter did**, and
+that is the whole shape of this change. Three things differ, each of which is a
+file:
+
+| | |
+|---|---|
+| auth is **signed**, not a bearer token — unless it is | `providers/sigv4.py` |
+| the response is **binary**, not SSE | `providers/eventstream.py` |
+| the request shape is its own | `providers/bedrock.py` |
+
+**Converse, not `InvokeModel`.** It is the one endpoint that normalises tool
+calling across Anthropic, Nova, Meta and Mistral; the alternative is a
+per-vendor body format *inside* a provider, which is the shape that already
+went wrong here once when Gemini's tool nesting was assumed to match OpenAI's.
+
+### `boto3` is not a dependency, and the reasoning is not the usual one
+`botocore` ships several thousand JSON service descriptions, needs its own
+PyInstaller hook, and adds tens of megabytes to a bundle §2.3 already watches —
+to sign a request whose entire algorithm is four nested HMACs. It is also
+**synchronous**, so a streaming call would go on a thread and lose the
+cancellation semantics `stream_chat` promises (Phase 1 gate: abort within
+200ms). Same call as `beautifulsoup4`, `python-pptx`, `watchdog` and
+`send2trash` before it.
+
+**But the failure mode is different, and that changed how it is tested.** Those
+fail *softly* — a bit of navigation text in a summary. A signing bug fails
+totally, and it fails **identically to a mistyped key**, which is the worst
+diagnostic there is. So `canonical_request()` and `string_to_sign()` are
+separate pure functions returning text, and the tests assert on that text
+character for character. `hashlib` is not what is at risk; the string fed to it
+is.
+
+- **The path is encoded twice and it looks like a bug.** AWS signs a
+  doubly-encoded path for every service except S3, so a model id's `:` reaches
+  the wire as `%3A` and the string-to-sign as `%253A`. `botocore` does exactly
+  this, by quoting an already-quoted path. Every Bedrock model id ends in `:0`,
+  so this is not an edge case — it is every single request.
+- **`x-amz-content-sha256` is deliberately not sent.** Required for S3 and
+  added by botocore for S3 alone. Including it would be harmless on the wire
+  and would put this signer outside AWS's published test vector, which is the
+  only external reference there is.
+- **My memory of the published signature constant was wrong**, and the way it
+  was wrong is worth recording: 52 of 64 hex characters matched what the code
+  produced, which is impossible by chance — so the prefix was recalled and the
+  tail confabulated. **A recalled constant is not a test vector.** The
+  canonical request *string* is checked instead, because a reader can verify
+  that against the specification without running anything.
+
+### The decoder, and why both CRCs are checked
+`ConverseStream` answers `application/vnd.amazon.eventstream`: length-prefixed
+binary frames with a header table and two CRC32s. `aiter_bytes` splits wherever
+the network did, so frames arrive in pieces and several to a chunk.
+
+The CRCs cost a `zlib.crc32` each and they are the only thing that tells a
+**truncated** frame from a short one. Without them a half-arrived payload
+reaches `json.loads` as a syntax error — which reads as a malformed reply from
+the model rather than as a dropped connection. Tested one byte at a time, and
+at every one of the ~90 possible split points of a real frame.
+
+### The Converse mapping is four rules, all Bedrock's
+1. **System prompts leave the conversation** — a separate top-level field, so a
+   mapping that only renamed roles would silently drop the entire persona.
+2. **A tool result is a `user` turn.** There is no tool role.
+3. **Roles must alternate**, so adjacent same-role turns merge.
+4. **Content is a list of typed blocks**, and `{"text": ""}` is a validation
+   error rather than an empty string — which an assistant turn that only asked
+   for a tool legitimately produces.
+
+A test walks a full agent-loop exchange (user → call → result → call → result →
+answer) and asserts no two adjacent turns share a role. **One test of mine was
+wrong before the code was**: it fed user-then-tool with no assistant between,
+all three merged correctly, and the assertion was written against the shape I
+expected rather than the shape Converse requires.
+
+### Nothing here writes a measurement
+Bedrock models are **discovered**, never written into `CATALOG` — so they are
+hand-pickable and `by_class` will not route to them until something measures
+them. The same standard OpenRouter is held to, and `test_catalog.py` still
+guards it three ways.
+
+- **The filters are capability checks, not name checks** — the first listing
+  here that allows it. `outputModalities` removes Titan Embeddings and Stable
+  Diffusion without a reject list, and `responseStreamingSupported` says
+  whether `ConverseStream` will work at all. Better than the reject list
+  Gemini's `generateContent` flag forced.
+- **Inference profiles are read and preferred where required.** Newer Anthropic
+  models have no on-demand throughput under their bare id: calling one returns
+  *"Retry your request with the ID or ARN of an inference profile."*
+  `ListInferenceProfiles` maps `models[].modelArn` back to the bare id, so the
+  picker offers the id that actually works. **One entry per model, never two.**
+- `Cost.UNKNOWN`, `MINIMAL` persona, no `best_for`, no `ttft_ms_seed`.
+
+### Two credential shapes, because which one he holds is not knowable from here
+AWS issues *Bedrock API keys* (bearer tokens) and ordinary IAM access keys
+(SigV4). Shipping one half means it silently does not work for whoever has the
+other. Both are stored; the bearer token wins when both are present, being the
+narrower credential. `_KEY_FOR` became a **tuple** per provider for this — any
+one present unlocks it — and a half-entered access-key pair reads as "not
+configured" rather than as a key that fails on the first turn.
+
+### The region is a correctness setting, not a preference
+It is in the hostname, model availability differs by region, and a key is
+refused outside the region that issued it. Process-global (`router._bias`'s own
+shape) because the provider, discovery and the RPC all need the same answer,
+and a disagreement would grey out models that work. Read from settings
+**before** discovery at startup, for the same reason. Settings shows the
+selector **only once a Bedrock credential exists** — for everyone else it is a
+region picker for a provider they do not use.
+
+### `test_provider_registration.py` — the checklist, as tests
+CLAUDE.md has carried the five-place checklist in prose since OpenRouter, each
+item learned the hard way. **Prose does not fail a test run.** Every check is
+parametrised over `ProviderName` itself, so the next member is covered by the
+same tests rather than by whoever remembers to read the list.
+
+The one worth having reads `ModelPicker.tsx` **as text**, because a provider
+can be wired end to end in Python and still render nowhere: `PROVIDER_ORDER` is
+what rendering maps over and there is no fallback for the leftovers. Crude, and
+it is the only thing between a working provider and one nobody can select.
+Mutation-checked — dropping `bedrock` from that array fails exactly this test.
+
+### Run live the same day — half proven, half blocked on the account
+The key arrived within the hour, so the "nothing has been sent to AWS" this
+section originally carried is no longer true. **`scripts/gate_bedrock.py`,
+against the real endpoint:**
+
+| | |
+|---|---|
+| the credential is accepted (`ListFoundationModels`) | **PASS — 121 models** |
+| the filters leave something usable | **PASS — 69 streamable text models** |
+| a real Converse stream decodes | **BLOCKED — 429, account quota** |
+| a tool call survives the round trip | **BLOCKED — same** |
+
+So the bearer path, the control plane, `parse_bedrock` against a real payload,
+and every error branch are proven. **The event-stream decoder and the Converse
+mapping are still unproven against AWS** — not because they failed, but because
+the account returns `ThrottlingException: Too many tokens per day` to every
+model, on the first request of the day. Verified account-wide across six
+models from four vendors, so it is a quota, not a model.
+
+**The inference-profile mapping is the piece worth having proved.** Every
+Anthropic model came back as `us.anthropic.claude-*` rather than the bare id —
+which is the id that works. Written blind from the specification, and correct
+on the real listing.
+
+### Four failures on the way, and only one was mine
+Recorded because three of them are indistinguishable from a broken provider,
+and the next person to see one should not go looking in the code.
+
+- **The key he sent second did not work; the one he downloaded an hour earlier
+  did.** Two different long-term keys (`BedrockAPIKey-ly6e-…` and
+  `-8b8i-…`), and the newer returned `AccessDeniedException: Authentication
+  failed: Please make sure your API Key is valid.` on **22 regions and both
+  planes**. Nothing distinguishes that message from a signing bug — which is
+  exactly what it looked like for the first twenty minutes, in a file whose
+  own docstring warns that a signing bug fails identically to a bad key.
+  **Region was eliminated by sweeping all 22**, and the cause was found by
+  fingerprinting both CSVs with SHA-256 and trying each: a one-line difference
+  in the answer, invisible from the error.
+- **An `ABSK…` key is `base64("<key name>:<secret>")`** and decodes cleanly.
+  Checking that first is what proved the CSV was intact rather than truncated
+  or whitespace-mangled, before any theory about the wire format.
+- **`anthropic.claude-3-5-haiku-20241022-v1:0` — the gate's own default — is
+  end of life**, and the bare id has no on-demand throughput anyway. A stale
+  constant written from memory, and the only bug here that was mine. The
+  comment above it now says why the `us.` prefix is not a typo.
+- **Anthropic models need a use-case form submitted per account**:
+  *"Model use case details have not been submitted for this account."* A 404,
+  for a model the listing offers, on an account with credit. Nothing in the
+  code can fix it and the error says so, which is the point.
+
+**Every one of those arrived correctly typed.** 403 → `ProviderUnavailable`
+naming the key, the region and model access; 429 → `ProviderRateLimited`, so
+the router moves on rather than failing the turn; 404 → the message verbatim.
+The error mapping is the part of this that got the most live exercise, entirely
+by accident.
+
+### And one real bug, found only by the live listing
+`_bedrock_class` matched size tokens as **substrings**, so
+`google.gemma-3-27b-it` was classified FAST because "27b" contains "7b". Now
+split into whole tokens on every separator Bedrock uses at once — dots, dashes
+and colons appear in a single id. Cosmetic, since a discovered model's class
+only groups it in the picker and `by_class` will not route to it regardless,
+but it is the kind of wrong that makes a picker look untrustworthy. Eight
+parametrised cases, taken from the real listing.
+
+### A model answered — once (2026-08-24)
+Re-run the next day. **`amazon.nova-micro-v1:0` in `eu-west-2` returned 200 and
+the words `"OK! How can I assist you today"`.** That is the first real
+generation out of Bedrock here, and it says the credential, the region, the
+model id and the Converse *request* body are all correct.
+
+**It also consumed the entire daily allowance.** Every call after it, on both
+endpoints and in every region, is `429 ThrottlingException: Too many tokens per
+day` — including the non-streaming one that had just worked. So the successful
+call was the whole quota, not the start of it.
+
+**The cause is not the quota page, it is account verification.** `eu-central-1`
+answered once, before the rest went to 429:
+
+> *"Your account is currently being verified. Verification normally takes…"*
+
+That is an AWS-side hold on a new account, and no quota-increase request or
+code change moves it. It also explains why `us-east-1` throttles at zero while
+`eu-west-2` had a few tokens left — the hold is account-wide, the residue is
+per-region.
+
+**So the two gate lines that test this session's own code are still unproven.**
+Not failing — never reached. The event-stream decoder has never parsed a frame
+AWS actually sent, and the Converse mapping has never been accepted by the
+service. `converse` (non-streaming) succeeding does not stand in for either:
+the mapping it validated was a one-message body with no system prompt, no tool
+config and no assistant turn, which is the easy third of `_to_converse`.
+
+**Region is now stored as `eu-west-2`** — the only one that has ever answered,
+and its listing carries `anthropic.claude-opus-4-6-v1` and
+`anthropic.claude-sonnet-4-6` as **bare on-demand ids**, where `us-east-1`
+offers the same models only behind `us.` inference profiles. Changeable in
+Settings.
+
+### SigV4 is proven, by a control test rather than by a green line (2026-08-24)
+Eyaas added an AWS access key and secret beside the Bedrock API key, which
+finally exercised the hand-written signer. **Both auth paths return 200** on
+`ListFoundationModels`, in `eu-west-2` (71 models) and `us-east-1` (121).
+
+The generation path is still quota-blocked, so the POST could not be proved by
+a reply — **but it can be proved by what the failure is.** AWS validates the
+signature *before* the quota check, so the two cases separate cleanly:
+
+| secret sent | result |
+|---|---|
+| the real one | **429 ThrottlingException** |
+| deliberately corrupted (last 4 chars) | **403 InvalidSignatureException** |
+
+A 429 therefore means the request **authenticated**. That covers the part this
+file flagged as most likely to be wrong and hardest to diagnose: `canonical_path`
+double-encoding `amazon.nova-micro-v1%3A0` in a POST path, with a body hash.
+The control test is the point — a single 429 alone proves nothing, because a
+throttle applied before auth would look identical.
+
+**One piece remains untested and only one**: `eventstream.py` has still never
+decoded a frame AWS actually sent, because no 200 response body has ever
+arrived. Signing, the request mapping, discovery and every error branch are
+now all confirmed live.
+
+### Every other provider, checked the same day
+Asked to confirm all keys. One real generation each, through
+`factory.build_all` and the actual `stream_chat`:
+
+| provider | | |
+|---|---|---|
+| ollama `qwen2.5:7b` | 6105ms | `'OK'` |
+| openai `gpt-5.4-nano` | 3213ms | `'OK'` |
+| gemini `gemini-flash-lite-latest` | 1491ms | `'OK'` |
+| openrouter `nemotron-3.5-lightning:free` | 1077ms | reasoning leaked into content |
+| bedrock `amazon.nova-micro-v1:0` | — | 429, account verification |
+
+**`available()` is not the same test and was run first**: all five came back
+reachable, including Bedrock, which cannot answer a turn. That call is a
+`GET /models` — it proves a key is accepted and says nothing about whether
+generation works. Worth keeping separate, because "reachable" is exactly the
+shape of `settings.online`'s recorded *"on is not the same as working"*.
+
+The OpenRouter model wrote its reasoning as ordinary content — *"Here's a
+thinking process: 1. **Analyz…"* — despite `reasoning: {"enabled": false}`.
+That flag suppresses the separate reasoning *channel*; it cannot stop a model
+from narrating in `content`, and no provider-side setting can. Noted because it
+looks like the `_extra_body` hook failing and is not.
+
+### What is still needed, and none of it is code
+- **Account verification to finish.** This is the blocker, and it is AWS's to
+  clear — a quota-increase request does not touch it. Until then the daily
+  token allowance is roughly one short reply.
+- **The Anthropic use-case form**, for the `us.anthropic.claude-*` models —
+  which are the ones worth having the credit for.
+- Then re-run `scripts/gate_bedrock.py`. Lines 3 and 4 are the two that have
+  never passed, and they are the two that test the code this session actually
+  wrote.
+
+## Four utilities, all of them made of data that was already there (2026-08-24)
+    pytest sidecar/tests -v          # 1564
+    npm test                         # 234
+    python scripts/gate_utilities.py # needs the sidecar; **never run**
+
+Eyaas listed nine nice-to-haves before Phase 9; this is items 1–4, scoped with
+him. **42 tools → 47** (`read_clipboard_history`, `set_reminder`,
+`list_reminders`, `cancel_reminder`, `explain_last_action`), `SCHEMA_VERSION`
+8 → **9**, two new rail sections.
+
+The four belong together because none of them is a new capability. Each one
+surfaces something the sidecar has been recording and discarding — which is
+also why the exploration mattered more than the building.
+
+### Token counts had been arriving since Phase 1 and going in the bin
+`StreamDelta.prompt_tokens`/`completion_tokens` are populated by Ollama
+(`prompt_eval_count`), OpenAI (`usage.prompt_tokens`), Gemini
+(`usageMetadata.promptTokenCount`) and Bedrock (`usage.inputTokens`). **The only
+thing in the repo that read either field was one assertion in
+`test_bedrock.py`.** So the dashboard was a plumbing job, not a measurement:
+`_stream_one` gained a `usage` out-parameter — the same mutable-dict idiom
+`tool_calls` already used two lines above — summed across every agent-loop step
+and every fallback attempt, and carried to two new nullable columns.
+
+- **Nullable, and never defaulted to 0.** OpenRouter reports no usage at all. A
+  row claiming zero tokens for a turn that really happened drags every average
+  down *and* makes "nobody counted" indistinguishable from "free". `uncounted`
+  is a first-class number in `usage_since`, in the RPC and on screen.
+- **`providers/pricing.py` ships almost empty, deliberately.** Filling a rate
+  table from memory is exactly the fabrication the honesty battery exists to
+  catch, and a wrong rate is worse than a blank one because it looks like an
+  answer. Local models and `:free` endpoints are real zeros; everything else is
+  `None` until somebody reads a pricing page. `unpriced_turns` is displayed
+  beside the total with the line that fixes it.
+- Every figure says **estimated**, with `PRICES_AS_OF` next to it. The tokens
+  are real; the rates are a hand-maintained table that will drift — the
+  treatment `FREE_REQUESTS_PER_DAY = 50` already gets.
+
+### The proactivity scheduler would have silently eaten every reminder
+`ProactivityScheduler._tick_once` gates in this order, each returning silently:
+`is_actively_working()` → 4-a-day with 90 minutes between → an LLM self-check →
+`candidates[0]` only. **Nothing re-queues what it drops.**
+
+`focus.RECENT_ACTIVITY_S` is **20 minutes**. So "remind me in 20 minutes" is
+precisely the case the focus check suppresses — the act of being at the machine
+to set one is what would cancel it. Every one of those gates is right for an
+*unsolicited* message and wrong for a solicited one.
+
+`core/reminder_scheduler.py` is therefore its own loop with no focus check, no
+budget and no self-check, at a 30-second tick. Delivery reuses `send_proactive`
+unchanged, so a reminder is an ordinary `messages` row with `proactive=1` and
+inherits `turn.rate` for free.
+
+- **`delivered_at` is both the record and the guard.** `mark_delivered` matches
+  only `WHERE delivered_at IS NULL`, so two overlapping ticks cannot send twice
+  — `sessions.ended_at` doing for `close_session` what it does here.
+- **A missed reminder still fires and says how late it is.** ARIA is not always
+  running; dropping anything older than a window throws away the thing that was
+  asked for, and delivering it silently reads as though it were due now.
+- **A failed delivery is not retried.** It stays marked delivered: one missed
+  message is a far better failure than a retry every 30 seconds forever.
+- **The model parses the time, not a regex.** `set_reminder` takes `in_minutes`
+  **or** `at` — `set_volume`'s shape, which CLAUDE.md already records as the fix
+  for making a model invent a number blind.
+- Tiers: `set_reminder` T1 (a dialog in front of it destroys the feature, same
+  argument as `remember`), `cancel_reminder` **T2** because rule 5 names delete
+  and takes no exceptions — while the *panel* cancels in one click, the
+  `files.delete` distinction.
+
+### Nothing polled the clipboard, and the poll is a counter not a read
+No timer, no `AddClipboardFormatListener`, no `WM_CLIPBOARDUPDATE` anywhere.
+`ClipboardWatcher` polls `GetClipboardSequenceNumber()` — a cheap call that
+changes only on a real change and **does not open the clipboard**. Opening it on
+a timer is what makes clipboard managers fight other apps for the handle; on an
+idle machine this touches it never. There is a test asserting the reader is not
+called while the counter is unchanged.
+
+- **The first tick only arms.** Otherwise whatever happened to be on the
+  clipboard when ARIA started is recorded as though it had just been copied.
+- **The secret filter is a reduction in exposure, not a guarantee**, and the
+  panel says so on screen rather than only in a docstring — because
+  `data/aria.db` now contains clipboard text. Published prefixes (`sk-`,
+  `AKIA`, `ABSK`, `ghp_`, `AIza`, `-----BEGIN`), an unbroken high-entropy token,
+  and anything copied while a password manager is foreground. There is a test
+  asserting a **word-based passphrase is not caught**, so the gap is recorded
+  rather than discovered later.
+- `skipped_secrets` is counted and surfaced: a run where it never moves means
+  the filter has regressed to passing everything.
+- **`read_clipboard_history` is `local_only`, and that broke an existing guard
+  test — correctly.** `test_nothing_else_claims_local_only` asserts the exact
+  set, precisely so the flag is never added casually. Updated with the reason:
+  a *history* of clipboards is strictly more of what `read_clipboard` carries
+  the flag for, so this is the same rule applied consistently rather than a
+  widening of it.
+
+### `tool_log` was write-only for eight phases
+`ToolJournal` had exactly one method, `write`. Four modules had grown raw SQL
+against the table because there was nowhere to ask, and nothing anywhere could
+answer *"what did she just do"* — the question every incident write-up in this
+file has had to reconstruct by hand from structlog.
+
+`explain_last_action` (T0) reads the last `tool_log` row plus the `routing_log`
+row and hands over **facts**. The model narrates them and is told to: *"Report
+these facts as they are. Do not add reasoning that is not here — you did not
+have access to your own routing decision when you made it."* Asked why it did
+something without this, a model can only produce a plausible account of its own
+reasoning, which is invention of exactly the kind every anti-invention clause in
+`context.py` exists to stop — and a confident one, because it sounds like
+self-awareness.
+
+`routing_log.stage`/`detail` are the router's own `RouteReason`, so an unknown
+stage falls through to the detail the router wrote and still explains itself.
+The three values of `approved_by` read differently on purpose: that column was
+added so an audit trail could tell them apart, and flattening them here would
+waste it.
+
+### A real ordering bug, and the measurement that found it
+The clipboard ring first ordered on `copied_at DESC`. Two copies in quick
+succession came back in the wrong order, and the cause is not what it looked
+like: **Windows' system clock ticks about every 15.6ms, so two writes carry a
+byte-identical stamp even at microsecond precision.** Printed and confirmed —
+both rows read `2026-08-24T03:59:18.851886Z`.
+
+Adding `id DESC` as a tie-break made it *worse*: a re-copied entry keeps its
+original low id, so on a tie it sorted behind newer rows — the opposite of what
+the ring is for. The fix is to stop using a timestamp as an ordering key at all:
+a re-copy is delete-then-insert, so it takes a fresh id, and `id` is monotonic
+and cannot tie. `copied_at` is displayed and nothing else, and the migration
+says so.
+
+This is the third time this project has hit clock resolution
+(`study.latest_subject_id`, `procedures._now`) and the first time the answer was
+"do not use the clock".
+
+### A piped pytest hides its own failures
+`pytest … | tail -20` returns **tail's** exit code. A full-suite run was
+reported here as passing on exit code 0 while `test_nothing_else_claims_local_only`
+was failing in it — caught only because a later mutation check printed the
+`FAILED` line. Every verification run in this session now redirects to a file
+and echoes `$?` instead. Worth remembering: the shell will happily tell you a
+suite passed when it did not.
+
+### Mutation checks, all three confirmed
+- `pricing.for_model` returning `Rate(0, 0)` for an unknown id → fails exactly
+  `test_a_model_nobody_has_priced_is_none_not_zero`.
+- Removing the clipboard `digest` delete → fails exactly
+  `test_copying_the_same_thing_twice_moves_it_rather_than_duplicating`.
+- Giving `ReminderScheduler._tick_once` a `focus.is_actively_working()` gate →
+  fails 5 reminder tests including `test_it_fires_while_the_machine_is_in_use`,
+  which is written for it. A wider blast radius than the other two and the right
+  signal: on a machine anybody is using, *every* reminder stops arriving.
+
+The guard test checks the **tick body and the constructor signature**, not the
+module source — the first version scanned the whole module and matched its own
+docstring explaining the gates it does not have.
+
+### Migration 9, against the real database
+Verified on a `sqlite3.backup` snapshot, not a file copy: 118 sessions, 910
+messages, 111 episodes, 58 facts, 226 routing rows and 346 tool-log rows all
+intact, `integrity_check` ok, `foreign_key_check` clean, both token columns and
+both tables present.
+
+**1564 sidecar tests (+58), 234 renderer (+22), ruff, mypy, typecheck and the
+renderer build all clean.**
+
+### Not done, and named
+- **`scripts/gate_utilities.py` has never been run.** Five sections: the ring
+  records and dedupes, a credential-shaped copy is refused *and counted*, a
+  reminder fires **while the gate itself is using the machine** (the line worth
+  having — it is the direct evidence the separate loop was necessary), tokens
+  reach the log, and she reaches for `explain_last_action`. It puts nothing on
+  the real clipboard afterwards and cancels any reminder it sets.
+- **The price table is empty**, so the dashboard's cost reads $0.00 with every
+  cloud turn counted as unpriced until rates are filled in from the providers'
+  own pricing pages. That is the honest starting state, not a bug — but it does
+  mean the headline number is not useful yet.
+- **Nothing here has been looked at on screen**, which now includes two new rail
+  sections. Restart `npm run dev` fully — main and preload never hot-reload.
+- Items 5–9 (Study export, voice quizzing, batch summarisation, email, the undo
+  timeline) are untouched. Decisions already taken for two of them: Study export
+  ships Markdown plus printable HTML with no new dependency, and email will be
+  IMAP with an app password rather than the browser route BUILD_SPEC §9:947
+  assumes.
+
+## The other five nice-to-haves, and a copy button (2026-08-24)
+    pytest sidecar/tests -v   # 1629
+    npm test                  # 241
+
+Eyaas: *"in clipboard history, i should be able to copy one thing and use it
+somewhere, so put a copy button, and also implement what is left to be done
+from nice to have features."* Items 5–9 of the nine, plus the button.
+**47 tools → 50** (`study_export`, `read_email`, `undo_last`),
+`SCHEMA_VERSION` 9 → **10**.
+
+**The copy button first, because it is the one that was actually in the way.**
+The row was already clickable and nothing said so, and a clipboard write is
+*invisible* — nothing changes on screen and the proof is in another
+application. So there is a labelled button, and it says "copied" for a moment
+afterwards.
+
+### Study export: Markdown, and a page that prints
+`memory/study_export.py`, pure rendering, plus `study_export` (T1) and a
+`study.export` RPC behind two buttons in the panel.
+
+**No PDF library, and that is the trade rather than a shortfall.** `reportlab`
+and `weasyprint` are the same call this project has made five times before, and
+Phase 9 had an unsolved bundling failure at the time without adding
+cairo and pango to it. The HTML is self-contained and styled for paper —
+`@media print` rules, no web font, no external stylesheet — so Ctrl+P produces
+a real PDF and the same file is something you can send somebody.
+
+- **T1, not T2, and the never-overwrite guarantee is what earns it.**
+  `write_file` is CONFIRM because it takes an arbitrary path and replaces what
+  is there. This writes a generated name into `Documents/ARIA Study` and steps
+  aside if that name is taken, so nothing of his can be destroyed by it.
+- **Provenance is carried into the file.** A roadmap planned from a stated goal
+  says *"Planned roadmap"*; one read out of his own lecture says where it came
+  from. `source_path` being NULL is the only thing that tells them apart, and a
+  map presented as though it came from his notes is the quiet claim every
+  anti-invention clause exists to stop.
+- A subject name is free text a model produced from a lecture, and it reaches
+  both the filesystem and an HTML document — escaped in one, sanitised in the
+  other, with a test planting `<script>`.
+
+### Batch summarisation: a shared budget, and a different question
+Multi-file upload already worked end to end; two things were missing.
+
+- **Five PDFs at the single-file budget is 20,000 characters of one turn's
+  context** — about 5,000 tokens, which `fit_to_budget` would then trim the
+  conversation to make room for. `share_budget(count)` shares
+  `TOTAL_EXCERPT_CHARS` between them, floored so a document is never reduced to
+  a glimpse. One file is unchanged, which is the point.
+- **A set of files is a different question from a file.** Without saying so,
+  several attachments get answered one after another, a paragraph each, in
+  upload order — when what was asked for is almost always the thing that spans
+  them. The instruction to compare across them is added only when there is more
+  than one.
+
+### Email: read-only IMAP, in stdlib
+`providers/email.py` + `read_email` (T1). `imaplib` and `email` both ship with
+Python, so this costs no dependency — which is why it is IMAP rather than a
+vendor SDK. Eyaas chose it over BUILD_SPEC §9:947's browser route; the trade is
+a stored app password against not needing a browser open, and it parses far more
+reliably than a webmail DOM.
+
+- **Nothing here can send**, and there is no SMTP in the module to guard rather
+  than a guarded one. Two tests assert the absence — against the module's
+  *code* with comments and string literals stripped, because the docstring
+  saying "there is no SMTP anywhere" is exactly what a naive source scan
+  matches. (`test_reminders` hit the same trap earlier and was narrowed to a
+  function body; `code_only()` in `test_email.py` is the general form.)
+- **`BODY.PEEK[]`, never `RFC822`.** The ordinary fetch sets `\Seen` as a side
+  effect, so a summariser built the obvious way silently clears somebody's
+  unread badge — a destructive edit to their mailbox, performed by a tool that
+  claims to only look. Mutation-checked.
+- **Email is the canonical untrusted source**, so `read_email` joins `research`
+  and `browser_read` in `UNTRUSTED_SOURCE_TOOLS`. A web page has to be
+  navigated to; an email arrives because somebody else decided to send it, and
+  phishing is an industry built on that. §11's escalation now covers it, and
+  the content is fenced with the warning on both sides.
+- A login failure names the actual fix — an **app password**, with two-factor
+  required first — because "authentication failed" for a mailbox is almost
+  never a mistyped password.
+
+### The undo timeline, which was mostly not a table
+`undo_log` (migration 10), `memory/undo.py`, `undo_last` (T2), `undo.list`/
+`undo.apply`, and a section in Activity.
+
+**"Undo the last thing" was answerable for one tool out of six.**
+`organize_folder` has had a real manifest since Phase 4; `move_file` and
+`rename_file` recorded their before-state only in a structlog line,
+`write_file` overwrote without ever reading what it replaced, and `delete_file`
+called `Path.unlink`. So the work was never the table — it was giving the tools
+something to reverse:
+
+- **`write_file` copies aside what it is about to replace**, into `data/undo/`,
+  bounded and best-effort. Refusing to write because the backup failed would
+  break a working tool to protect a convenience.
+- **`delete_file` goes to the Recycle Bin.** BUILD_SPEC:1126 asked for exactly
+  this — *"→ Recycle Bin, never a hard unlink"* — and the tool had been
+  unlinking since Phase 3 while its own description promised "cannot be undone".
+  It now shares `files.delete`'s `SHFileOperation` path rather than duplicating
+  it, and says where the file went.
+- **A recycled file is honestly *not* restorable from here.** The shell has no
+  "undelete this path" call, so that entry explains where it is and how to get
+  it back rather than offering a button that quietly does nothing.
+- **Undoing a create refuses once the file has been edited.** Undo-a-create
+  means delete, and somebody who edited it since would lose that work to an
+  action they thought was safe.
+- **A failed undo releases its claim and records why.** Without that it looks
+  successful: the row is claimed, the button disappears, and the file never came
+  back. The claim itself is `undone_at IS NULL` in the UPDATE — the same guard
+  `reminders.delivered_at` uses.
+
+### Quizzing out loud, which needed a second way into the broker
+`QuestionBroker.ask(..., spoken=True)`, `match_spoken`, `speakable`, and a
+`Listener.set_answer_sink` hook. `ToolContext` gained `spoken`.
+
+**The broker's future was resolvable by exactly one thing: the
+`question.answer` RPC, which is a click.** Nothing could ask aloud and wait,
+which is why `SCREEN_ONLY_TOOLS` exists and why a hands-free quiz was
+impossible rather than merely awkward.
+
+- **Both paths stay live.** A spoken question is still broadcast and still
+  clickable; whichever answer arrives first wins. Across a room is exactly
+  where a mis-transcription is likely, so reaching for the screen has to keep
+  working.
+- **The listener offers every transcript to the broker *before* the
+  wake-phrase gate.** She just asked, so an answer needs no name — with
+  `_needs_name` still true, "the second one" would be dropped as room noise.
+- **`match_spoken` returns None rather than guessing, and that is the whole
+  safety property.** Not-an-answer falls through to an ordinary turn, so
+  changing the subject mid-quiz is not a trap. "I don't know" is resolved as a
+  dismissal rather than fuzzy-matched into whichever option shares a syllable.
+- **"one" is both a filler and an answer** — "the second one" versus "one" —
+  and that took two attempts. Settled by requiring *every* surviving token to
+  be positional and taking the first, which also keeps "two of them are wrong"
+  from being read as a vote for option two.
+
+### Two of my own tests were wrong before the code was
+- A source scan for "SMTP" matched the docstring explaining there is none.
+  Fixed properly with a `tokenize`-based `code_only()` rather than a narrower
+  string.
+- `test_old_backups_are_pruned` used `days=0`, which puts the cutoff at *now*
+  and races a file written microseconds earlier. It passed and failed on
+  alternate runs — caught only because an unrelated mutation check printed it.
+  The mtime is set explicitly now, and it was re-run three times to confirm.
+
+**1629 sidecar tests (+65), 241 renderer (+7), ruff, mypy, typecheck and the
+build all clean.** Migration 10 verified on a `sqlite3.backup` snapshot of the
+real database: 912 messages, 347 tool-log rows intact, integrity ok, FK clean.
+Two more mutation checks, each failing exactly its own test.
+
+### Not done, and named
+- **Nothing in this session has been run live**, including
+  `scripts/gate_utilities.py` from the previous one. Email needs a real
+  mailbox, voice quizzing needs a real microphone, and the undo timeline wants
+  a real file moved and put back.
+- **The price table is still empty**, so the usage dashboard's cost stays
+  $0.00 with every cloud turn unpriced until rates are filled in.
+- All nine nice-to-haves are now built. Phase 9 packaging is the only unbuilt
+  phase left in BUILD_SPEC.
+
+## Phase 9 begun: the packaged-speech bug was numpy, and an app icon (2026-08-24)
+    .venv\Scripts\python.exe -m PyInstaller packaging/sidecar.spec --noconfirm \
+        --distpath packaging/dist --workpath packaging/build
+    packaging\dist\aria-sidecar\aria-sidecar-debug.exe --selftest
+    .venv\Scripts\python.exe scripts/make_app_icon.py
+
+**The bug that blocked Phase 9 for weeks was never ctranslate2.** It was numpy,
+the fix is one line, and everything this file previously recorded about it —
+including the two long comments in `packaging/sidecar.spec` explaining the
+cause — was wrong. Speech recognition, the wake word **and her voice** all work
+in the frozen bundle now; the last of those was separately broken and nobody
+knew, because the first failure masked it.
+
+### What it actually was
+`cannot load module more than once per process` appears in exactly one place in
+the whole venv: **numpy**. It is compiled into
+`numpy/_core/_multiarray_umath.pyd` and re-raised verbatim by
+`numpy/_core/__init__.py`, which special-cases the string by name. It is
+numpy's own guard against its C extension being initialised twice.
+
+The sequence, from the probe's traceback:
+
+1. **PyInstaller 6.10's numpy hook does not understand numpy 2.4's layout** and
+   left `numpy._core._exceptions` out of the bundle.
+2. The *first* `import numpy` therefore died with
+   `ModuleNotFoundError: No module named 'numpy._core._exceptions'` — **after**
+   the C extension had already initialised — and numpy was evicted from
+   `sys.modules`.
+3. Every later import was a *second* initialisation. numpy refuses, with the
+   message everyone spent weeks on.
+
+So the famous error was the symptom of attempt two. **Nobody ever saw attempt
+one**, and that is the whole reason this took weeks: `main.py` logged
+`error=str(exc)` with no `exc_info`, and the shipped exe has `console=False`,
+so the traceback naming the actually-missing module went nowhere at all.
+
+Both stacks failed identically — `listener.unavailable` (openwakeword →
+onnxruntime) fired 0.2s before `stt.unavailable` (faster-whisper →
+ctranslate2). That is what should have ruled ctranslate2 out on day one: two
+unrelated libraries cannot share a bug, but they do share numpy.
+
+**The three hypotheses this file recorded as tested and disproven were all
+about the wrong library**, and one of them is disproven more cheaply than by
+rebuilding: `_ext.cp311-win_amd64.pyd` exists at exactly **one** path in the
+bundle, so "loaded twice from two locations" was answerable by `find`.
+
+### Four collection gaps, not one
+Fixing numpy exposed the next, and so on. All four are in the spec now:
+
+| missing | breaks | how it surfaced |
+|---|---|---|
+| `numpy._core._exceptions` | everything that imports numpy | the probe's traceback |
+| `faster_whisper/assets/silero_vad.onnx` | hands-free, independently | read `vad.py:92` |
+| `scipy._cyutility` | scipy → sklearn → openwakeword | `--selftest` |
+| `kokoro_onnx` + espeak/phonemizer/language_tags/babel data | **her voice** | `--selftest` |
+
+`collect_submodules` for numpy and scipy rather than naming one module each:
+the hooks are simply older than the libraries, so the next missing submodule
+would fail the same way.
+
+**The voice chain is five deep and every link fails at *import* time**, so the
+whole of TTS is absent if any single data file is. Enumerated in one pass —
+import `kokoro_onnx` in the dev venv, diff `sys.modules`, look for packages
+carrying non-`.py` files — rather than discovered one five-minute rebuild at a
+time. That trick is worth keeping.
+
+### The two instruments, which are the real deliverable
+Neither existed, and between them they turn this class of bug from weeks into
+minutes:
+
+- **`sidecar/selftest.py` and `--selftest`.** Imports every optional subsystem
+  in isolation and prints a **full traceback** per failure. Required subsystems
+  failing exits non-zero; optional ones are reported as degraded, because a
+  bundle with no microphone is still a working assistant and the gate must be
+  able to say so. It found two of the four gaps above **on its first run**.
+- **A console twin of the exe.** `packaging/sidecar.spec` now emits
+  `aria-sidecar-debug.exe` (`console=True`) beside the shipped one, sharing
+  every binary through the same `COLLECT`, so it costs about a megabyte.
+  `console=False` on the shipped exe stays correct — but "run the frozen
+  sidecar and read stderr" stops being impossible.
+- `exc_info=True` on all four `*.unavailable` warnings in `main.py`. That one
+  omission is what hid the cause.
+
+### Measured, on the rebuilt bundle
+    listener.ready            (was: listener.unavailable)
+    "cannot load module"  x0  (was: x2)
+    --selftest            17/17 subsystems present
+
+The only remaining warning is `tts.unavailable` for the missing 340MB Kokoro
+**weights** — content the wizard will fetch, not a packaging defect.
+
+### A path collision worth not repeating
+The spec's documented command omitted `--distpath`, so a rebuild silently wrote
+to the repo-root `dist/` while `packaging/dist/` kept a three-day-old bundle —
+and `dist/` is where electron-builder puts the installer. Two different things
+under one name. The header now states the paths and says they are not optional.
+
+### The app icon: the orb
+Eyaas asked for a real logo; there was **no `.ico` anywhere**, so Electron shipped
+its default. `scripts/make_app_icon.py` generates `resources/icon.ico` — 7 sizes,
+16 through 256, 42KB — stdlib only (`zlib` + `struct`), palette read from
+`src/styles/tokens.js` by the same regex `make_tray_icons.py` uses. An `.ico` is
+a container of PNGs, so it is that script's PNG writer plus a 6-byte header and
+one 16-byte directory entry per size.
+
+- **The mark is what `Orb.tsx` draws** — a sphere lit from 32%/28%, a bloom
+  behind, an outer glow. The orb is on screen constantly and is already the
+  app's identity; a letterform would have been something ARIA uses nowhere.
+- **`accent` (`#6d8cff`), and it was `idle` first.** `idle` is the resting
+  state and `tokens.js` reserves `accent` for focus rings — both good reasons,
+  and rendering it settled the argument: a grey ball, elegant in the app and
+  invisible on a taskbar. The palette rule governs *in-app semantics*, so a
+  saturated colour on screen always means something; an icon in the Windows
+  shell is outside that system, and the rule it has to obey is "be
+  recognisable at 16 pixels".
+- **Geometry changes with size.** At 256 the bloom is most of the charm; at 16
+  the same layout is a five-pixel dot adrift in an empty square, because the
+  glow is below the resolution that can express it. Small sizes get a bigger
+  core and a tighter halo. Decided by rendering all seven and looking at them.
+- **The tray keeps its own icons.** Those are status — ok/warn/bad — and the
+  only always-visible signal that the brain is alive. The orb is the *app*;
+  the dots are its *state*.
+- `src/styles/icon.test.ts` decodes the committed `.ico`, checks every size is
+  present, that the centre still reads as the accent hue *by ratio* rather than
+  by absolute value, and that the corners are transparent. Same drift guard as
+  `tray.test.ts`, and for the same reason — the tray sat a whole retheme behind
+  because its colours were a hand-typed copy.
+- Wired into `BrowserWindow` in `electron/main.ts`, plus
+  `app.setAppUserModelId('com.eyaas.aria')`, without which Windows treats the
+  window, the taskbar button and a pinned shortcut as three unrelated things.
+  electron-builder's `win.icon` dresses the exe and the installer, not the
+  running window — both are needed.
+
+### Still to do in Phase 9
+Stages 2–5 of the approved plan, none of which is started: wiring the frozen
+exe into `electron/sidecar.ts` (which today resolves `.venv/Scripts/python.exe`
+and has no packaged branch at all), `electron-builder.yml` (there is none),
+NSIS and auto-start, crash reporting and Export diagnostics, and the first-run
+wizard. **The wizard needs model-pull-with-progress, which does not exist in
+any form** — no `/api/pull` anywhere in the repo.
+
+Two blockers are external and worth raising now rather than at the end: the
+acceptance gate needs a **clean Windows 11 VM**, and there is **no code-signing
+certificate**, so the installer will trip SmartScreen until reputation accrues.
+
+## Two gates ran, and both found real bugs (2026-08-25)
+
+`gate_utilities.py` passed all five lines on its first live run — including the
+one worth having: **a reminder fired while the gate itself was driving the
+machine**, which is the direct evidence that `ProactivityScheduler`'s focus
+check would have eaten it. `set_reminder` → delivered → `Reminder: check the
+oven`, unsuppressed.
+
+But the run showed `tokens: 0 in / 0 out uncounted=2`, and `gate_study.py` could
+not connect at all. Both were real.
+
+### Every token count ever recorded was NULL, and it took three faults
+231 of 231 `routing_log` rows had NULL tokens — the whole point of migration 9.
+Each provider failed differently, which is why one fix was never going to do it:
+
+| provider | why nothing was recorded |
+|---|---|
+| **Gemini** | `_parse_sse` hard-codes `done=False` — its stream ends by ending — so a collector reading only the done delta saw nothing. |
+| **OpenAI** | reports no usage while streaming *at all* unless the request asks (`stream_options.include_usage`). |
+| **OpenAI**, again | with it asked for, the usage arrives in a frame with an **empty `choices` list**, which `_parse_sse` discarded as nothing. |
+| **OpenAI**, a third time | `stream_chat` `return`ed on the `finish_reason` frame, which arrives *before* the usage frame. |
+| **OpenAI**, a fourth | once held back, the trailing `[DONE]` produced a second done delta that overwrote the merged one. |
+
+**The accumulation was also wrong in a way none of that would have exposed.**
+Gemini repeats a *cumulative* total on many chunks, Ollama reports once at the
+end, OpenAI once in a trailing frame. Summing every delta multiplies Gemini's
+figure by the chunk count; taking only the last loses the earlier steps of an
+agent loop. It is now **last-wins within a call, summed across calls**, which
+is right for all three.
+
+Measured after, live: `openai p=8 c=4`, `gemini p=3 c=1`, `ollama p=31 c=10`,
+and a tool call still assembles through the held-back done delta.
+
+**The gate reported PASS throughout.** Its check was
+`prompt_tokens == 0 and uncounted == 0` — and every turn was arriving
+*uncounted*, so the second half was always false. **A gate that accepts "nobody
+counted anything" as evidence of counting is agreeing with itself.** It now
+fails on zero tokens regardless, and reports a non-zero `uncounted` as OBSERVED,
+since OpenRouter genuinely never sends usage.
+
+### `gate_study.py` had never run because it could not
+Four sessions of "written but not yet run" — and it was not waiting for
+someone. `websockets.connect(URL, max_size=...)` sent **no Authorization
+header**, so `/rpc` rejected the upgrade with HTTP 403 every time. Every other
+gate here reads `data/.handshake` first. It does now, and it imports
+`websockets.exceptions` explicitly — the lazy-submodule trap `gate_memory.py`
+already recorded, where the "cannot reach the sidecar" handler *was* the crash.
+
+
+### And then gate_study ran, and a new study chat was studying the wrong subject
+Its first live run, three FAILED lines, and **one cause behind all three**:
+she never called `study_begin` at all.
+
+`_study_state` resolved the active subject with `study.latest_subject_id` —
+the most recently touched subject *globally*. So a **brand-new** study chat,
+which has touched nothing, opened with
+
+    [studying: Introduction to Information Security Analytics - 0 of 22 covered.
+     next: Module Overview]
+
+...a real lecture of Eyaas's from days earlier. **That block is a claim that a
+session is already underway, and the model believed it**, exactly as written:
+it carried on teaching the old subject, never mapped the lecture the gate had
+just attached, and graded the quiz answers against the old subject's concepts.
+
+**It reached the real database.** `concept_mastery` held one row afterwards -
+`Module Overview`, `asked=5 correct=0 level=1` - five wrong answers about a
+transport protocol, recorded against his Information Security coursework.
+
+- **The fix is a column that already existed.** `sessions.study_subject_id` has
+  been stamped by both study tools since migration 008 and **nothing had ever
+  read it** - the `record_new_offers` / `affect_state` shape this file keeps
+  finding, a fourth time. `session_subject_id()` reads it; `study.state` takes
+  a `session_id` too, or the RPC and the prompt block would disagree, which is
+  the one thing that handler's docstring promises they cannot.
+- **A chat with no subject of its own gets different words, not no words.**
+  `render_not_started` says nothing has started here, names prior subjects as
+  something to *resume*, and names `study_begin`. Keeping "studying:" and
+  merely changing which subject it named would have left the same false claim
+  with a better id in it.
+- **The mutation check is the whole lesson.** `render_not_started` and
+  `session_subject_id` were both written, tested and passing while
+  `_study_state` still called `latest_subject_id` - and the entire suite was
+  green. **Nothing tested the call site.** A test on `_study_state` itself now
+  fails on that swap, and before it existed nothing did.
+
+### Three faults in the gate, and one of them is why it could pass
+- **"Kestrel" is not invented terminology.** The lecture's whole premise is
+  made-up terms, so line 1 can tell a concept read *out of the material* from
+  one the model already knew - and Kestrel is the real ASP.NET Core web
+  server. Section 5 asked how it handles certificate revocation and got a
+  fluent, correct answer about Schannel and OpenSSL: the opposite of the
+  failure the line exists to catch, scored as that failure. Renamed to
+  **Vantril**, which is not a product, a protocol or a word.
+- **Section 1 printed a map it had not built.** `read_map` called `study.state`
+  with no session, so it was handed that same globally-most-recent subject and
+  listed its 22 concepts under "concepts:" while `tools: []` sat on the line
+  above. The FAILED line was right; everything above it read like a pass.
+- **It left its scratch subject in the real database after every run**, with a
+  comment claiming cleanup "would take `study.forget` - a tool this phase does
+  not build". `study.forget` has been an RPC since the Study tab shipped. It
+  now removes the difference between `study.subjects` before and after, so
+  what this run made goes and nothing else is touched.
+
+
+### The second run: four more faults, and one alarm that was mine
+Re-run after the fix. `study_begin` was now reached — and four things were
+still wrong, three in the gate.
+
+- **`tools_used()` read the wrong key and always had.** The `tool.call`
+  payload carries `tool`; it read `name` and defaulted to `"?"`, so line 1's
+  `if "study_begin" not in tools` was **unpassable by construction**. It stayed
+  invisible because until the session-subject fix no tool ran here at all, so
+  the list was empty rather than full of question marks. Fourth "this gate
+  could never have passed" finding in two days.
+- **The gate's lecture lives in `%TEMP%`, which the indexer cannot see** - this
+  file has recorded that since Phase 4 ("`AppData` is in the skip list... which
+  also means anything under `%TEMP%` is invisible"). `study_begin` resolves
+  `material` through `file_index`, so it returned `not_found` for a file whose
+  absolute path the turn had just been handed, and she planned a roadmap from
+  the title instead. **Fixed in the product, not the gate**: `ToolContext`
+  carries the turn's own attachment paths and `study_begin` checks those first.
+  The indexer is throttled to 20 files a minute and pauses while she answers,
+  so "he attached it seconds ago" is exactly when it has no chunks - the same
+  trap `finder._Cache` already had, arriving from the other direction.
+  `curriculum.source_text` falls back to reading the file for the same reason.
+- **`cleaned up: study subject #2` was correct, and I reported it as data
+  loss.** SQLite recycles the highest rowid: subject #2 had been deleted from
+  the panel three minutes before the run, so the gate's own
+  `gate transport security` was created *as* #2 and cleaning it up was exactly
+  right. The log settled it in one line — `study.subject id=2 gate transport
+  security` at 11:51:40, `study.subject_deleted id=2` at 11:52:02 — after I had
+  already told Eyaas his lecture was gone. **An id is not an identity when ids
+  are reused**; the cleanup prints the name now. Two lessons, and the second is
+  the bigger one: I read a matching id as proof and said so before checking the
+  log that was sitting there.
+
+
+## Phase 9: the installer, and three paths that only break once installed (2026-08-31)
+
+    npm run dist:sidecar     # PyInstaller -> packaging/dist/aria-sidecar
+    npm run dist             # renderer build, then electron-builder -> release/
+
+Stages 2-4 of the approved plan. `electron-builder` has sat in
+`devDependencies` since Phase 0 and was never once invoked; there was no
+`electron-builder.yml`, no `productName`, and **`electron/sidecar.ts` had no
+packaged branch at all** — it resolved `.venv/Scripts/python.exe` and ran
+`python -m sidecar.main`, so an installed app would have gone hunting for a
+virtualenv inside `resources/`.
+
+### Three paths, and every one of them is correct in development
+This is the part with no error message. `repoRoot` is `app.getAppPath()` in
+dev and `process.resourcesPath` once packaged, and three things were resolved
+against it that must not be:
+
+- **`ARIA_DATA_DIR` pointed at `resourcesPath/data`.** Under Program Files
+  that is read-only for a normal user and replaced by the next upgrade,
+  taking the conversation history and every learned fact with it. **This is
+  the bug that was already found and fixed on the Python side** — `config.py`
+  moved to `%LOCALAPPDATA%\ARIA\data` when frozen — and Electron passing
+  `ARIA_DATA_DIR` *overrides* that rule, so the fix would have been silently
+  undone from the other side of the boundary.
+- **The handshake, which fails silently and is the worst of the three.**
+  Electron reads `data/.handshake` to adopt an already-running sidecar. The
+  frozen sidecar writes it to `%LOCALAPPDATA%`. Packaged, those are different
+  files: Electron finds nothing, decides nothing is running, spawns a second
+  sidecar — and that one loses the port race. No error anywhere, because both
+  processes did exactly what they were told.
+- **`cwd`.** Anything the sidecar writes relative to its working directory
+  fails in Program Files.
+
+`resolveDataDir()` in `main.ts` is the one answer, and it **mirrors
+`sidecar/config.py:_default_data_dir` deliberately rather than deriving from
+it** — there is no channel between them at that point in startup; Electron
+needs the path before the sidecar exists to ask. `app.getPath('userData')` is
+not used and the comment says why: it is `%APPDATA%\<productName>`, a
+different directory that Python knows nothing about.
+
+`src/packaging.test.ts` is the drift guard, reading four files as text the way
+`acrylic.test.ts` and `tray.test.ts` already do — including `config.py`, so
+the two sides of the same directory cannot part company. Mutation-checked:
+restoring both `repoRoot` resolutions fails exactly the two tests written for
+them.
+
+### Auto-start is OS state, and reporting the request is a lie
+`setLoginItemSettings({openAtLogin, args: ['--hidden']})`, read back with
+`getLoginItemSettings()`, and `main.ts` honours `--hidden` by not calling
+`showWindow()`. Opening a window on every login is the fastest way to make
+somebody remove a startup item.
+
+- **Nothing stores it.** It lives in the registry's Run key; a copy kept in
+  settings would still read as on after somebody turned it off in Task
+  Manager. Rule 1 governs conversation, memory and task state — this is
+  none of them, and the same reasoning `browser.setup` already uses for
+  "is CDP reachable".
+- The toggle resolves with what the OS reports **afterwards**, not with what
+  was asked for. The write can fail, and a switch showing the request rather
+  than the result is a switch that lies.
+
+### Export diagnostics, and the one thing it must never contain
+`system.diagnostics` + `sidecar/core/diagnostics.py`, reachable from Settings
+**and from the tray** — the moment you need it is the moment the window may
+not be working.
+
+- **The sidecar builds the zip, not Electron.** Node has no built-in zip and
+  Python has `zipfile`, so it costs no dependency; and `data/` is the
+  sidecar's (rule 1), which also makes it the only side that knows where the
+  logs are once frozen.
+- **`CredentialStatus.hint` is dropped, and that is the load-bearing line.**
+  It is the last four characters of a real key — fine on the user's own
+  screen, and four characters of a secret in a file they are about to email.
+  The test asserts the string is absent from **the whole archive**, not from
+  one field, because the failure that matters is it appearing anywhere.
+  Mutation-checked: putting `hint` back fails exactly that test.
+- **The database is described, never copied.** `aria.db` is 70MB and holds
+  every message she has ever seen; its size and existence are diagnostic and
+  its contents are the conversation.
+- Logs are tail-capped at 2MB and the seek drops the partial first line —
+  `sidecar.log` has no rotation and no size cap, and a fragment at the top of
+  an export reads as a corrupt file rather than a diagnostic one.
+- **A section that raises does not fail the export.** By the time anyone
+  reaches for this, something is already broken; a partial archive beats
+  being unable to send anything.
+
+### Crash reporting: Electron had none at all
+The sidecar has had two log files since Phase 0. An Electron-side crash left
+**nothing** — no file, and no console either, because a packaged window has
+nowhere for stderr to go. `uncaughtException` and `unhandledRejection` now
+append to `data/logs/electron.log`, which `system.diagnostics` collects by
+name. The handler appends and lets Electron carry on with its own behaviour;
+it does not swallow the crash. Its own writes are wrapped, because a crash
+logger that throws while logging a crash is worse than none.
+
+### Smaller
+- **`asar: true` is safe only because the sidecar is external.** An archive is
+  not a real filesystem path and `spawn` needs one.
+- **`perMachine: false`** — per-user, so no elevation prompt, and
+  `%LOCALAPPDATA%` stays the right home for her data.
+- `extraResources` also ships `resources/`, because `APP_ICON` is loaded by
+  absolute path at runtime; `win.icon` dresses the .exe and the installer
+  only.
+- The spawn-failure message is build-aware. Telling an installed user to
+  create a venv is worse advice than none — the same lesson as
+  `BrowserUnavailable` still saying "Chrome".
+- `npm run dist` chains the renderer build; `dist:sidecar` is separate and
+  must run first. **`extraResources` copying a directory that does not exist
+  is not an error** — electron-builder simply ships an app with no brain in
+  it, so the ordering is asserted in `packaging.test.ts` rather than
+  remembered.
+
+**1646 sidecar tests (+6), 259 renderer (+14), ruff, mypy, typecheck and the
+renderer build all clean.**
+
+### The installer builds — and the first attempt failed for a reason that is
+### nothing to do with this project
+    release/ARIA Setup 0.1.0.exe    258MB, NSIS, per-user, unsigned
+
+The unpacked app is correct where it counts: `resources/sidecar/aria-sidecar.exe`
+and `resources/resources/icon.ico` are both exactly where `main.ts` looks for
+them, and **the frozen sidecar still reports 17/17 subsystems from inside the
+install**, run as `resources/sidecar/aria-sidecar-debug.exe --selftest`. That
+last check is worth doing here rather than only against `packaging/dist/` —
+electron-builder copies the bundle, and a copy is a place a file can go
+missing.
+
+**The first run died four times in a row on `Cannot create symbolic link: A
+required privilege is not held by the client`.** electron-builder downloads
+its `winCodeSign` package to get `signtool.exe` — needed even when nothing is
+signed — and that archive contains **macOS** `.dylib` symlinks, which Windows
+will not create without Developer Mode or elevation. Not a project defect and
+not fixable in the config; it fails at cache-extraction time, before any of
+this repo's settings are consulted. Repaired once, by hand, by extracting the
+cached `.7z` into `winCodeSign-2.6.0` with `-x!darwin*` — the macOS half is
+irrelevant on a Windows build. After that: `no signing info identified,
+signing is skipped`, and NSIS ran. **Worth knowing before assuming a failed
+`npm run dist` is something in `electron-builder.yml`.**
+
+### Not built, and still external
+- **The first-run wizard (Stage 5) is not started**, by the plan's own
+  stopping point. It needs model-pull-with-progress, which does not exist in
+  any form — there is no `/api/pull` anywhere in this repo — plus a fetch
+  path for the Kokoro weights and the wake-word ONNX, neither of which has
+  one an app can call.
+- **Unsigned.** There is no certificate, so the installer will trip
+  SmartScreen until reputation accrues. Worth saying in the release notes
+  rather than at install time.
+- **The acceptance gate needs a clean Windows 11 VM** and cannot be faked on
+  this machine, where a `.venv`, Ollama and a populated `%LOCALAPPDATA%` all
+  already exist. The specific thing to verify there is Stage 2's silent
+  failure: that the installed app **adopts** rather than spawning a second
+  sidecar — one `aria-sidecar.exe` in the process list, not two.
+
+
+## Phase 9 finished: the first-run wizard, and the two downloads nobody could start (2026-08-31)
+
+    pytest sidecar/tests -v   # 1657
+    npm test                  # 271
+
+Stage 5, the last unbuilt item in BUILD_SPEC §9. **50 tools, no migration** —
+`first_run_done` is a settings row, and a wizard is not a tool.
+
+Five of its seven steps were already answerable and only needed wiring.
+**The two that were not are the two that download something**, and both had
+the same shape of gap: the capability existed for a human at a terminal and
+did not exist for the app.
+
+- **`/api/pull` appears nowhere in this repo.** Until now the only way to get
+  a local model onto a machine was `ollama pull` in a terminal, which is not
+  something an installer can ask of anybody. `OllamaProvider.pull` is an
+  async generator over the streaming endpoint.
+- **Kokoro's ~330MB of voice weights had no fetch path at all**, and the
+  wake-word weights had one that is a CLI script. A wizard that tells
+  somebody to run `python scripts/fetch_wakeword.py` is not a wizard.
+
+### The pull, and the failure a status-only reader calls a success
+**Ollama reports a failed pull in band: HTTP 200, with an `error` key.** So a
+consumer watching only `status` would report a model nobody has as pulled and
+the wizard would advance past a step that achieved nothing. `_parse_pull_line`
+raises on it. Confirmed live rather than from the docs:
+
+    pull definitely-not-a-real-model:v9
+      -> "pulling manifest"
+      -> ProviderUnavailable: pull model manifest: file does not exist
+
+- **A status-only line has `percent = None`, not zero.** "pulling manifest"
+  and "verifying sha256 digest" carry no totals, and a bar reading those as
+  zero would snap back to the start between every layer. Measured against the
+  real daemon: 8 lines for a present model, four of them layers at 100% with
+  `None` on either side.
+- **No read timeout on the stream.** The default is sized for a chat token,
+  and Ollama goes quiet between layers on a slow link — `httpx` would call
+  that a stall and be wrong. Cancellation is what stops it, not a clock.
+- **`runtime.local_models` is refreshed after a successful pull.** The picker
+  greys out local models by that list, so without it a model pulled by the
+  wizard stays greyed out — which looks exactly like the pull having failed.
+
+### Written to a `.part`, because of what `tts.py` checks
+Speech decides it is available with `Path.exists()`. A 310MB download
+interrupted three quarters of the way through, written straight to its final
+name, would leave a file at exactly that path — and every launch afterwards
+would fail with an ONNX parse error instead of the honest "the weights are
+missing from data/models", which says what to do.
+
+The partial **is** left behind, deliberately: it is evidence for anyone
+looking in the folder, at a name nothing loads. Mutation-checked — writing
+directly to the target fails exactly its own test.
+
+- **A weight already on disk is not fetched again.** Opening the wizard twice
+  must not cost 310MB twice.
+- **The Kokoro URLs were verified against the live endpoints, not recalled.**
+  The voices URL is the one `kokoro_onnx` prints in its own "file not found"
+  message; the model file's is at the same release tag and was checked with a
+  HEAD — 200, 325,532,387 and 28,214,398 bytes, which is BUILD_SPEC's own
+  "330 MB". A recalled URL is the same class of thing as a recalled constant,
+  and this file already records what that cost once.
+- **The wake word reuses openwakeword's own downloader** rather than
+  reimplementing its URL table. It is synchronous with no progress hook, so
+  that step reports start and finish rather than a bar — 3.5MB does not need
+  one, and a second copy of somebody else's URL list is a second thing to fix
+  when it changes.
+
+### Progress is an event, and errors are a return value
+`SETUP_PROGRESS`. **The work outlives the RPC that starts it**: a 4.7GB pull
+answered as one reply would sit silent for minutes — the exact failure a
+wizard exists to prevent — and Electron's IPC layer times out at 30s anyway.
+
+`_stream_setup` **returns** its failures instead of raising them. The user is
+looking at a wizard step; "could not reach Ollama" belongs under that step,
+not in a toast beside a spinner that is still turning.
+
+`PullProgress` counts `completed` and `FetchProgress` counts `received`, and
+they are normalised at the boundary rather than renamed at the source — one
+is the word Ollama's API uses and the other is the word an HTTP download
+uses, and making either lie about where it came from is worse than one line
+in the handler.
+
+### The microphone: Electron was never asked
+`setPermissionRequestHandler` **had never been called anywhere in this repo**,
+which happened to work because Electron grants everything to a page it loaded
+itself. That is a bad thing to be relying on rather than stating. `media` is
+granted; everything else — geolocation, notifications, MIDI, a display capture
+nobody asked for — is denied and logged, because a page that is only ever our
+own bundle has no business asking.
+
+**The renderer is what asks, not the sidecar.** The sidecar can report that
+hands-free is available and still never hear anything; only `getUserMedia`
+raises the Windows prompt. The track is stopped immediately afterwards — the
+step is consent, not a session, and holding it open would light the recording
+indicator for the rest of the wizard.
+
+### Every step is skippable, and that is the design
+None of this is required to type a question to a cloud model. A setup screen
+that will not let you past it is how an app gets closed before it is used, so
+the button says "Start using ARIA" and is disabled only while something is
+actually downloading — closing mid-pull is how you get a half-written file.
+
+- **`needed` is `null` until the sidecar answers**, and `App.tsx` renders on
+  `=== true`. A boolean default would either flash the wizard at everybody
+  for a frame or hide it from the one person who needs it. Its own test.
+- **The gate is a settings row, not `localStorage`** (rule 1) — and a wizard
+  that reappears because somebody cleared their storage is worse than none.
+- **Reopening from Settings does not write `done: false`.** It is a view
+  decision; writing the row back would mean the wizard returned on its own at
+  the next launch. Also its own test — and Settings needed the link at all,
+  because the wizard is the only place that offers the model pull and the
+  weight downloads, so without it they would be reachable exactly once per
+  install.
+- The state report drops `hint` for the same reason the diagnostics export
+  does: it is four characters of a real key, and this payload crosses a
+  process boundary into a renderer.
+
+### The comment-matches-its-own-negation trap, for the third time
+A test asserting `useFirstRun.ts` does not contain `localStorage` failed on
+the docstring that says **"Gated on a settings row, not `localStorage`"**.
+`test_email.py` has `code_only()` for exactly this, after a scan for "SMTP"
+matched the docstring explaining there is none, and `test_reminders` hit it
+before that. `packaging.test.ts` now has the TypeScript equivalent. Three
+times, in three files, in two languages: **a negative assertion must be made
+against code with the comments stripped.**
+
+**1657 sidecar tests (+11), 271 renderer (+12), ruff, mypy, typecheck and the
+renderer build all clean.**
+
+### Proven live, and what is not
+Against the real Ollama daemon on this machine: a present model re-pulled
+(8 lines, layers at 100%, status-only lines at `None`, `success` as done), a
+missing model raising with Ollama's own message, and `setup.state()`
+returning a full report. **That is the code this session wrote.**
+
+**The wizard has not been seen on screen**, and neither has anything else from
+the last several sessions — it lands in the same window as two rail sections,
+the clipboard copy button, the undo timeline, the Study export buttons and the
+app icon. **The one step nothing here can rehearse is the real first run**:
+this machine has Ollama, three models, both sets of weights and every key
+already, so every step renders in its "done" state. A clean VM is the only
+place the interesting half of this screen exists — which is the same VM
+BUILD_SPEC's acceptance gate already needs.
+
+
+## The wake threshold was configurable and unreachable (2026-09-01)
+
+    pytest sidecar/tests/test_wake_threshold.py -v
+
+`wake_word_threshold` has been a `Settings` field since Phase 2 stage 3 with
+**nothing anywhere able to write it**. The only way to move it was an
+environment variable and a restart — which is not something a wizard can
+offer, and is why the calibration step shipped the day before as a download
+button and an apology.
+
+`voice.wake_threshold` reads, writes and arms calibration, the house pattern
+(`voice.listen`, `settings.online`, `models.bias`) one method for all three.
+
+- **Applied to the running listener *and* stored.** Only one of those gives
+  the two a way to disagree: store-only is a slider that does nothing until a
+  restart, which looks broken; apply-only is a calibration that evaporates
+  overnight. `main._build_listener` reads the row and falls back to the config
+  default, which is what was ever readable before.
+- **`Listener.wake` is a new property**, and `None` is a real answer rather
+  than a failure: phrase mode is the default and gates on the transcript, so
+  there is no model to threshold. A UI that could not tell "set to 0.4" from
+  "there is nothing listening" would show a working slider on a machine with
+  no weights on it, which is why `available` is its own field.
+- **The range is what the score can take.** Zero wakes on silence and above
+  one can never be reached — both are settings that look like a choice and are
+  a broken microphone.
+
+### The score is broadcast only while calibration is armed
+**A threshold is unpickable without seeing what your own voice in your own
+room actually scores**, and that number was otherwise invisible: it existed
+for one frame inside a comparison and was thrown away.
+
+`WAKE_SCORE` reports it — and reports the *below-threshold* frames, which are
+the useful ones. A calibration that only reported successes could not tell
+"your voice scores 0.45 and the bar is 0.5" from "nothing was heard at all",
+which is the entire question somebody opens this step to answer.
+
+- **Armed, never on.** Frames arrive 12.5 times a second beside Whisper,
+  Kokoro and a 7B model; broadcasting a number nobody is looking at, forever,
+  is exactly the cost `VoiceAura` was rewritten to avoid. Mutation-checked —
+  making it unconditional fails exactly the three tests written for it.
+- **Self-disarming.** A flag somebody has to turn off is one that gets left
+  on. Zero disarms immediately, for closing the step; the renderer's own timer
+  only stops the UI claiming to listen longer than the sidecar is, and the
+  sidecar's clock is the real one.
+- **The step shows the peak, not the latest.** A phrase spans several frames
+  and most of them are the quiet either side of it, so the last frame would
+  report near-silence a moment after a perfect detection.
+- The step does not print the phrase. `voice.listen` returns it precisely so
+  the UI never hardcodes one, and a label naming the wrong phrase is worse
+  than no label — the first draft had "hey jarvis" written into the copy.
+
+**What this still cannot do is measure the gate.** §9's bar is 20 triggers
+with under 2 misses and an hour idle with no false positive, and neither is
+measurable from here — the person in the room is the instrument, which is
+what the step exists to hand them.
+
+
+## The UI was finally looked at, and it found a blank-window bug (2026-09-01)
+
+    python scripts/look_at_the_ui.py     # needs `npm run dev` serving :5173
+
+**The oldest open item in this file, and it had been open for eleven days.**
+Every session ended with "not yet looked at on screen", and the reason it kept
+being deferred is that the obvious way to do it — run the app and photograph
+the window — needs the window *visible*, which means taking over the desktop
+of whoever is using the machine.
+
+**It does not.** The renderer is a web page. `scripts/look_at_the_ui.py` loads
+the same Vite dev server the app loads into a headless Chromium with a stubbed
+`window.aria`, opens every rail section in turn and photographs it. What it
+cannot show is anything Electron owns — acrylic, the window chrome, the tray.
+What it *can* show is layout, colour, contrast and whether a panel renders at
+all, which is what three sessions of unseen work actually needed checking for.
+
+Two things the harness has to supply or the pictures lie:
+
+- **Something behind the glass.** `glass` is `rgba(9, 18, 14, 0.62)` and
+  Electron paints it over DWM acrylic, which blurs the desktop. Over a
+  browser's default white page the same tint reads as flat mid-grey — the
+  first run of this looked like the green retheme had never happened. One
+  `html { background }` rule stands in for the blurred desktop.
+- **A connected status.** Without it every header control renders at
+  `opacity-40` and the permission chip is invisible, which reads as a missing
+  feature rather than as a disconnected app.
+
+### It found a real bug, and a serious one
+The stub had `text` where `clipboard.history` returns `content`. `ClipboardPanel`
+threw on `entry.content.replace`, and **React unmounted the entire tree**: the
+app became an empty rectangle. The same symptom as the retheme's blank window,
+from an entirely different cause — and **there was no error boundary anywhere
+in this app.** React's own console said so.
+
+`PanelBoundary` wraps the panel stack. One panel failing now shows *"The
+activity panel failed"* with the message, and the conversation, the rail and
+the composer stay usable — verified in a screenshot of exactly that.
+
+- **It names the panel and shows the error's message**, not "something went
+  wrong": a stack belongs in `electron.log`, which `system.diagnostics`
+  collects, and a person reading the box needs to know the rest still works.
+- **It resets when the panel changes.** Without that, one failure would show
+  the first panel's error over every panel opened afterwards — a worse bug
+  than the one it exists to fix. Mutation-checked: dropping the reset fails
+  exactly that test.
+- **It deliberately does not wrap the conversation.** A boundary there turns a
+  crash in the thing you are reading into a quiet placeholder, and losing a
+  reply silently is worse than losing it loudly.
+- CLAUDE.md already had this lesson once — `useStudy` guards with `?? []`
+  because *"a panel that throws on an unexpected payload takes the whole rail
+  section down"*. That fix was one panel and one field. This is the general
+  form, and the general form is what was missing when a second panel did it.
+
+### What the pictures actually showed
+Three days of Study, two rail sections, the green palette, the wizard and the
+new Settings rows, seen for the first time:
+
+- **The palette is right.** Dark green ground, the indigo accent on the
+  selected permission mode and the wizard's primary button, amber and green
+  mastery dots reading as a scale at a glance.
+- **All nine rail sections are present and reachable**, Clipboard, Study and
+  Activity included — the thing `Sidebar.test.tsx` asserts and nobody had
+  confirmed by eye.
+- **The Study panel is populated and legible**: the six sub-mode buttons, the
+  `.md`/`.html` export controls, "Needs revision", the map with five-dot
+  mastery, and the session list.
+- **Settings carries the three new rows** — Start with Windows, Setup and
+  Diagnostics — in the order intended.
+
+Two defects, both fixed, both visible only this way:
+
+- **The wizard's step buttons sat inline with their prose**, so "Download
+  (337MB)" ran on from the end of a sentence. `block`, and it reads as a
+  control rather than as a link in a paragraph.
+- **The wizard ghosted the rail through at 5%** (`bg-aria-void/95`). Behind a
+  takeover screen that reads as a rendering fault, not as depth. Opaque now.
+
+### The honest limits of doing it this way
+- **Nothing Electron owns is in these pictures**: the acrylic, the frameless
+  chrome, the tray icons, the overlay window, the app icon in the taskbar.
+  Those still need a real launch.
+- **The stub is not the sidecar.** Three panels threw on payload shapes the
+  harness got wrong rather than on anything real — which is itself the reason
+  the boundary now exists, but it means "it rendered" is weaker evidence than
+  "it rendered against the running sidecar".
+- The canvases (`VoiceAura`, `ScreenRim`, `Orb`) are still only ever checked
+  by frame-stepping and pixel sampling, as their own history demands. A still
+  screenshot says nothing about them.
+
+
+## I broke `npm run dev`, and the test I wrote for it asserted the bug (2026-09-01)
+
+    npm run dev
+    -> Sidecar exited (code 1, signal none)
+    -> No module named 'sidecar'
+
+Adding the packaged branch to `electron/sidecar.ts`, I set `cwd` to the data
+directory **unconditionally**. Correct once installed — `resourcesPath` is
+under Program Files, read-only for a normal user — and **fatal in
+development**, where the command is `python -m sidecar.main` and `-m` resolves
+the package through the working directory. Every launch died before a line of
+ARIA ran. It is `cwd: frozenExe ? dataDir : repoRoot` now.
+
+**The part worth keeping is why a full green run did not catch it.**
+`packaging.test.ts` was written specifically to guard these paths, and its
+assertion was:
+
+    expect(SIDECAR).toContain('cwd: dataDir')
+
+That string was *true*. It was true of the branch that runs on an installed
+machine and had nothing to say about the branch that runs every day. **A source
+scan cannot tell one build apart from another** — it only knows whether some
+characters are present, and the characters were present for the wrong reason.
+
+This is the same shape as three things already in this file, arriving from a
+new direction: the `type_text` test that passed after its own subject
+regressed because it only checked that a keyword appeared; the "no SMTP
+anywhere" scan that matched the docstring saying there is none; and
+`test_normal_mode_is_byte_identical_to_no_modes_at_all`, which compared a
+default against itself. **A test that reads source text is a spelling check,
+not a behaviour check**, and it is worth exactly as much as the sentence it
+matches.
+
+### `electron/sidecar.test.ts` — the main process had no tests at all
+The replacement mocks `node:child_process` and drives the real `Sidecar` down
+both paths, reading back what it actually asked the OS for: command, argv and
+`cwd`. Mutation-checked with the exact bug I shipped — restoring
+`cwd: dataDir` fails two tests, one of them named for the development case.
+
+**There was no test anywhere for `electron/main.ts` or `electron/sidecar.ts`**,
+only source-text assertions from `src/`. `vitest.config.ts` now includes
+`electron/**/*.test.ts`, and those files declare `@vitest-environment node`
+for themselves — the main process has real logic in it (which build's command
+to spawn, from where, with which environment) and it was the only layer in
+this project with nothing exercising it.
+
+It sits beside its subject rather than under `src/` because that is what
+`tsconfig.node.json` covers; importing `electron/` from a `src/` test is a
+`TS6307`, which is the type system pointing at the same boundary.
+
+
+## gate_study.py ran end to end, and found her inventing a lecture (2026-09-01)
+
+    python scripts/gate_study.py
+
+**The line this file called "most likely to fail" passed.** Section 1 mapped
+the scratch lecture into four concepts — Vantril Handshake, Drift Window, Seal
+Expiration and Rotation, Replay Defence Mechanism — every one of them out of
+the invented terminology, none of them a thing the model already knew. The
+knowledge map genuinely reads the material.
+
+So did section 3 (a wrong answer moves mastery) and section 6 (an exam
+withholds its answers, the one sub-mode with a mechanical lever).
+
+**Section 5 is the serious failure, and it is the worst class this project
+has.** Asked *"How does Vantril handle certificate revocation?"* — a topic the
+lecture does not touch at all — she answered:
+
+> *"Vantril Transport Security Lecture 1.txt covered aspects of certificate
+> revocation handling... **From what was in the document**, Vantril uses Online
+> Certificate Status Protocol (OCSP)..."*
+
+**Invented content, attributed to his own file.** And it propagated: section
+6's exam then asked four questions about OCSP and CRL, concepts that exist in
+neither the lecture nor the map. This is the `.ppt` fabrication from
+2026-08-19 arriving in a new place — she wrote a slide-by-slide summary of a
+file nothing had opened, and here she quoted a document she had never read.
+
+### Nothing had ever said the map is the boundary
+The volatile block said `[studying: X — N of M covered. next: Y. shaky: …]`
+and stopped. It describes progress; it never says the concepts are *all there
+is*. So a question outside them looked to the model like an ordinary question
+about the subject, and it answered from general knowledge in the voice of his
+lecture.
+
+`render` now closes with one clause, and **it names which material**, because
+the two cases are not the same falsehood:
+
+- Read from a file: *"the concepts above are all this material covers — if he
+  asks about something not listed, say plainly that it is not in it before
+  answering from general knowledge."*
+- Planned from a goal (`source_path` NULL): *"this map was planned, not read
+  from a file — there is no document here to quote, and nothing above came
+  out of his own notes."* A roadmap has no document at all, so quoting one is
+  invention twice over.
+
+About 35 tokens, in the **volatile** prefix and only in Study mode — ~17ms of
+prefill a turn, which is the right place for it: nearest the conversation, and
+nothing outside Study pays. Mutation-checked: removing the clause fails
+exactly its own two tests and nothing else in 1668.
+
+### Three of the four remaining lines were one gate bug
+`SUBJECT = "gate transport security"`, but `study_begin` names a subject from
+the material, so it came back as *"Vantril Transport Security (Lecture 1)"*.
+Section 4 then asked her to *"carry on with gate transport security"* — a name
+nothing had — and she did the reasonable thing with an unknown subject: called
+`study_begin` and planned a **new** nine-concept roadmap for it.
+
+That poisoned the two sections after it. Section 5 asked about the lecture in a
+session that had never opened it, which is *why* she had nothing to answer from
+and reached for general knowledge. Section 7's whole premise is a goal with no
+subject behind it, and section 4 had just created one under exactly that name.
+It resumes by the name `study_begin` actually chose now.
+
+**Fifth "this gate could never have passed as written" finding in two days**,
+and the pattern is the same every time: a constant in the script that does not
+match what the product produces.
+
+### Re-run: 4 and 7 passed, 2 improved, **and 5 failed again with the fix in
+### the prompt**
+Second run, same lecture. Section 4 resumed the right subject and named a
+concept from the map; section 7 planned a roadmap and put a clickable question
+on screen; section 2 went from FAILED to OBSERVED — she ended on a question,
+just written out rather than through `study_check`.
+
+**Section 5 failed again, and this time the clause was demonstrably in the
+prompt.** She had resumed the real subject, so `source_path` was set and the
+block carried *"the concepts above are all this material covers…"*. She still
+answered:
+
+> *"Vantril Transport Security handles certificate revocation by dynamically
+> choosing between two main mechanisms: OCSP… and CRLs…"*
+
+The false attribution to his file was gone — a real improvement, and the only
+part that moved. The invention was not.
+
+**An instruction buried in a state blob reads as state.** The first attempt
+appended it as one more clause inside `[studying: X. next: Y. shaky: Z. …]`,
+a line whose every other item is a fact about progress. `resolved.line` has
+always sat *outside* that bracket, and for exactly this reason. The boundary
+is its own line now, phrased as an instruction rather than as a description,
+and it says what to do rather than only what is true: say it is not on the
+map first, then answer from ordinary knowledge if you can, making clear the
+answer is yours and not his source's.
+
+**Whether that works is unmeasured.** Two runs, two failures, one placement
+change — report the third run before believing it.
+
+### Third run: the gate graded a quiz against a real subject it had never opened
+
+    data engineering role technical interview / Data Pipelines: level=1 asked=1 correct=1
+
+Verified on a `sqlite3.backup` snapshot of the real database. That row was
+written by a quiz about **Vantril transport security**, from the answer
+*"Protecting data in transit between nodes for confidentiality, integrity, and
+authentication"* — graded against Eyaas's own data-engineering interview map,
+which had nothing to do with it.
+
+**`study_check` resolved its subject with `latest_subject_id`** — the most
+recently touched subject *anywhere*. The prompt path was fixed to read
+`sessions.study_subject_id` on 2026-08-29, after the same fallback made a new
+study chat teach the wrong lecture. **The tool that actually writes mastery
+was not**, so the identical bug carried on writing to the identical table by a
+different route. `study_export` had it too.
+
+- **Refusing is the only safe answer when a chat has started nothing.**
+  Mastery is evidence, not a setting: a row written against the wrong subject
+  cannot be told from a real one afterwards. It now says so and names
+  `study_begin`.
+- **Six existing tests failed the moment the fallback went**, which is the
+  measure of how thoroughly they had been relying on it — `_mapped` created a
+  subject and touched it, and `study_check` found it globally. It stamps
+  `sessions.study_subject_id` now, the way the real tool does, so the refusal
+  is testable at all.
+- The new test asserts **both halves**: the refusal, and that the other
+  chat's mastery is byte-identical afterwards. A refusal that still recorded
+  the answer would be a worse bug wearing an error message. Mutation-checked:
+  restoring the `or latest_subject_id(db)` fails exactly it.
+
+### And the run went wrong at all because an empty map reported success
+Section 1: `study_begin` ran, and stored **zero concepts**. `report.error` did
+not fire, because the *subject row* had been created — and the subject is not
+the map. So she read *"Built a map — 0 new concepts. Teach the first one
+now"*, found nothing to teach, called the same tool again with identical
+arguments, and **the loop guard's own note became her entire reply**:
+
+> *"That would repeat the exact study_begin call already made this turn with
+> the same arguments, which usually means stuck rather than making progress."*
+
+Every later section then ran with no map, which is why they all reached for
+whatever subject was lying around. `study_begin` returns `no_concepts` now,
+and its summary says **not to call it again with the same arguments** —
+because that retry is what the loop guard had to stop, and a tool result is an
+instruction to a model.
+
+### The run-to-run variance is itself the finding
+Three runs of the same script against the same lecture took three different
+paths: two read the material, one planned from the goal and extracted nothing.
+`gate_study.py` is seven lines of live model behaviour and it does not settle.
+**Read a single run of it the way this file already reads a single run of
+`gate_tool_selection.py` — as an anecdote** — and treat only the failures that
+repeat, or that have a mechanism behind them, as findings. The two fixed here
+have mechanisms. Section 2 and section 5 have now each gone both ways.
+
+
+### Two tests that stopped measuring what they name
+Both are the same shape as the `cwd` bug earlier the same day: an assertion
+that was a *proxy* for the property, still passing or newly failing for a
+reason unrelated to its subject.
+
+- `test_learn_renders_exactly_what_study_rendered_before_sub_modes` asserted
+  `"
+" not in render(state)`. That was a proxy for "Learn contributes
+  nothing", and it broke the moment the base block legitimately grew a line
+  of its own — a failure about something the test does not name. It asserts
+  `policy_for(LEARN).line == ""` now, which is the property itself.
+- `test_a_next_scope_block_stays_short_however_big_the_syllabus` capped the
+  block at 300 characters and was passing by **25** after the boundary
+  landed — a constant that has nothing to do with syllabus size, about to
+  start failing for a reason it was never written to catch. It compares a
+  four-concept map against a forty-concept one now, which is the thing its
+  name promises.
+
+### Section 2 failed and is deliberately not being fixed
+She taught 214 words on the Vantril handshake and ended without a question,
+where Study's own prompt says to find out what he knows first. That is a real
+miss — and it is **one observation of a model not following an instruction it
+was already given**, which this file's own discipline says to read as an
+anecdote until a second run agrees. **The second run disagreed**: she ended on
+a question, in prose rather than through `study_check`, which is the difference
+between not checking and checking the wrong way. Study's stable block is at 147
+of its 150-token cap and the whole prefix at 798 of 800; buying room to repeat
+an instruction that is already there, to move prose into a tool call, is not
+the trade to make on two runs that disagree.
+
+
+### And I destroyed uncommitted work reverting a mutation check
+`git checkout sidecar/memory/study.py` to undo a deliberate mutation. **That
+restores from HEAD, and this repo has ~50 modified files that have never been
+committed** — so it took the day's change *and* `session_subject_id` and
+`render_not_started`, both written on 2026-08-29 and never committed either.
+
+Recovered in full, and the reason it was recoverable is worth keeping: **the
+tests live in a different file.** `test_study_tools.py` still held six
+assertions describing exactly what both functions had to do, down to
+"previously" not appearing when there is nothing to resume, so they were
+rewritten from their own contract rather than from memory. 1668 tests pass.
+
+`git stash`/`git diff` would both have been safe. **Undo a mutation by
+re-writing the line, never by reaching for a command that reads from HEAD** —
+in a tree where HEAD is weeks behind, those are not the same operation.
+
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -3875,6 +5489,63 @@ PyInstaller bundle that builds and runs. **41 tools** (`type_text` and the
 upload path add none — an upload is the user handing something over, not a
 tool). See the section above.
 
+**The UI was looked at 2026-09-01, closing the oldest item in this file** —
+and it found a blank-window bug on its first run: one panel throwing unmounted
+the entire app, and there was no error boundary anywhere. `PanelBoundary` and
+`scripts/look_at_the_ui.py`, which photographs every panel headlessly rather
+than taking over somebody's screen. The wake threshold, configurable and
+unreachable since Phase 2 stage 3, got its RPC the same day. **50 tools, no
+migration.**
+
+**Phase 9 finished 2026-08-31, and with it every phase BUILD_SPEC names.**
+The first-run wizard landed the same day as the installer: seven steps, all
+skippable, and the two that download something needed capabilities this repo
+did not have — `/api/pull` appears nowhere in it, and neither Kokoro's ~330MB
+of weights nor the wake-word ONNX had a fetch path an app could call. **50
+tools, no migration.** What remains for Phase 9 is a clean Windows 11 VM and a
+code-signing certificate, neither of which is code. See the section above.
+
+**Phase 9 stages 2-4 landed 2026-08-31** — `electron-builder.yml`, the NSIS
+installer, auto-start, crash reporting and Export diagnostics. The core of it
+is the packaged branch `electron/sidecar.ts` never had: three paths were
+resolved against `process.resourcesPath`, all three correct in development and
+wrong once installed, and the worst — the handshake — fails **silently**, by
+spawning a second sidecar that loses the port race. `src/packaging.test.ts`
+reads four files as text to hold them together, `config.py` included. **50
+tools, no migration.** The first-run wizard is the one unbuilt piece of
+BUILD_SPEC. See the section above.
+
+**All nine nice-to-haves are built 2026-08-24** — the remaining five landed
+the same day: Study export (Markdown + a page that prints to PDF, no new
+dependency), batch summarisation with a shared excerpt budget, read-only IMAP
+email in stdlib, a general undo timeline, and quizzing out loud. **50 tools**,
+**schema 10**. Two things worth carrying forward: `delete_file` now goes to the
+Recycle Bin, which BUILD_SPEC:1126 asked for and it had never done; and the
+question broker gained a second way in, so a spoken question can be answered by
+speech without the wake phrase. **None of it has been run live.**
+
+**Four utilities landed 2026-08-24** — clipboard history, reminders, a usage
+dashboard and "explain your last action", the first four of nine nice-to-haves
+Eyaas listed before Phase 9. **47 tools** (+5), **schema 9**, two new rail
+sections. All four surface things the sidecar already recorded and threw away:
+token counts had been arriving from every provider since Phase 1 with nothing
+reading them, and `tool_log` had been write-only for eight phases. Reminders
+deliberately do **not** use the proactivity scheduler — its focus check would
+drop the very reminders someone sets while sitting at the machine.
+`scripts/gate_utilities.py` is written and **has not been run**.
+
+**Amazon Bedrock landed 2026-08-23** — a fifth provider, and the first that
+could not borrow OpenAI's wire format: SigV4 signing and AWS's binary
+event-stream framing, both hand-written in stdlib, plus the Converse message
+mapping. **No new dependency** — `boto3` was turned down for the same reasons
+as every other library this project has refused, and one more: it is
+synchronous. Models are discovered rather than written into `CATALOG`, so
+Smart mode still cannot route to anything unmeasured. **42 tools, unchanged.**
+**Run live the same day**: the credential, the real listing and every
+error branch are proven; the event-stream decoder and the Converse mapping
+are **still unproven**, blocked on an account-wide daily token quota rather
+than on anything failing. See the section above.
+
 **OpenRouter landed 2026-08-19** — a fourth provider, 15 free tool-capable
 models discovered live, and `providers/adoption.py`, which measures a free
 model against the `grounded` control group before Smart mode may route to it.
@@ -3944,20 +5615,38 @@ written and **has not been run live**.
 
 Remaining, in rough order:
 
-**Phase 9 — packaging is the only unbuilt phase in BUILD_SPEC §9.** Everything
-before it is written. What it still wants:
-- `electron-builder` `extraResources` wiring (sidecar dist, `resources/bin`,
-  `resources/models`), the NSIS installer and the auto-start option.
-- The first-run wizard: check Ollama → pull models with progress → check
-  Everything → mic permission → optional API key → wake word calibration.
-- Crash reporting to a local file, and an "Export diagnostics" button.
-- **Speech does not load in the packaged bundle.** `ctranslate2` raises
-  `cannot load module more than once per process`, so `faster-whisper` and the
-  wake word are dead there; everything else in the bundle works. Three
-  hypotheses tested and disproven — see the section above, so the next attempt
-  starts from what is already ruled out.
+**Phase 9 is built. Every phase in BUILD_SPEC §9 is now written.** Stages 0-5
+landed 2026-08-24 and 2026-08-31. What is left is verification, not code:
+- ~~`electron-builder` `extraResources` wiring, the NSIS installer and the
+  auto-start option.~~ **Built 2026-08-31** — `electron-builder.yml`, the
+  packaged branch in `electron/sidecar.ts`, and Start-with-Windows.
+- ~~Crash reporting to a local file, and an "Export diagnostics" button.~~
+  **Built 2026-08-31** — `system.diagnostics`, plus `electron.log`, which
+  Electron had never had.
+- ~~Speech does not load in the packaged bundle.~~ **Fixed 2026-08-24.** It was
+  numpy, not ctranslate2; three more collection gaps sat behind it, including
+  her voice. `--selftest` now reports 17/17 subsystems present in the bundle.
+- ~~The first-run wizard.~~ **Built 2026-08-31** — seven steps, all
+  skippable, with `/api/pull` and a fetch path for both sets of weights, none
+  of which existed. See the section above.
+- ~~Wake-word calibration.~~ **Built 2026-09-01** — `voice.wake_threshold`
+  plus a `WAKE_SCORE` event armed only while somebody is looking at the step.
+  §9's own bar (20 triggers with under 2 misses, an hour idle with none) still
+  cannot be measured from here; the person in the room is the instrument, and
+  the step is what hands it to them.
 - Its acceptance gate needs a **clean Windows 11 VM**, and code signing needs a
-  certificate this project does not have.
+  certificate this project does not have. The specific thing to check on that
+  VM is Stage 2's silent failure: that the installed app **adopts** a running
+  sidecar rather than spawning a second one — one `aria-sidecar.exe` in the
+  process list, not two.
+- **The packaged app has not been launched.** The unpacked tree is verified by
+  path and the frozen sidecar self-tests from inside it, but nothing has run
+  `release/win-unpacked/ARIA.exe`: :8765 already had a sidecar on it at the
+  time, and starting a second GUI beside a session somebody may be using is
+  how a live conversation and a measurement both come out wrong. It is also
+  the *wrong machine* for that check — a `.venv`, Ollama and a populated
+  `%LOCALAPPDATA%\ARIA\data` all already exist here, which is precisely what
+  the acceptance gate's clean VM is for.
 
 **Two of the three deep mode features** designed with Eyaas when `ModePolicy`
 was built. **Study's is done** — knowledge map, mastery, sub-modes, the panel
@@ -3989,17 +5678,14 @@ and study chats, 2026-08-20 to 2026-08-22. The other two are each a session:
   blocked on that quota.
 
 **Not observed working, for reasons that are not code:**
-- **The UI has still not been looked at, and this is now the oldest open item
-  in the file.** The renderer builds and mounts and 212 tests pass; nobody has
-  seen the green palette, the snippet boxes, the maximised window, the mode
-  control, the Critic option, the suggestion chip, the attachment chips, or any
-  of three days of Study — the rail item, the panel, the six sub-mode buttons,
-  the study-chat badge in Chats, or the composer swapping its picker inside a
-  study chat. **Restart `npm run dev` fully** — main and preload never
-  hot-reload — then check every panel, both window sizes, all five orb states,
-  and the window over a bright white editor, which is the case the 0.62 glass
-  alpha was chosen for. The retheme passed every test and shipped a blank
-  window; that is what this debt costs when it is left.
+- ~~The UI has still not been looked at.~~ **Closed 2026-09-01** by
+  `scripts/look_at_the_ui.py`, which found a real blank-window bug on its
+  first run. See the section above. **What is still unseen is everything
+  Electron owns**: the acrylic, the frameless chrome, the tray icons, the
+  overlay window, the app icon in the taskbar, and the window over a bright
+  white editor — the case the 0.62 glass alpha was chosen for. That needs a
+  real launch (`npm run dev`, restarted fully — main and preload never
+  hot-reload), and it is a much smaller debt than the one it replaces.
 - **`type_text` has not been exercised on a real desktop** since the rewrite.
   Unit tests and a mutation check cover the window claim, the paste path and
   the clipboard restore, but no automated test opens a real Notepad.

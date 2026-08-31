@@ -427,11 +427,18 @@ def test_read_clipboard_is_marked_local_only() -> None:
 
 def test_nothing_else_claims_local_only() -> None:
     """It is a strong constraint — it overrides the router — so it should be
-    deliberate everywhere it appears."""
+    deliberate everywhere it appears.
+
+    Both entries are the clipboard, and the second is not a widening of the
+    rule but the same one applied consistently: a *history* of clipboards is
+    strictly more of what `read_clipboard` carries the flag for. A version of
+    it that could reach a cloud model would be a hole in exactly the guarantee
+    the flag exists to make.
+    """
     from sidecar.tools import registry
 
     marked = {t.name for t in registry.all_tools() if t.local_only}
-    assert marked == {"read_clipboard"}
+    assert marked == {"read_clipboard", "read_clipboard_history"}
 
 
 # ── remember / forget (Phase 5) ───────────────────────────────────────

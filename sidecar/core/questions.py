@@ -43,8 +43,10 @@ and that gap is not one to copy.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -158,15 +160,44 @@ class QuestionBroker:
         self._bus = bus
         self._timeout_s = timeout_s
         self._pending: dict[str, Pending] = {}
+        #: Set while a *spoken* question is waiting. The listener checks this
+        #: before its wake-phrase logic, so an answer does not have to be
+        #: prefixed with her name — she just asked, so you may simply reply.
+        self._spoken: str | None = None
+        #: How to say something aloud. Injected rather than imported so the
+        #: broker keeps knowing nothing about TTS; `main.py` supplies
+        #: `ConversationService.speak`.
+        self._speak: Callable[[str], Awaitable[object]] | None = None
+
+    def set_voice(self, speak: Callable[[str], Awaitable[object]]) -> None:
+        """Give the broker a way to read a question out."""
+        self._speak = speak
 
     @property
     def pending_count(self) -> int:
         return len(self._pending)
 
+    @property
+    def awaiting_speech(self) -> bool:
+        """Whether an utterance right now should be read as an answer."""
+        return self._spoken is not None and self._spoken in self._pending
+
     async def ask(
-        self, questions: list[Question], *, turn_id: str | None = None
+        self,
+        questions: list[Question],
+        *,
+        turn_id: str | None = None,
+        spoken: bool = False,
     ) -> Asked:
-        """Broadcast, then wait. Never raises for an ordinary outcome."""
+        """Broadcast, then wait. Never raises for an ordinary outcome.
+
+        `spoken` additionally reads each question aloud and lets the listener
+        resolve it from speech. **Both paths stay live** — the question is
+        still on screen and still clickable, and whichever answer arrives
+        first wins. That matters because a quiz across the room is exactly
+        where a mis-transcription is likely, and reaching for the screen has
+        to keep working.
+        """
         prepared = normalise(questions)
         if not prepared:
             return Asked(answers=[], timed_out=False)
@@ -183,7 +214,13 @@ class QuestionBroker:
                 "questions": [q.model_dump() for q in prepared],
             },
         )
-        log.info("question.asked", request_id=request_id, count=len(prepared))
+        log.info(
+            "question.asked", request_id=request_id, count=len(prepared), spoken=spoken
+        )
+
+        if spoken:
+            self._spoken = request_id
+            await self._read_aloud(prepared)
 
         try:
             answers = await asyncio.wait_for(future, timeout=self._timeout_s)
@@ -195,9 +232,59 @@ class QuestionBroker:
             return Asked(answers=[], timed_out=True)
         finally:
             self._pending.pop(request_id, None)
+            if self._spoken == request_id:
+                self._spoken = None
 
         log.info("question.answered", request_id=request_id, count=len(answers))
         return Asked(answers=answers, timed_out=False)
+
+    async def _read_aloud(self, questions: list[Question]) -> None:
+        """Say the questions. A failure here is not a failure of the ask.
+
+        If speech is unavailable the question is still on screen, so the worst
+        case is the on-screen path — which is what happened before this
+        existed.
+        """
+        if self._speak is None:
+            return
+        for position, question in enumerate(questions):
+            try:
+                await self._speak(speakable(question, position=position, total=len(questions)))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("question.speak_failed", error=str(exc))
+                return
+
+    def answer_from_speech(self, said: str) -> bool:
+        """Try to resolve the pending spoken question from one utterance.
+
+        Returns whether it was consumed. **False means "not an answer"**, and
+        the caller lets it become an ordinary turn — which is what makes it
+        safe for the listener to offer every utterance here first. Somebody
+        who changes the subject mid-quiz is not trapped.
+        """
+        request_id = self._spoken
+        if request_id is None:
+            return False
+        pending = self._pending.get(request_id)
+        if pending is None:
+            self._spoken = None
+            return False
+
+        answers: list[Answer] = []
+        for question in pending.questions:
+            match = match_spoken(said, question)
+            if match is None:
+                break
+            answers.append(match)
+            # One utterance answers one question. Several in a row are asked
+            # and answered one at a time, the same as on screen.
+            break
+
+        if not answers:
+            return False
+
+        log.info("question.answered_aloud", request_id=request_id)
+        return self.respond(request_id, answers)
 
     def respond(self, request_id: str, answers: list[Answer]) -> bool:
         """Resolve a waiting question. False if it already went."""
@@ -261,3 +348,113 @@ __all__ = [
     "normalise",
     "render",
 ]
+
+
+# ── answering out loud (2026-08-24) ───────────────────────────────────
+# `ask_user` and `study_check` both put clickable options on screen and wait
+# for a click. Across a room there is no screen and no click, which is why
+# `SCREEN_ONLY_TOOLS` exists — and why a hands-free quiz was impossible: the
+# broker's future is resolved by exactly one thing, the `question.answer` RPC.
+#
+# This is the second way in. Nothing about the on-screen path changes; a
+# spoken question is still broadcast and still clickable, and whichever answer
+# arrives first wins.
+
+#: How a person says "the first one". Ordinals, digits, and the letters a
+#: multiple choice is usually labelled with on screen.
+_SPOKEN_ORDINALS: dict[str, int] = {
+    "first": 0, "one": 0, "1": 0, "a": 0, "eh": 0,
+    "second": 1, "two": 1, "2": 1, "b": 1, "bee": 1, "be": 1,
+    "third": 2, "three": 2, "3": 2, "c": 2, "see": 2, "sea": 2,
+    "fourth": 3, "four": 3, "4": 3, "d": 3, "dee": 3,
+    "fifth": 4, "five": 4, "5": 4, "e": 4,
+}
+
+#: Words people put around an answer without meaning them: "uh, the second one
+#: I think". Stripped before matching so they cannot outvote the answer.
+#:
+#: **"one" is deliberately absent**, even though "the second one" is exactly
+#: the phrasing this exists for — it is also how somebody says the *first*
+#: option, and stripping it there leaves nothing to match. The ambiguity is
+#: settled below instead, by requiring every surviving token to be positional
+#: and taking the first: "the second one" reduces to [second, one] and picks
+#: the second, while a bare "one" picks the first.
+_ANSWER_FILLER = re.compile(
+    r"\b(uh+|um+|er+|i think|i'?d say|probably|maybe|it'?s|the|answer|is|option|"
+    r"number|please|definitely|obviously)\b",
+    re.IGNORECASE,
+)
+
+#: Said instead of answering. Resolved as a dismissal rather than matched
+#: against the options, where "no idea" would fuzzily hit whichever option
+#: happened to share a letter.
+_SPOKEN_SKIP = re.compile(
+    r"^\s*(skip|pass|next|no idea|i don'?t know|dunno|not sure|never mind)\b",
+    re.IGNORECASE,
+)
+
+
+def match_spoken(said: str, question: Question) -> Answer | None:
+    """One spoken utterance into an answer, or None if it is not one.
+
+    Tried in order of how unambiguous each signal is:
+
+    1. **An explicit skip.** "I don't know" is a real answer to a quiz and must
+       not be fuzzy-matched into whichever option shares a syllable with it.
+    2. **The option's own words**, whole or as a clear prefix. Somebody reading
+       an answer back is the strongest signal there is.
+    3. **An ordinal or letter** — "the second one", "B". Last, because a
+       one-letter token is exactly what a mis-transcription produces, and an
+       option whose text is genuinely "a" would otherwise never be matchable.
+
+    Returns None rather than guessing when nothing is clear. The caller treats
+    that as "not an answer" and lets the utterance become an ordinary turn,
+    which is what makes it safe to check every utterance against a pending
+    question.
+    """
+    text = said.strip()
+    if not text:
+        return None
+
+    if _SPOKEN_SKIP.match(text):
+        return Answer(question=question.question, chosen=[], other=text)
+
+    folded = text.casefold().strip(" .,!?")
+    labels = [o.label for o in question.options]
+
+    # 2. The option's own words.
+    for label in labels:
+        target = label.casefold().strip(" .,!?")
+        if not target or target == OTHER_LABEL.casefold():
+            continue
+        if folded == target or target in folded:
+            return Answer(question=question.question, chosen=[label])
+
+    # 3. An ordinal, once the filler is out of the way.
+    stripped = _ANSWER_FILLER.sub(" ", folded)
+    tokens = [t for t in re.split(r"[^a-z0-9]+", stripped) if t]
+    # **Every surviving token must be positional**, and then the first wins.
+    # That is what separates "the second one" (-> [second, one], the second)
+    # from "two of them are wrong" (-> a sentence, and not a vote at all).
+    if tokens and all(token in _SPOKEN_ORDINALS for token in tokens):
+        index = _SPOKEN_ORDINALS[tokens[0]]
+        if index < len(labels):
+            return Answer(question=question.question, chosen=[labels[index]])
+
+    return None
+
+
+def speakable(question: Question, *, position: int = 0, total: int = 1) -> str:
+    """The question and its options, phrased to be heard rather than read.
+
+    The "Other" option is deliberately not read out: on screen it is an escape
+    hatch you can see and ignore, and spoken it would be a fifth thing to
+    listen to on every single question. Saying something that matches nothing
+    still reaches it, via `match_spoken` returning a free-text answer.
+    """
+    lead = f"Question {position + 1} of {total}. " if total > 1 else ""
+    choices = [o.label for o in question.options if o.label != OTHER_LABEL]
+    spoken_options = ". ".join(
+        f"{n}. {label}" for n, label in enumerate(choices, start=1)
+    )
+    return f"{lead}{question.question} {spoken_options}"

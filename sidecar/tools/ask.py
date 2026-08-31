@@ -35,9 +35,10 @@ write the choices out as A) B) C) in your reply: that is the thing this
 replaces, and it makes him type an answer you could have collected in a click.
 
 Also call it when you are genuinely blocked: two or more ways forward, and
-picking wrong would mean doing the work twice. Ask everything you need in one
-call — up to 4 questions, each with 2-4 options — because you get one of these
-per turn.
+picking wrong would mean doing the work twice. Each call takes up to 4
+questions, each with 2-4 options — batch everything you can into one call. You
+may call this more than once in a turn (a quiz is exactly that: one round of
+questions, then another), but each call still costs a step.
 
 Do NOT call it for: something you can infer from what he already said; a
 question with an obvious default (pick it, do the work, say what you assumed);

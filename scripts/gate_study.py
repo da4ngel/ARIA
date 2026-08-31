@@ -54,6 +54,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import websockets
+import websockets.exceptions
 
 URL = "ws://127.0.0.1:8765/rpc"
 
@@ -70,40 +71,48 @@ SUBJECT = "gate transport security"
 #: state and deletes it; pointing this one at a real lecture would mean a
 #: failed run leaves a subject and a mastery history in his real database.
 #:
-#: Deliberately made-up terminology — "Kestrel handshake", "drift window" —
-#: so that line 1 can tell a concept read *out of the material* from one the
-#: model already knew. A lecture about TCP would prove nothing: every concept
-#: in it is one a model can produce from memory.
-LECTURE = """Kestrel Transport Security — Lecture 1
+#: Deliberately made-up terminology, so that line 1 can tell a concept read
+#: *out of the material* from one the model already knew. A lecture about TCP
+#: would prove nothing: every concept in it is one a model can produce from
+#: memory.
+#:
+#: **"Vantril" was the first attempt and it was a bad one.** Vantril is the
+#: real ASP.NET Core web server, and the model knows it well — so on
+#: 2026-08-29 section 5 asked how "Vantril" handles certificate revocation and
+#: got a fluent, correct answer about Schannel and OpenSSL. That is the
+#: opposite of the failure the line is written to catch, and the gate could
+#: not tell the two apart. The name has to be one that collides with nothing:
+#: "Vantril" is not a product, a protocol or a word.
+LECTURE = """Vantril Transport Security — Lecture 1
 
-1. The Kestrel Handshake
-The Kestrel handshake is the three-message exchange that opens every Kestrel
+1. The Vantril Handshake
+The Vantril handshake is the three-message exchange that opens every Vantril
 session. The initiator sends a HELLO carrying its drift window; the responder
 answers with a CHALLENGE; the initiator closes with a SEAL. A handshake that
 does not complete all three messages leaves no session state on either side,
-which is deliberate: a half-open Kestrel session cannot be resumed.
+which is deliberate: a half-open Vantril session cannot be resumed.
 
 2. The Drift Window
-The drift window is the number of milliseconds by which two Kestrel peers may
+The drift window is the number of milliseconds by which two Vantril peers may
 disagree about the time and still accept each other's messages. The default is
 400 milliseconds. A wide drift window makes replay easier; a narrow one makes
 handshakes fail on congested links. Choosing it is a trade between those two.
 
 3. Seal Rotation
-Every Kestrel session seal expires after 90 seconds and must be rotated. A
+Every Vantril session seal expires after 90 seconds and must be rotated. A
 rotation reuses the existing drift window and does not repeat the handshake.
-If a rotation is missed, the session is closed rather than downgraded — Kestrel
+If a rotation is missed, the session is closed rather than downgraded — Vantril
 has no notion of an unsealed session.
 
-4. Replay Defence in Kestrel
-Kestrel defeats replay with a nonce carried in the SEAL message, checked
+4. Replay Defence in Vantril
+Vantril defeats replay with a nonce carried in the SEAL message, checked
 against the drift window. A captured SEAL replayed after the drift window has
 elapsed is rejected outright. A SEAL replayed inside the window is caught by
 the nonce cache, which holds every nonce seen for exactly one drift window.
 """
 
 #: A concept that is genuinely not in the lecture above. Line 5 asks about it.
-NOT_IN_LECTURE = "How does Kestrel handle certificate revocation?"
+NOT_IN_LECTURE = "How does Vantril handle certificate revocation?"
 
 
 class Client:
@@ -224,7 +233,19 @@ class Client:
         raise TimeoutError(f"no turn.complete for {turn_id} within {TURN_TIMEOUT_S}s")
 
     def tools_used(self) -> list[str]:
-        return [e["params"].get("name", "?") for e in self.events if e["method"] == "tool.call"]
+        """**The payload key is `tool`, not `name`.**
+
+        This read `name` and defaulted to `"?"`, so it could never see a tool
+        it was watching for — line 1's `if "study_begin" not in tools` was
+        unpassable by construction. It stayed invisible because until the
+        session-subject bug was fixed no tool ran at all here, so the list was
+        empty rather than full of question marks.
+        """
+        return [
+            e["params"].get("tool") or e["params"].get("name", "?")
+            for e in self.events
+            if e["method"] == "tool.call"
+        ]
 
 
 async def study_session(client: Client) -> str:
@@ -243,14 +264,22 @@ def concepts_in(state: dict[str, Any]) -> list[dict[str, Any]]:
     return list(state.get("concepts") or [])
 
 
-async def read_map(client: Client) -> dict[str, Any]:
+async def read_map(client: Client, session: str | None = None) -> dict[str, Any]:
     """The map and its mastery, read straight from the sidecar's own state.
 
     Asserting on the database rather than on her reply is the point of lines 1
     and 3: a model that *says* it recorded something and a row that changed are
     different claims, and only the second one is what the next session reads.
+
+    **Always pass the session.** Without one this returns whichever subject was
+    most recently studied *anywhere*, and on 2026-08-29 that was a real lecture
+    of Eyaas's from days earlier — so section 1 printed a 22-concept map under
+    "concepts:" while `tools: []` on the line above said `study_begin` had
+    never run. The FAILED line was right and everything above it read like a
+    pass.
     """
-    return dict(await client.call("study.state") or {})
+    params = {"session_id": session} if session else {}
+    return dict(await client.call("study.state", params) or {})
 
 
 async def main() -> int:
@@ -259,16 +288,42 @@ async def main() -> int:
 
     scratch = pathlib.Path(tempfile.gettempdir()) / "aria-gate-study"
     scratch.mkdir(parents=True, exist_ok=True)
-    lecture = scratch / "Kestrel Transport Security Lecture 1.txt"
+    lecture = scratch / "Vantril Transport Security Lecture 1.txt"
     lecture.write_text(LECTURE, encoding="utf-8")
 
+    # **The token, which this script never sent.** `/rpc` rejects an upgrade
+    # with no bearer (HTTP 403), so every run of this gate since it was written
+    # died in the handshake — which is why it sat "never run" for four sessions.
+    # It was not waiting for someone to get round to it; it could not connect.
     try:
-        ws = await websockets.connect(URL, max_size=8 * 1024 * 1024)
-    except OSError:
-        print("Could not reach the sidecar on :8765. Start it with `npm run sidecar`.")
+        token = pathlib.Path("data/.handshake").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        print("No data/.handshake — start the sidecar first (npm run sidecar).")
+        return 2
+
+    try:
+        ws = await websockets.connect(
+            URL,
+            max_size=8 * 1024 * 1024,
+            additional_headers={"Authorization": f"Bearer {token}"},
+        )
+    except (OSError, websockets.exceptions.WebSocketException) as exc:
+        print(f"Could not reach the sidecar on :8765 ({exc}).")
+        print("Start it with `npm run sidecar` or `npm run dev`.")
         return 2
 
     client = Client(ws)
+
+    # **Which subjects existed before this run.** The cleanup removes the
+    # difference and nothing else — on 2026-08-29 this gate quizzed against a
+    # real lecture of Eyaas's and recorded five wrong answers on it, so
+    # "delete what I made" has to mean exactly that and never "tidy the table".
+    async def subject_names() -> dict[int, str]:
+        listed = await client.call("study.subjects") or {}
+        return {int(s["id"]): str(s["name"]) for s in listed.get("subjects", [])}
+
+    before_subjects = await subject_names()
+
     try:
         print("=" * 72)
         print("1. A LECTURE BECOMES A MAP OF WHAT IT ACTUALLY TEACHES")
@@ -281,9 +336,12 @@ async def main() -> int:
         )
         tools = client.tools_used()
         print(f"    tools: {tools}")
-        state = await read_map(client)
+        state = await read_map(client, session)
         concepts = concepts_in(state)
-        print(f"    subject: {state.get('subject')!r}  concepts: {len(concepts)}")
+        # The name `study_begin` chose from the material. Sections 4 and 5
+        # have to use *this*, not `SUBJECT` — see section 4.
+        subject_name = str(state.get("subject") or SUBJECT)
+        print(f"    subject: {subject_name!r}  concepts: {len(concepts)}")
         for concept in concepts:
             print(f"      - {concept['name']} (level {concept['level']})")
 
@@ -320,14 +378,14 @@ async def main() -> int:
         print("\n" + "=" * 72)
         print("3. A WRONG ANSWER MOVES MASTERY BACK")
         print("=" * 72)
-        before = {c["name"]: c["level"] for c in concepts_in(await read_map(client))}
+        before = {c["name"]: c["level"] for c in concepts_in(await read_map(client, session))}
         client.pick_correct = False
         await client.ask(session, "Quiz me on what you have taught so far.")
-        after_wrong = {c["name"]: c["level"] for c in concepts_in(await read_map(client))}
+        after_wrong = {c["name"]: c["level"] for c in concepts_in(await read_map(client, session))}
 
         client.pick_correct = True
         await client.ask(session, "Ask me those again.")
-        after_right = {c["name"]: c["level"] for c in concepts_in(await read_map(client))}
+        after_right = {c["name"]: c["level"] for c in concepts_in(await read_map(client, session))}
 
         print(f"    before:      {before}")
         print(f"    after wrong: {after_wrong}")
@@ -342,7 +400,15 @@ async def main() -> int:
         print("4. A NEW SESSION RESUMES WITHOUT THE FILE")
         print("=" * 72)
         fresh = await study_session(client)
-        result = await client.ask(fresh, f"Carry on with {SUBJECT}.")
+        # **By the name `study_begin` actually gave it, not by `SUBJECT`.**
+        # The subject is named from the material, so it came back as
+        # "Vantril Transport Security (Lecture 1)" while this asked to carry
+        # on with "gate transport security" — a name nothing had. She did the
+        # reasonable thing with an unknown subject and planned a *new*
+        # roadmap for it, which then poisoned sections 5 and 7: 5 asked about
+        # the lecture in a session that had never opened it, and 7's whole
+        # point is a subject that does not exist yet.
+        result = await client.ask(fresh, f"Carry on with {subject_name}.")
         reply = (result.get("full_text") or "").strip()
         print(f"    tools: {client.tools_used()}")
         print(f"    reply:\n      {reply[:400]}")
@@ -431,11 +497,35 @@ async def main() -> int:
             print("    OBSERVED  no clickable question — read the reply above and judge")
 
     finally:
-        # The subject this gate created is left in place deliberately: it is
-        # named `gate transport security`, it is the evidence for what the run
-        # reported, and deleting it would take `study.forget` — a tool this
-        # phase does not build. Say so rather than leaving it as a surprise.
-        print(f"\nleft behind: study subject {SUBJECT!r} (delete it from the panel if you like)")
+        # **Clean up after itself, like every other gate here.**
+        #
+        # This used to leave its subject in place, on the grounds that
+        # deleting one would need a tool this phase does not build. That
+        # was simply wrong: `study.forget` has been an RPC since the Study
+        # tab shipped. So a gate that talks to the real database left a
+        # scratch subject in it after every run, and none of that was
+        # deliberate.
+        #
+        # Only what this run created. The difference is taken here rather
+        # than after section 1, because section 7 plans a roadmap and makes a
+        # second subject of its own.
+        try:
+            after = await subject_names()
+            created_subjects = sorted(set(after) - set(before_subjects))
+        except Exception:  # noqa: BLE001
+            after, created_subjects = {}, []
+        for made in created_subjects:
+            # **Print the name, never only the id.** SQLite recycles the
+            # highest rowid, so a subject deleted before a run hands its id
+            # straight to the next one created. On 2026-08-29 that made a
+            # correct `cleaned up: study subject #2` look exactly like this
+            # gate having deleted a real lecture that happened to have been #2
+            # an hour earlier, and cost half an hour of chasing it.
+            try:
+                await client.call("study.forget", {"subject_id": made})
+                print(f"cleaned up: {after.get(made, '?')!r} (#{made})")
+            except Exception as exc:  # noqa: BLE001 - cleanup must not fail a run
+                print(f"could not remove {after.get(made, '?')!r} (#{made}): {exc}")
         lecture.unlink(missing_ok=True)
         await client.close()
         await ws.close()

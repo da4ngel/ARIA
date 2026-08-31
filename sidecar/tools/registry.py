@@ -73,6 +73,21 @@ class ToolContext:
 
     session_id: str | None = None
     turn_id: str | None = None
+    #: Whether this turn arrived by voice. A tool that asks a question and
+    #: waits needs it: on screen the options are clickable, and across a
+    #: room there is no screen to click. `study_check` reads it to decide
+    #: whether to also read the question out and accept a spoken answer.
+    spoken: bool = False
+    #: Absolute paths of the files attached to *this* turn.
+    #:
+    #: `study_begin` resolves its `material` against `file_index`, which is
+    #: filled by a background indexer that is throttled to 20 files a minute
+    #: and paused while she is answering — and which skips `AppData`, so
+    #: nothing under `%TEMP%` is ever in it. So "pass the name of the file he
+    #: attached" could fail for a file whose absolute path this turn was
+    #: literally handed. Passed rather than reached for, like everything else
+    #: here.
+    attachments: tuple[str, ...] = ()
 
 
 #: Tools that reach the internet, and are therefore hidden from the model
@@ -90,7 +105,9 @@ ONLINE_TOOLS = frozenset({"research"})
 #: tool is forced through confirmation regardless of its own registered tier,
 #: because a webpage that says "delete everything in Downloads" is a live
 #: attack vector the moment something reads pages and can also act.
-UNTRUSTED_SOURCE_TOOLS = frozenset({"research", "browser_read", "browser_navigate"})
+UNTRUSTED_SOURCE_TOOLS = frozenset(
+    {"research", "browser_read", "browser_navigate", "read_email"}
+)
 
 #: Tools that need somebody looking at the screen, and are therefore hidden
 #: from the model on a turn that arrived by voice.

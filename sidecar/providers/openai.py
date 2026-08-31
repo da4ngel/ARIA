@@ -152,6 +152,13 @@ class OpenAIProvider:
             "model": model,
             "messages": _to_openai_wire(messages),
             "stream": True,
+            # **Without this OpenAI reports no usage at all while streaming.**
+            # The non-streaming endpoint always returns `usage`; the streaming
+            # one omits it unless asked, so `StreamDelta.prompt_tokens` was
+            # always None and every routing row recorded NULL tokens. It
+            # arrives in a final chunk whose `choices` list is empty, which
+            # `_parse_sse` used to discard — see the guard there.
+            "stream_options": {"include_usage": True},
         }
         if tools:
             body["tools"] = tools
@@ -176,17 +183,46 @@ class OpenAIProvider:
                 # are assembled here and emitted whole, because a half-parsed
                 # argument object is not something a caller can act on.
                 partial: dict[int, dict[str, str]] = {}
+                # **The done delta is held back until the stream really ends.**
+                # OpenAI sends the usage chunk *after* the one carrying
+                # `finish_reason`, so returning the moment `done` arrived —
+                # which is what this did — meant the usage frame was never
+                # read. Holding it costs a frame or two of latency on a signal
+                # that only says "stop", and it is the difference between
+                # recording a turn's cost and recording NULL.
+                finished: StreamDelta | None = None
                 async for line in response.aiter_lines():
                     delta = self._parse_sse(line, partial)
                     if delta is None:
                         continue
-                    if delta.done and partial:
-                        delta = delta.model_copy(
+                    if delta.done:
+                        # **Keep the first, never replace.** Two frames report
+                        # the end — the one carrying `finish_reason`, and the
+                        # literal `[DONE]` after it — and the usage chunk sits
+                        # between them. Overwriting here threw the merged usage
+                        # away again, one line after it had been merged in.
+                        if finished is None:
+                            finished = delta
+                        continue
+                    if finished is not None and (
+                        delta.prompt_tokens is not None
+                        or delta.completion_tokens is not None
+                    ):
+                        finished = finished.model_copy(
+                            update={
+                                "prompt_tokens": delta.prompt_tokens,
+                                "completion_tokens": delta.completion_tokens,
+                            }
+                        )
+                        continue
+                    yield delta
+
+                if finished is not None:
+                    if partial:
+                        finished = finished.model_copy(
                             update={"tool_calls": _assemble(partial)}
                         )
-                    yield delta
-                    if delta.done:
-                        return
+                    yield finished
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(
                 f"Could not reach OpenAI ({type(exc).__name__}: {exc}). "
@@ -272,6 +308,17 @@ class OpenAIProvider:
 
         choices = chunk.get("choices") or []
         if not choices:
+            # **The usage chunk has no choices, and dropping it silently is
+            # how token counts stayed NULL.** With `stream_options.include_usage`
+            # OpenAI sends one final frame carrying only `usage` — an empty
+            # `choices` list is exactly what identifies it. Everything else with
+            # no choices really is nothing.
+            usage = chunk.get("usage") or {}
+            if usage:
+                return StreamDelta(
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                )
             return None
         delta_body = choices[0].get("delta") or {}
         text = delta_body.get("content") or ""

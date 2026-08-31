@@ -31,6 +31,10 @@ class ProviderName(StrEnum):
     #: `providers/factory.py` builds its dict from this enum so a forgotten
     #: registration is an error rather than a silently missing provider.
     OPENROUTER = "openrouter"
+    #: Anthropic, Amazon Nova, Meta and Mistral behind one AWS account. Its
+    #: models are discovered rather than written down here — see `by_class`
+    #: for why that keeps them out of Smart mode until measured.
+    BEDROCK = "bedrock"
 
 
 # `str.capitalize()` would render these "Openai" and "Ollama". They appear in
@@ -40,6 +44,7 @@ PROVIDER_LABELS: dict[ProviderName, str] = {
     ProviderName.OPENAI: "OpenAI",
     ProviderName.GEMINI: "Gemini",
     ProviderName.OPENROUTER: "OpenRouter",
+    ProviderName.BEDROCK: "Amazon Bedrock",
 }
 
 

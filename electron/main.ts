@@ -6,6 +6,7 @@
  * to Python.
  */
 
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   app,
@@ -55,9 +56,83 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
+// **Windows needs an explicit identity or the taskbar button, the pinned
+// shortcut and any future notification are treated as three unrelated
+// things** — the symptom is a generic icon on a pinned shortcut that looks
+// correct everywhere else. Must be set before `whenReady`.
+app.setAppUserModelId('com.eyaas.aria')
+
 const isDev = !app.isPackaged
 // In dev the sources live next to out/; packaged, resources sit beside the exe.
 const repoRoot = isDev ? join(app.getAppPath()) : process.resourcesPath
+
+/** The frozen sidecar, placed by electron-builder's `extraResources`. */
+const FROZEN_SIDECAR = isDev ? null : join(process.resourcesPath, 'sidecar', 'aria-sidecar.exe')
+
+/**
+ * Where her database, models, logs and `.handshake` live.
+ *
+ * **This must agree with `sidecar/config.py`'s `_default_data_dir` exactly**,
+ * because both sides act on it: the sidecar writes the handshake there and
+ * Electron reads it to adopt an already-running process. Packaged, that is
+ * `%LOCALAPPDATA%\ARIA\data` — `resourcesPath` is under Program Files,
+ * read-only for a normal user and replaced by the next upgrade.
+ *
+ * `app.getPath('userData')` is deliberately *not* used: it is
+ * `%APPDATA%\<productName>`, a different directory that Python knows
+ * nothing about, and the two would silently disagree.
+ */
+function resolveDataDir(): string {
+  if (isDev) return join(repoRoot, 'data')
+  const base = process.env.LOCALAPPDATA || join(app.getPath('home'), 'AppData', 'Local')
+  return join(base, 'ARIA', 'data')
+}
+
+const DATA_DIR = resolveDataDir()
+
+/**
+ * Started by the login item, so come up in the tray without a window.
+ *
+ * Launching straight into a window on every boot is how a background
+ * assistant becomes something people turn off. `setLoginItemSettings` below
+ * passes this flag; nothing else does.
+ */
+const startHidden = process.argv.includes('--hidden')
+
+/**
+ * Crash reporting, main-process side (§9 Phase 9).
+ *
+ * The sidecar has had two log files since Phase 0; an Electron-side crash
+ * left **nothing at all** — no file, no console, because `console: false` on
+ * a packaged window means stderr goes nowhere. This is the smallest thing
+ * that makes "it just closed" answerable, and `system.diagnostics` picks the
+ * file up so it travels with the rest.
+ *
+ * It does not swallow the crash: the handler appends and then lets Electron
+ * carry on with its own default behaviour.
+ */
+function recordCrash(kind: string, error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+  const line = `[${new Date().toISOString()}] ${kind}: ${detail}
+`
+  try {
+    mkdirSync(join(DATA_DIR, 'logs'), { recursive: true })
+    appendFileSync(join(DATA_DIR, 'logs', 'electron.log'), line, 'utf8')
+  } catch {
+    // A crash logger that throws while logging a crash is worse than none.
+  }
+  process.stderr.write(line)
+}
+
+process.on('uncaughtException', (error) => recordCrash('uncaughtException', error))
+process.on('unhandledRejection', (reason) => recordCrash('unhandledRejection', reason))
+
+/** The orb, generated from the palette by `scripts/make_app_icon.py`.
+ *
+ *  Passed to every BrowserWindow explicitly. Without it Electron shows its
+ *  own default in the taskbar and Alt-Tab — electron-builder's `win.icon`
+ *  only dresses the .exe and the installer, not the running window. */
+const APP_ICON = join(repoRoot, 'resources', 'icon.ico')
 
 let window: BrowserWindow | null = null
 let tray: TrayHandle | null = null
@@ -72,6 +147,8 @@ let voiceMode: 'listening' | 'speaking' | null = null
 
 const sidecar = new Sidecar({
   repoRoot,
+  dataDir: DATA_DIR,
+  frozenExe: FROZEN_SIDECAR,
   host: '127.0.0.1',
   port: 8765,
   dev: isDev,
@@ -259,6 +336,7 @@ function createWindow(): BrowserWindow {
   const { x, y } = bottomRightPosition()
 
   const win = new BrowserWindow({
+    icon: APP_ICON,
     width: WINDOW_WIDTH,
     height: WINDOW_HEIGHT,
     x,
@@ -376,6 +454,33 @@ function applyCsp(): void {
   })
 }
 
+/**
+ * Answer the renderer's permission requests explicitly.
+ *
+ * **This was never called at all**, which happened to work: Electron's
+ * default grants everything to a page it loaded itself. That is a bad thing
+ * to be relying on rather than stating — the renderer holds the microphone
+ * for hands-free, and a default is not a decision.
+ *
+ * `media` is granted because it is the one thing this app asks for and
+ * Windows shows its own recording indicator regardless. Everything else —
+ * geolocation, notifications, MIDI, a display capture nobody requested — is
+ * denied, because a page that is only ever our own bundle has no business
+ * asking, and a request for one would be worth seeing in the log.
+ */
+function applyPermissions(): void {
+  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
+    const granted = permission === 'media'
+    if (!granted) {
+      sendToRenderer('aria:log', {
+        level: 'warn',
+        message: `Denied an unexpected permission request: ${permission}`,
+      })
+    }
+    callback(granted)
+  })
+}
+
 // ── show / hide with a fade ───────────────────────────────────────────
 // Driven from main via setOpacity rather than CSS, so the hotkey feels instant
 // even before React has mounted.
@@ -401,6 +506,29 @@ function fadeTo(target: number, onDone?: () => void): void {
       onDone?.()
     }
   }, FADE_INTERVAL_MS)
+}
+
+/**
+ * Ask the sidecar to write the archive, then say where it went.
+ *
+ * Electron only relays: the zip is built where `data/` lives (rule 1), and
+ * the sidecar reveals the folder itself. If the brain is the thing that is
+ * broken, this reports that rather than silently doing nothing — which is
+ * the failure mode the export exists to diagnose.
+ */
+async function exportDiagnostics(): Promise<string | null> {
+  try {
+    const result = (await rpc.call('system.diagnostics', {})) as { path: string }
+    sendToRenderer('aria:log', { level: 'info', message: `Diagnostics written to ${result.path}` })
+    return result.path
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    sendToRenderer('aria:log', {
+      level: 'error',
+      message: `Could not export diagnostics: ${message}. The logs are in ${join(DATA_DIR, 'logs')}.`,
+    })
+    return null
+  }
 }
 
 function showWindow(): void {
@@ -514,6 +642,25 @@ function registerIpc(): void {
   // returns *paths* rather than contents: the renderer never reads a file,
   // the sidecar does. The dialog is the consent — nothing here can open
   // anything the user did not pick in their own file browser.
+  // **Auto-start is OS state, not app state.** It lives in the registry's Run
+  // key, `getLoginItemSettings` reads it back, and storing a copy in the
+  // sidecar would give us two answers that can disagree — a setting somebody
+  // turned off in Task Manager would still read as on. Rule 1 is about
+  // *conversation, memory and task* state; this is neither.
+  ipcMain.handle('aria:export-diagnostics', () => exportDiagnostics())
+
+  ipcMain.handle('aria:get-auto-start', () => app.getLoginItemSettings().openAtLogin)
+
+  ipcMain.handle('aria:set-auto-start', (_event, next: boolean) => {
+    app.setLoginItemSettings({
+      openAtLogin: Boolean(next),
+      // Without this she opens a window on every login, which is the fastest
+      // way to make somebody uninstall a startup item.
+      args: ['--hidden'],
+    })
+    return app.getLoginItemSettings().openAtLogin
+  })
+
   ipcMain.handle('aria:pick-files', async () => {
     if (!window || window.isDestroyed()) return []
     const result = await dialog.showOpenDialog(window, {
@@ -547,6 +694,7 @@ if (!singleInstance) {
 
   void app.whenReady().then(async () => {
     applyCsp()
+    applyPermissions()
     registerIpc()
 
     window = createWindow()
@@ -560,6 +708,7 @@ if (!singleInstance) {
         publishStatus('reconnecting')
         sidecar.restart()
       },
+      onExportDiagnostics: () => void exportDiagnostics(),
       onQuit: () => app.quit(),
     })
     registerHotkey()
@@ -575,7 +724,7 @@ if (!singleInstance) {
     }
     rpc.start()
 
-    showWindow()
+    if (!startHidden) showWindow()
   })
 
   app.on('window-all-closed', () => {

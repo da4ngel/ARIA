@@ -256,6 +256,13 @@ export interface AriaApi {
   isMaximized: () => Promise<boolean>
   /** Including when the OS did it — Win+Up, snap, a double click. */
   onWindowMaximized: (handler: (maximized: boolean) => void) => Unsubscribe
+  /** Write a diagnostics zip (logs, health, versions — never a credential
+   *  value) and resolve with its path, or null if the sidecar is down. */
+  exportDiagnostics: () => Promise<string | null>
+  /** Whether Windows launches her at login. Read from the OS every time —
+   *  a stored copy could disagree with what the registry actually says. */
+  getAutoStart: () => Promise<boolean>
+  setAutoStart: (enabled: boolean) => Promise<boolean>
   /** Absolute paths the user chose in the OS picker. Paths only — the
    *  renderer never reads a file; the sidecar opens them. */
   pickFiles: () => Promise<string[]>
@@ -265,4 +272,115 @@ declare global {
   interface Window {
     aria: AriaApi
   }
+}
+
+/** One thing that was copied, from `clipboard.history`. */
+export interface ClipEntry {
+  id: number
+  content: string
+  chars: number
+  copied_at: string
+  source: string | null
+}
+
+export interface ClipboardHistory {
+  entries: ClipEntry[]
+  /** False when the watcher is not running — "nothing copied yet" and "not
+   *  recording" look identical on screen otherwise. */
+  watching: boolean
+  /** How many copies the credential filter refused this session. Counted so
+   *  the filter is observable rather than assumed. */
+  skipped_secrets: number
+}
+
+/** A reminder that has been set and not yet fired, from `reminders.list`. */
+export interface Reminder {
+  id: number
+  text: string
+  due_at: string
+  created_at: string
+  overdue: boolean
+}
+
+/** One model's share of a day, from `usage.today`. */
+export interface UsageModel {
+  model: string
+  provider: string
+  local: boolean
+  turns: number
+  prompt_tokens: number
+  completion_tokens: number
+  /** Turns where the provider reported no usage at all. Not the same as zero. */
+  uncounted: number
+  avg_latency_ms: number
+  /** Null when no rate covers this model — never silently 0. */
+  estimated_usd: number | null
+}
+
+export interface UsageReport {
+  since: string
+  days: number
+  turns: number
+  local_turns: number
+  cloud_turns: number
+  models: UsageModel[]
+  prompt_tokens: number
+  completion_tokens: number
+  uncounted: number
+  estimated_usd: number
+  /** Turns the price table does not cover. Shown, because a total that hides
+   *  them is knowingly short. */
+  unpriced_turns: number
+  prices_as_of: string
+}
+
+/** A routing decision, from `usage.recent`. */
+export interface TurnRecord {
+  id: number
+  message_id: number | null
+  model: string
+  provider: string
+  local: number
+  stage: string
+  detail: string | null
+  bias: string
+  spoken: number
+  tool_shaped: number
+  chars: number
+  latency_ms: number | null
+  tool_called: string | null
+  tool_ok: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  rating: number | null
+  created_at: string
+}
+
+/** A tool call, from `usage.recent`. */
+export interface ToolRecord {
+  id: number
+  call_id: string
+  session_id: string | null
+  tool: string
+  args: string
+  tier: number
+  approved: number | null
+  ok: number | null
+  error: string | null
+  duration_ms: number | null
+  approved_by: string | null
+  created_at: string
+}
+
+/** One reversible operation, from `undo.list`. */
+export interface UndoEntry {
+  id: number
+  tool: string
+  kind: string
+  summary: string
+  created_at: string
+  undone_at: string | null
+  /** Why it can no longer be reversed — shown instead of a dead button. */
+  blocked: string | null
+  undoable: boolean
 }

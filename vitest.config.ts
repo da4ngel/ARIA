@@ -10,7 +10,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    include: ['src/**/*.test.{ts,tsx}'],
+    // `electron/` too: the main process has real logic in it — which build's
+    // command to spawn, from which working directory — and that had no test
+    // at all until a `cwd` regression stopped the app from starting. Those
+    // files declare `@vitest-environment node` for themselves.
+    include: ['src/**/*.test.{ts,tsx}', 'electron/**/*.test.ts'],
     css: false,
   },
 })

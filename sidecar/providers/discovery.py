@@ -30,6 +30,8 @@ import httpx
 import structlog
 
 from sidecar.core.context import PersonaLevel
+from sidecar.providers import bedrock
+from sidecar.providers.base import ProviderUnavailable
 from sidecar.providers.catalog import Cost, ModelClass, ModelInfo, ProviderName
 from sidecar.providers.credentials import CredentialKey, get_key
 
@@ -399,6 +401,146 @@ def parse_openrouter(payload: dict[str, Any], *, today: date | None = None) -> l
     return sorted(found, key=lambda m: (-(m.benchmark_index or 0.0), m.id))
 
 
+# ── Bedrock ───────────────────────────────────────────────────────────
+# The only listing here with real capability data on it, so the filters are
+# capability checks rather than guesses about a name: output modality says
+# whether a model returns text or an embedding, and `responseStreamingSupported`
+# says whether `ConverseStream` will work at all. That is a better filter than
+# either of the other two providers allow, and it is worth saying so — Gemini's
+# `generateContent` flag turned out to be set on music generators.
+
+#: Words that mean "small and quick" and "big and slow" in a model's name.
+#:
+#: **Matched as whole tokens, never as substrings**, which the live listing is
+#: what proved necessary: `google.gemma-3-27b-it` was classified FAST because
+#: "27b" *contains* "7b". Sizes especially cannot be matched loosely — "70b"
+#: is inside "8x70b", and "8b" is inside "128b".
+_BEDROCK_FAST = frozenset(
+    {"haiku", "lite", "micro", "instant", "mini", "small", "flash", "nano",
+     "3b", "4b", "7b", "8b", "9b"}
+)
+_BEDROCK_SMART = frozenset(
+    {"opus", "premier", "ultra", "large", "70b", "120b", "123b", "235b",
+     "405b", "675b"}
+)
+
+
+def _bedrock_tokens(text: str) -> set[str]:
+    """A model id split into the words a name is actually made of.
+
+    `us.anthropic.claude-haiku-4-5-20251001-v1:0` is separated by dots, dashes
+    and colons all at once, so one delimiter is not enough.
+    """
+    return set(re.split(r"[^a-z0-9]+", text.lower())) - {""}
+
+
+def _bedrock_class(model_id: str, name: str) -> ModelClass:
+    tokens = _bedrock_tokens(f"{model_id} {name}")
+    # SMART first: "claude-opus-4-5" carries no FAST token, but a hypothetical
+    # "opus-mini" should read as the big one, not the small one.
+    if tokens & _BEDROCK_SMART:
+        return ModelClass.SMART
+    if tokens & _BEDROCK_FAST:
+        return ModelClass.FAST
+    return ModelClass.BALANCED
+
+
+def _profiles_by_model(payload: dict[str, Any]) -> dict[str, str]:
+    """`{bare model id: inference profile id}` from a `ListInferenceProfiles` body.
+
+    **This mapping is what stops the most likely first failure.** Newer
+    Anthropic models on Bedrock have no on-demand throughput under their own
+    id: calling one directly returns *"Invocation of model ID ... with
+    on-demand throughput isn't supported. Retry your request with the ID or ARN
+    of an inference profile."* The profile is the same model behind a
+    region-prefixed id, and the profile's `models[].modelArn` is what says
+    which bare id it stands for.
+    """
+    mapping: dict[str, str] = {}
+    for entry in payload.get("inferenceProfileSummaries", []):
+        if not isinstance(entry, dict) or entry.get("status") != "ACTIVE":
+            continue
+        profile_id = entry.get("inferenceProfileId")
+        if not isinstance(profile_id, str):
+            continue
+        for member in entry.get("models", []) or []:
+            arn = (member or {}).get("modelArn")
+            if isinstance(arn, str) and "/" in arn:
+                # The bare id is the last ARN segment.
+                mapping.setdefault(arn.rsplit("/", 1)[1], profile_id)
+    return mapping
+
+
+def parse_bedrock(
+    models: dict[str, Any], profiles: dict[str, Any] | None = None
+) -> list[ModelInfo]:
+    """Text models this account can actually stream, from `ListFoundationModels`.
+
+    **One entry per model, never two.** A model reachable on demand is listed
+    under its own id; one that is only reachable through an inference profile
+    is listed under the profile id instead. Listing both would double a picker
+    that is already long, and half the entries would be ids that 400.
+    """
+    profile_for = _profiles_by_model(profiles or {})
+    found: list[ModelInfo] = []
+    seen: set[str] = set()
+
+    for entry in models.get("modelSummaries", []):
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("modelId")
+        if not isinstance(model_id, str):
+            continue
+        if (entry.get("modelLifecycle") or {}).get("status") != "ACTIVE":
+            continue
+        # Capability filters, not name filters. This is what removes Titan
+        # Embeddings, Stable Diffusion and the rest without a reject list.
+        if "TEXT" not in (entry.get("outputModalities") or []):
+            continue
+        if not entry.get("responseStreamingSupported", False):
+            continue
+
+        types = entry.get("inferenceTypesSupported") or []
+        if "ON_DEMAND" in types:
+            usable_id = model_id
+        elif (profile := profile_for.get(model_id)) is not None:
+            usable_id = profile
+        else:
+            # Provisioned-throughput only, and this account has no profile for
+            # it. Offering it would be offering a guaranteed error.
+            continue
+
+        if usable_id in seen:
+            continue
+        seen.add(usable_id)
+
+        vendor = str(entry.get("providerName") or "").strip()
+        name = str(entry.get("modelName") or model_id).strip()
+        found.append(
+            ModelInfo(
+                id=usable_id,
+                provider=ProviderName.BEDROCK,
+                label=f"{name} ({vendor})" if vendor else name,
+                klass=_bedrock_class(usable_id, name),
+                # Unmeasured here, exactly like every other discovered model.
+                persona=PersonaLevel.MINIMAL,
+                # Bedrock prices per model and per region and the listing says
+                # nothing about it. A guess in this column is what `Cost.UNKNOWN`
+                # exists to avoid.
+                cost=Cost.UNKNOWN,
+                best_for="",
+                ttft_ms_seed=None,
+                # Not in the payload either. The same conservative figure every
+                # other discovered model gets — it caps the roll-up budget, so
+                # erring low is safe and erring high is not.
+                context_tokens=ASSUMED_CONTEXT_TOKENS,
+                temperature=None,
+                discovered=True,
+            )
+        )
+    return sorted(found, key=lambda m: m.id)
+
+
 # ── fetching ──────────────────────────────────────────────────────────
 # Never on the turn path. §10 budgets ~1000ms end to end for voice and this is
 # a network round-trip; callers run it at startup or from the refresh button.
@@ -438,6 +580,26 @@ async def discover_openrouter() -> list[ModelInfo]:
     return parse_openrouter(payload)
 
 
+async def discover_bedrock() -> list[ModelInfo]:
+    """What this AWS account can reach in the configured region.
+
+    **Two calls, and the second is allowed to fail.** `ListFoundationModels` is
+    the listing; `ListInferenceProfiles` is what makes the newer Anthropic
+    models callable at all. A key permitted to do the first and not the second
+    still gets a usable picker — just without the models that need a profile,
+    which is the honest outcome rather than a list of ids that would 400.
+    """
+    if not bedrock.load_credentials().usable:
+        return []
+    models = await bedrock.fetch_control("/foundation-models")
+    try:
+        profiles = await bedrock.fetch_control("/inference-profiles")
+    except (httpx.HTTPError, ProviderUnavailable) as exc:
+        log.info("discovery.bedrock_no_profiles", error=str(exc))
+        profiles = {}
+    return parse_bedrock(models, profiles)
+
+
 async def discover_all() -> list[ModelInfo]:
     """Everything both providers will answer with, or as much as is reachable.
 
@@ -448,6 +610,7 @@ async def discover_all() -> list[ModelInfo]:
         (ProviderName.OPENAI, discover_openai()),
         (ProviderName.GEMINI, discover_gemini()),
         (ProviderName.OPENROUTER, discover_openrouter()),
+        (ProviderName.BEDROCK, discover_bedrock()),
     )
     # One sequence, so a provider cannot be added to the coroutines and
     # forgotten in the names -- the mismatch `strict=True` was catching after

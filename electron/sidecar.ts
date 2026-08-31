@@ -25,6 +25,29 @@ const STARTUP_GRACE_MS = 20_000
 
 export interface SidecarOptions {
   repoRoot: string
+  /**
+   * Where the database, logs and `.handshake` live. **Mirrors
+   * `sidecar/config.py`'s `_default_data_dir`, and must not drift from it.**
+   *
+   * Packaged, `repoRoot` is `process.resourcesPath` — under Program Files,
+   * read-only for a normal user and wiped by the next upgrade. Two things
+   * were pointed there and both are real bugs: `ARIA_DATA_DIR` (which
+   * *overrides* the sidecar's own frozen rule, so the fix on that side would
+   * have been undone from here), and the handshake we read to adopt a
+   * running sidecar. That second one fails silently: the frozen sidecar
+   * writes its handshake to `%LOCALAPPDATA%`, so Electron would look in the
+   * wrong file, find nothing, spawn a second sidecar, and that one would
+   * lose the port race.
+   */
+  dataDir: string
+  /**
+   * Absolute path to the frozen sidecar exe, or `null` in development.
+   *
+   * There is no interpreter and no `.venv` inside an installed app, so the
+   * dev resolution order (ARIA_PYTHON, then `.venv`, then bare `python`)
+   * would end up hunting for a virtualenv under `resources/`.
+   */
+  frozenExe: string | null
   host: string
   port: number
   dev: boolean
@@ -91,8 +114,9 @@ export class Sidecar {
       }
       throw new Error(
         `Something is already listening on ${this.options.host}:${this.options.port} but ` +
-          `data/.handshake is missing or unreadable, so it cannot be authenticated. ` +
-          `Stop that process (or delete data/.handshake and restart it) and try again.`,
+          `${join(this.options.dataDir, '.handshake')} is missing or unreadable, so ` +
+          `it cannot be authenticated. Stop that process (or delete that file and ` +
+          `restart it) and try again.`,
       )
     }
 
@@ -100,8 +124,8 @@ export class Sidecar {
   }
 
   private spawnChild(): void {
-    const python = this.resolvePython()
-    const dataDir = join(this.options.repoRoot, 'data')
+    const { command, args } = this.resolveCommand()
+    const dataDir = this.options.dataDir
     const logDir = join(dataDir, 'logs')
     mkdirSync(logDir, { recursive: true })
 
@@ -117,8 +141,21 @@ export class Sidecar {
     // anything that dies before logging is configured.
     this.logStream = createWriteStream(join(logDir, 'sidecar.out.log'), { flags: 'a' })
 
-    const child = spawn(python, ['-m', 'sidecar.main'], {
-      cwd: this.options.repoRoot,
+    // **`cwd` differs by build, and both halves are load-bearing.**
+    //
+    // In development the command is `python -m sidecar.main`, and `-m` finds
+    // the package by way of the working directory — so this has to be the
+    // repo root or the interpreter exits 1 with `No module named 'sidecar'`.
+    // Pointing it at the data directory instead is a bug I shipped and then
+    // asserted in a test: `packaging.test.ts` checked the literal string
+    // `cwd: dataDir`, which is true of the packaged branch and was never
+    // true of the one that actually runs every day.
+    //
+    // Packaged there is no package to find — the exe carries its own — and
+    // `resourcesPath` is under Program Files, read-only for a normal user,
+    // so anything the sidecar writes relative to its cwd would fail there.
+    const child = spawn(command, args, {
+      cwd: this.options.frozenExe ? dataDir : this.options.repoRoot,
       env: {
         ...process.env,
         ARIA_TOKEN: this.token,
@@ -148,27 +185,39 @@ export class Sidecar {
     })
 
     child.on('error', (error) => {
+      // The fix differs entirely by build: a developer is missing a venv, an
+      // installed user is missing a file the installer should have placed.
+      const fix = this.options.frozenExe
+        ? 'The brain is missing from this install. Reinstall ARIA.'
+        : `Create the venv with: py -3.11 -m venv .venv && ` +
+          `.venv\\Scripts\\pip install -r requirements-dev.txt`
       this.options.onDown(
-        `Could not start the sidecar with "${python}": ${error.message}. ` +
-          `Create the venv with: py -3.11 -m venv .venv && ` +
-          `.venv\\Scripts\\pip install -r requirements-dev.txt`,
+        `Could not start the sidecar with "${command}": ${error.message}. ${fix}`,
       )
     })
 
     this.beginHealthPolling()
   }
 
-  /** venv first; ARIA_PYTHON overrides; bare `python` is the last resort. */
-  private resolvePython(): string {
+  /**
+   * The frozen exe when packaged; otherwise the interpreter and `-m`.
+   *
+   * In development: `ARIA_PYTHON` overrides, then the venv, then bare
+   * `python` as a last resort.
+   */
+  private resolveCommand(): { command: string; args: string[] } {
+    const frozen = this.options.frozenExe
+    if (frozen) return { command: frozen, args: [] }
+
     const override = process.env.ARIA_PYTHON
-    if (override) return override
+    if (override) return { command: override, args: ['-m', 'sidecar.main'] }
     const venv = join(this.options.repoRoot, '.venv', 'Scripts', 'python.exe')
-    return existsSync(venv) ? venv : 'python'
+    return { command: existsSync(venv) ? venv : 'python', args: ['-m', 'sidecar.main'] }
   }
 
   private readHandshake(): string | null {
     try {
-      const token = readFileSync(join(this.options.repoRoot, 'data', '.handshake'), 'utf-8').trim()
+      const token = readFileSync(join(this.options.dataDir, '.handshake'), 'utf-8').trim()
       return token || null
     } catch {
       return null

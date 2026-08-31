@@ -17,15 +17,18 @@ from typing import TYPE_CHECKING
 from sidecar.memory.db import Database
 
 if TYPE_CHECKING:
+    from sidecar.core.clipboard_watcher import ClipboardWatcher
     from sidecar.core.conversation import ConversationService
     from sidecar.core.listener import Listener
     from sidecar.core.questions import QuestionBroker
+    from sidecar.core.reminder_scheduler import ReminderScheduler
     from sidecar.memory.indexer import Indexer
     from sidecar.memory.reflection import Reflector
     from sidecar.memory.retrieval import MemoryServices
     from sidecar.memory.routing_log import RoutingLog
     from sidecar.memory.scheduler import MemoryScheduler
     from sidecar.memory.settings_store import SettingsStore
+    from sidecar.memory.tool_log import ToolJournal
     from sidecar.persona.proactivity import ProactivityScheduler
     from sidecar.providers.adoption import AdoptionService
     from sidecar.providers.availability import AvailabilityService
@@ -87,6 +90,14 @@ class Runtime:
     memory: MemoryServices | None = None
     #: §9.7's labelled routing dataset. Built beside the database.
     routing_log: RoutingLog | None = None
+    #: The same journal `PermissionEngine` writes through. Held here so
+    #: `explain_last_action` can read it back — until now nothing could.
+    tool_journal: ToolJournal | None = None
+    #: Fires reminders. Its own loop, not a `proactivity` trigger — those
+    #: gates exist to suppress unsolicited messages and a reminder is not one.
+    reminders: ReminderScheduler | None = None
+    #: Records what is copied, minus what looks like a credential.
+    clipboard_watcher: ClipboardWatcher | None = None
     #: Web search for `research`. Built at startup; the switch below is
     #: what decides whether the tool is offered at all.
     search: WebSearch | None = None
@@ -157,6 +168,9 @@ class Runtime:
         self.memory = None
         self.reflector = None
         self.routing_log = None
+        self.tool_journal = None
+        self.reminders = None
+        self.clipboard_watcher = None
         self.search = None
         self.online_mode = False
         self.memory_scheduler = None

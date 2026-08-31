@@ -159,3 +159,74 @@ async def write_clipboard(ctx: ToolContext, text: str) -> ToolResult:
         data={"chars": len(text)},
         summary=f"Copied to the clipboard: {preview}",
     )
+
+
+#: A history entry is shown to the model in preview form only. The whole point
+#: of the ring is that it holds things worth pasting; pasting a whole document
+#: into a prompt is what `READ_SUMMARY_CHARS` already exists to prevent.
+HISTORY_PREVIEW_CHARS = 200
+
+
+@tool(
+    name="read_clipboard_history",
+    tier=Tier.AUTO,
+    description=(
+        "See what was copied recently, newest first. Use when asked about "
+        "something copied earlier rather than what is on the clipboard now — "
+        "'what did I copy before that', 'find the link I copied'."
+    ),
+    # **Not optional.** `read_clipboard` carries this flag because a clipboard
+    # holds passwords and card numbers; a *history* of clipboards is strictly
+    # more of the same thing, and a version of it that could reach a cloud
+    # model would be a hole in exactly the guarantee that flag exists to make.
+    local_only=True,
+)
+async def read_clipboard_history(ctx: ToolContext, count: int = 10) -> ToolResult:
+    """Read what was copied recently.
+
+    Args:
+        count: How many entries to look back over, newest first
+    """
+    from sidecar.memory import clipboard_store
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        return ToolResult(
+            ok=False,
+            summary="The clipboard history is not available in this session.",
+            error="unavailable",
+        )
+
+    entries = await clipboard_store.recent(runtime.db, count)
+    if not entries:
+        return ToolResult(
+            ok=True,
+            data=[],
+            summary=(
+                "Nothing has been copied since ARIA started, or the history is "
+                "switched off."
+            ),
+        )
+
+    # Lengths only, as in `read_clipboard`. This tool's whole payload is the
+    # thing being protected and `tool_log` is not a place to copy it into.
+    log.info("tool.read_clipboard_history", entries=len(entries))
+
+    lines = []
+    for position, entry in enumerate(entries, start=1):
+        head = entry.content[:HISTORY_PREVIEW_CHARS].replace("\n", " ")
+        more = "…" if entry.chars > HISTORY_PREVIEW_CHARS else ""
+        lines.append(f"{position}. {head}{more}")
+
+    return ToolResult(
+        ok=True,
+        data=[e.content for e in entries],
+        summary=f"The last {len(entries)} things copied:\n" + "\n".join(lines),
+        display={
+            "kind": "clipboard_history",
+            "entries": [
+                {"id": e.id, "content": e.content, "chars": e.chars, "copied_at": e.copied_at}
+                for e in entries
+            ],
+        },
+    )

@@ -18,6 +18,8 @@ import { ConnectionStatus } from '@/components/ConnectionStatus'
 import { ConversationView } from '@/components/ConversationView'
 import { EmptyState } from '@/components/EmptyState'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { FirstRun } from '@/components/FirstRun'
+import { PanelBoundary } from '@/components/PanelBoundary'
 import { HandsFreeToggle } from '@/components/HandsFreeToggle'
 import { VoiceAura, type AuraMode } from '@/components/VoiceAura'
 import { HistoryPanel } from '@/components/HistoryPanel'
@@ -25,6 +27,8 @@ import { ModelPicker } from '@/components/ModelPicker'
 import { SettingsPanel } from '@/components/SettingsPanel'
 import { Shortcuts } from '@/components/Shortcuts'
 import { Sidebar, useSidebar, type Section } from '@/components/Sidebar'
+import { ActivityPanel } from '@/components/ActivityPanel'
+import { ClipboardPanel } from '@/components/ClipboardPanel'
 import { MemoryPanel } from '@/components/MemoryPanel'
 import { StudyPanel } from '@/components/StudyPanel'
 import { FilesPanel } from '@/components/FilesPanel'
@@ -42,6 +46,7 @@ import { useModels } from '@/hooks/useModels'
 import { useAskQuestion } from '@/hooks/useAskQuestion'
 import { useConversationMode } from '@/hooks/useConversationMode'
 import { usePermissionMode } from '@/hooks/usePermissionMode'
+import { useFirstRun } from '@/hooks/useFirstRun'
 import { useHandsFree } from '@/hooks/useHandsFree'
 import { usePublishVoiceLevel } from '@/hooks/usePublishVoiceLevel'
 import { useWakeChime } from '@/hooks/useWakeChime'
@@ -77,6 +82,7 @@ export default function App(): JSX.Element {
   // value. Three independent fetches could disagree, and a selector that
   // disagrees with what is actually enforced is worse than none.
   const permissions = usePermissionMode(connected)
+  const setup = useFirstRun(connected)
   // Per conversation, so it re-reads whenever the open chat changes.
   const answerMode = useConversationMode(sessionId, connected)
   const ask = useAskQuestion()
@@ -266,6 +272,13 @@ export default function App(): JSX.Element {
         {/* Above everything, including the history rail: it is holding a
             lock in the sidecar, so nothing else should be reachable. */}
         <ConfirmDialog request={confirm.current} onRespond={confirm.respond} />
+
+        {/* **Over the shell, not inside the overlay stack.** On a real first
+            run there is no conversation behind it worth seeing, and several
+            of its steps decide whether the app can do anything at all.
+            `needed` is null until the sidecar answers, so it never flashes
+            on somebody who set this up months ago. */}
+        {setup.needed === true && <FirstRun setup={setup} />}
 
         {/* The application menu, and the only place the parts of this app are
             named. Always present in both window modes. */}
@@ -464,6 +477,13 @@ export default function App(): JSX.Element {
           {/* `mode="wait"`: without it, switching panel A to B crossfades
               both at once and you briefly see two sheets stacked. One
               leaves, then the next arrives. */}
+            {/* **A panel that throws must not blank the window.** There was
+                no error boundary anywhere in this app until one bad payload
+                unmounted the whole tree — the same symptom as the retheme's
+                blank window, from an entirely different cause. Around the
+                panels only: a boundary over the conversation would turn a
+                crash in the thing you are reading into a quiet placeholder. */}
+            <PanelBoundary name={overlay ?? 'panel'} onClose={() => setOverlay(null)}>
             <AnimatePresence mode="wait">
             {overlay === 'history' && !chatsInMenu && (
               <HistoryPanel
@@ -499,6 +519,12 @@ export default function App(): JSX.Element {
               />
             )}
             {overlay === 'memory' && <MemoryPanel key="memory" onClose={() => setOverlay(null)} />}
+            {overlay === 'clipboard' && (
+              <ClipboardPanel key="clipboard" onClose={() => setOverlay(null)} />
+            )}
+            {overlay === 'activity' && (
+              <ActivityPanel key="activity" onClose={() => setOverlay(null)} />
+            )}
             {overlay === 'study' && (
               <StudyPanel
                 key="study"
@@ -515,12 +541,14 @@ export default function App(): JSX.Element {
                 onKeysChanged={models.refresh}
                 mode={permissions.mode}
                 setMode={permissions.setMode}
+                onReopenSetup={setup.reopen}
               />
             )}
             {overlay === 'shortcuts' && (
               <Shortcuts key="shortcuts" onClose={() => setOverlay(null)} />
             )}
           </AnimatePresence>
+            </PanelBoundary>
         </div>
       </div>
     </div>

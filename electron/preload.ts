@@ -101,6 +101,18 @@ const api = {
   onWindowMode: (handler: (expanded: boolean) => void): Unsubscribe =>
     subscribe('aria:window-mode', handler),
 
+  /** Write a diagnostics zip and resolve with its path, or null if the
+   *  sidecar could not be reached — which is itself worth reporting. */
+  exportDiagnostics: (): Promise<string | null> =>
+    ipcRenderer.invoke('aria:export-diagnostics') as Promise<string | null>,
+
+  /** Whether Windows launches her at login. Read from the OS, not stored. */
+  getAutoStart: (): Promise<boolean> => ipcRenderer.invoke('aria:get-auto-start') as Promise<boolean>,
+
+  /** Resolves with what the OS reports afterwards, not with what was asked. */
+  setAutoStart: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('aria:set-auto-start', enabled) as Promise<boolean>,
+
   /** Open the OS file picker and return the absolute paths chosen.
    *
    *  The one filesystem-shaped thing in this bridge, and it stays inside the

@@ -74,6 +74,65 @@ def _refuse(path: Path) -> str | None:
     return None
 
 
+
+async def _remember_undo(
+    ctx: ToolContext, *, tool: str, kind: str, summary: str, payload: dict[str, object]
+) -> None:
+    """Note a reversible operation on the undo timeline.
+
+    Deferred import, and best-effort: `memory/undo.py` imports `Database` and
+    this module is imported by the registry at startup. A failure to record an
+    undo must never fail the operation the user actually asked for.
+    """
+    from sidecar.memory import undo
+    from sidecar.state import runtime
+
+    if runtime.db is None:
+        return
+    await undo.record(
+        runtime.db,
+        tool=tool,
+        kind=kind,
+        summary=summary,
+        payload=payload,
+        session_id=ctx.session_id,
+    )
+
+
+async def _backup_before_write(target: Path) -> str | None:
+    """A copy of `target` in data/undo, or None if one could not be made."""
+    from sidecar.config import get_settings
+    from sidecar.memory import undo
+
+    return await asyncio.to_thread(undo.save_backup, get_settings().undo_dir, target)
+
+
+def _recycle(target: Path) -> None:
+    """Send a path to the Recycle Bin. **Not a hard unlink.**
+
+    BUILD_SPEC:1126 asked for this and the tools did not do it: `delete_file`
+    called `Path.unlink`, which destroys. `FOF_ALLOWUNDO` is what puts it in the
+    bin, and the bin is the undo — the same call `files.delete` (the panel path)
+    has been making since the file browser shipped, now shared rather than
+    duplicated.
+    """
+    from win32com.shell import shell, shellcon
+
+    result, aborted = shell.SHFileOperation(
+        (
+            0,
+            shellcon.FO_DELETE,
+            # Double-NUL terminated, per the Win32 contract for a path list.
+            str(target) + "\0",
+            None,
+            shellcon.FOF_ALLOWUNDO | shellcon.FOF_NOCONFIRMATION | shellcon.FOF_SILENT,
+            None,
+            None,
+        )
+    )
+    if result != 0 or aborted:
+        raise OSError(f"Windows would not recycle {target} (code {result}).")
+
 @tool(
     name="move_file",
     tier=Tier.CONFIRM,
@@ -114,6 +173,13 @@ async def move_file(ctx: ToolContext, source: str, destination: str) -> ToolResu
     await asyncio.to_thread(shutil.move, str(src), str(dst))
     log.info("tool.moved", source=str(src), destination=str(dst))
     _scan_changed()
+    await _remember_undo(
+        ctx,
+        tool="move_file",
+        kind="move",
+        summary=f"Moved {src.name} to {dst.parent}",
+        payload={"source": str(src), "destination": str(dst)},
+    )
     return ToolResult(
         ok=True,
         data={"source": str(src), "destination": str(dst)},
@@ -130,7 +196,7 @@ async def move_file(ctx: ToolContext, source: str, destination: str) -> ToolResu
     ),
 )
 async def delete_file(ctx: ToolContext, path: str) -> ToolResult:
-    """Permanently delete a file.
+    """Delete a file, to the Recycle Bin.
 
     Args:
         path: Full path of the file to delete, e.g. "C:/temp/scratch.txt"
@@ -153,13 +219,31 @@ async def delete_file(ctx: ToolContext, path: str) -> ToolResult:
         return ToolResult(ok=False, summary=f"There is no file at {target}.", error="missing")
 
     size = (await asyncio.to_thread(target.stat)).st_size
-    await asyncio.to_thread(target.unlink)
+    try:
+        await asyncio.to_thread(_recycle, target)
+    except (OSError, ImportError) as exc:
+        return ToolResult(
+            ok=False,
+            summary=f"Could not delete {target.name}: {exc}",
+            error=str(exc),
+        )
     log.info("tool.deleted", path=str(target), bytes=size)
     _scan_changed()
+    await _remember_undo(
+        ctx,
+        tool="delete_file",
+        kind="delete",
+        summary=f"Deleted {target.name}",
+        payload={"path": str(target), "bytes": size},
+    )
     return ToolResult(
         ok=True,
-        data={"path": str(target), "bytes": size},
-        summary=f"Deleted {target.name}.",
+        data={"path": str(target), "bytes": size, "recycled": True},
+        # **Says where it went.** The tier stays DANGER — this is still
+        # the tool that makes files disappear — but the description used
+        # to promise "cannot be undone" while BUILD_SPEC:1126 asked for
+        # the bin, and the bin is a real undo the user already knows.
+        summary=f"Deleted {target.name} — it is in the Recycle Bin.",
     )
 
 
@@ -443,6 +527,11 @@ async def write_file(ctx: ToolContext, path: str, content: str = "") -> ToolResu
         return ToolResult(ok=False, summary=f"{target} is a folder.", error="is_dir")
 
     existed = await asyncio.to_thread(target.is_file)
+    # **Copy aside what is about to be replaced.** Until now this tool
+    # read `existed` only to choose the word 'Replaced', and the bytes it
+    # overwrote were gone. Best-effort: a backup that fails does not stop
+    # the write the user asked for.
+    backup = await _backup_before_write(target) if existed else None
     try:
         await asyncio.to_thread(lambda: target.parent.mkdir(parents=True, exist_ok=True))
         await asyncio.to_thread(target.write_text, content, encoding="utf-8")
@@ -451,6 +540,21 @@ async def write_file(ctx: ToolContext, path: str, content: str = "") -> ToolResu
 
     log.info("tool.wrote_file", path=str(target), bytes=len(content), replaced=existed)
     _scan_changed()
+    await _remember_undo(
+        ctx,
+        tool="write_file",
+        kind="write",
+        summary=(
+            f"Replaced {target.name}" if existed else f"Created {target.name}"
+        ),
+        payload={
+            "path": str(target),
+            "backup": backup,
+            # What we wrote, so undoing a *create* can refuse when the
+            # file has been edited by hand since.
+            "wrote": None if existed else content,
+        },
+    )
     verb = "Replaced" if existed else "Created"
     return ToolResult(
         ok=True,

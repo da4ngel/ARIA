@@ -1761,3 +1761,56 @@ async def test_deleting_a_conversation_forgets_its_mode_and_sub_mode(service) ->
 
     assert session not in svc._modes  # noqa: SLF001
     assert session not in svc._study_submodes  # noqa: SLF001
+
+
+# ── a new study chat is not mid-session ────────────────────────────────
+
+
+async def test_a_new_study_chat_is_not_handed_another_chats_subject(
+    database: Database, make_service
+) -> None:
+    """**The wiring, not just the pieces.**
+
+    `_study_state` used `study.latest_subject_id` — the most recently touched
+    subject *globally* — so a brand-new study chat opened with
+    `[studying: <last week's subject>. next: ...]`. The model read that as a
+    session already underway: it carried on teaching the old subject, never
+    called `study_begin`, and the lecture attached to the new chat was never
+    mapped. Its quiz answers were then recorded against the *old* subject's
+    concepts, in the real database, before `gate_study.py` caught it.
+
+    `render_not_started` and `session_subject_id` were both written and tested
+    in isolation while this call site was still wrong, and the whole suite
+    passed. Mutation-checked: swapping it back to `latest_subject_id` fails
+    this test and nothing else.
+    """
+    from sidecar.memory import study
+
+    store = ConversationStore(database)
+    subject_id = await study.ensure_subject(database, "Information Security")
+    await study.add_concepts(database, subject_id, [("CIA Triad", "c, i, a")])
+    await study.touch(database, subject_id)
+
+    started = await store.ensure_session(None, kind="study")
+    await store.set_study_subject(started, subject_id)
+    fresh = await store.ensure_session(None, kind="study")
+
+    svc = make_service(
+        store=store,
+        provider=FakeProvider(),
+        bus=RecordingBus(),
+        model="test-model",
+        db=database,
+    )
+
+    in_progress = await svc._study_state(ctx.ConversationMode.STUDY, started)  # noqa: SLF001
+    assert in_progress is not None
+    assert "studying: Information Security" in in_progress
+
+    # The same subject exists and is the most recently touched — the exact
+    # condition that used to leak it into every new chat.
+    new_chat = await svc._study_state(ctx.ConversationMode.STUDY, fresh)  # noqa: SLF001
+    assert new_chat is not None
+    assert "studying:" not in new_chat
+    assert "no subject started" in new_chat
+    assert "study_begin" in new_chat

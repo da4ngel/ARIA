@@ -407,6 +407,60 @@ async def touch(db: Database, subject_id: int) -> None:
     await db.run(_touch)
 
 
+async def session_subject_id(db: Database, session_id: str) -> int | None:
+    """Which subject *this* chat got to, or None if it has touched none.
+
+    **`sessions.study_subject_id` has been stamped by both study tools since
+    migration 008 and was read by nothing until 2026-08-29.** The turn path
+    used `latest_subject_id` instead — the most recently touched subject
+    *globally* — so a brand-new study chat opened with
+
+        [studying: Introduction to Information Security Analytics - 0 of 22
+         covered. next: Module Overview]
+
+    which is a claim that a session is already underway, and the model acted
+    on it exactly as written: it carried on teaching a subject from days
+    earlier, never mapped the lecture attached to the new chat, and graded
+    that quiz against the old subject's concepts, in the real database.
+
+    A record, not a binding. Nothing constrains where a study chat roams; the
+    column says where it ended up, which is what lets the panel group by
+    subject while the conversation stays free.
+    """
+    row = await db.run(
+        lambda c: c.execute(
+            "SELECT study_subject_id FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    )
+    if row is None or row["study_subject_id"] is None:
+        return None
+    return int(row["study_subject_id"])
+
+
+def render_not_started(previous: tuple[tuple[str, int, int], ...]) -> str:
+    """The block for a study chat that has not touched a subject yet.
+
+    **A separate wording, and that is the whole point.** `render` opens
+    "studying: X", which is a claim that a session is underway. In a chat
+    where nothing has been studied it is a false one, and keeping "studying:"
+    while merely correcting *which* subject it named would have left the same
+    false claim with a better id in it.
+
+    So this says what is true - nothing started here - and names the prior
+    subjects only as something he could ask to resume. Shorter than the real
+    state block, because a chat with no session has less to say, not more.
+    """
+    if not previous:
+        return "[no subject started yet. Call study_begin with his material or his goal.]"
+    listed = "; ".join(f"{name} ({covered} of {total})" for name, covered, total in previous)
+    return (
+        "[no subject started in this chat. previously: "
+        f"{listed}. Call study_begin - with his material or goal for a new one, "
+        "or with one of the names above to resume it.]"
+    )
+
+
+
 def render(state: StudyState, policy: SubModePolicy | None = None) -> str:
     """The block that goes in the volatile prefix.
 
@@ -447,7 +501,39 @@ def render(state: StudyState, policy: SubModePolicy | None = None) -> str:
         parts.append(f"solid: {names(state.strong)}")
 
     block = "[" + ". ".join(parts) + "]"
-    return f"{block}\n{resolved.line}" if resolved.line else block
+
+    # **The map is the boundary of the material, and it goes on its own line.**
+    #
+    # Observed twice in `gate_study.py`: asked "how does Vantril handle
+    # certificate revocation?", a topic the lecture does not touch, she
+    # answered *"From what was in the document, Vantril uses OCSP..."* -
+    # inventing content and attributing it to his own file - and the exam
+    # that followed then tested him on it.
+    #
+    # The first attempt put this *inside* the bracket, as one more clause in
+    # a line that otherwise reads as status. It did not take: the next run
+    # dropped the false attribution but still described OCSP and CRLs as
+    # Vantril's own. **An instruction buried in a state blob reads as state.**
+    # `resolved.line` has always been outside the bracket, for this reason.
+    #
+    # It names *which* material, because the two cases are not the same
+    # falsehood: a planned roadmap has no document at all (`source_path` is
+    # NULL), so quoting one is invention twice over.
+    if state.source_path:
+        boundary = (
+            "The map above is the whole of this material. If he asks about "
+            "anything not on it, say that first, plainly — then answer from "
+            "ordinary knowledge if you can, making clear the answer is yours "
+            "and not his source's. Never describe it as being in his file."
+        )
+    else:
+        boundary = (
+            "This map was planned from his goal, not read from a file. There "
+            "is no document here, so nothing can be quoted from one — if he "
+            "asks what his material says, say there is none yet."
+        )
+
+    return "\n".join(part for part in (block, boundary, resolved.line) if part)
 
 
 # ── editing, from the panel rather than from a tool ────────────────────

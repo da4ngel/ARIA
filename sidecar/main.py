@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -19,9 +20,11 @@ from starlette.websockets import WebSocketState
 
 from sidecar.config import Settings, get_settings
 from sidecar.core import context as ctx
+from sidecar.core.clipboard_watcher import ClipboardWatcher
 from sidecar.core.conversation import ConversationService
 from sidecar.core.listener import Listener, WakeMode
 from sidecar.core.questions import QuestionBroker
+from sidecar.core.reminder_scheduler import ReminderScheduler
 from sidecar.core.router import Router, RoutingBias
 from sidecar.core.tasks import spawn
 from sidecar.handshake import (
@@ -32,6 +35,7 @@ from sidecar.handshake import (
     write_handshake,
 )
 from sidecar.logging_setup import configure_logging
+from sidecar.memory import clipboard_store
 from sidecar.memory.db import Database
 from sidecar.memory.episodic import EpisodicMemory
 from sidecar.memory.indexer import Indexer
@@ -42,18 +46,20 @@ from sidecar.memory.routing_log import RoutingLog
 from sidecar.memory.scheduler import MemoryScheduler
 from sidecar.memory.semantic import SemanticMemory
 from sidecar.memory.settings_store import (
+    BEDROCK_REGION,
     ONLINE_MODE,
     PERMISSION_MODE,
     ROUTING_BIAS,
     SELECTED_MODEL,
     TRUSTED_PATHS,
     WAKE_WORD_ENABLED,
+    WAKE_WORD_THRESHOLD,
     SettingsStore,
 )
 from sidecar.memory.tool_log import ToolJournal
 from sidecar.persona import focus
 from sidecar.persona import proactivity as proactivity_module
-from sidecar.providers import catalog, factory
+from sidecar.providers import bedrock, catalog, factory
 from sidecar.providers.adoption import SETTINGS_KEY as ADOPTION_STATE
 from sidecar.providers.adoption import AdoptionService
 from sidecar.providers.availability import AvailabilityService
@@ -80,6 +86,7 @@ from sidecar.providers.wakeword import OpenWakeWord, missing_models
 from sidecar.rpc.events import bus
 from sidecar.rpc.handlers import build_health, dispatch, method_names
 from sidecar.state import runtime
+from sidecar.tools import clipboard as clipboard_tool
 from sidecar.tools import finder
 from sidecar.tools.files import known_folder
 from sidecar.tools.permissions import PermissionEngine, PermissionMode
@@ -229,6 +236,14 @@ async def _start_conversation(settings: Settings) -> None:
     settings_store = SettingsStore(runtime.require_db())
     runtime.settings = settings_store
 
+    # **Before discovery, not after.** Bedrock lists different models in
+    # different regions and the region is in the hostname, so a listing fetched
+    # against the default and then re-pointed would offer models this account
+    # cannot reach.
+    stored_region = await settings_store.get(BEDROCK_REGION)
+    if isinstance(stored_region, str):
+        bedrock.set_region(stored_region)
+
     # The picker fills in from the last listing immediately; a refresh only
     # happens if that listing is stale, and never on the path of a turn.
     fresh = await availability.load_discovered(settings_store)
@@ -245,9 +260,13 @@ async def _start_conversation(settings: Settings) -> None:
     # Importing the package is what registers the tools (rule 4).
     import sidecar.tools  # noqa: F401
 
+    # Held on `runtime` rather than constructed inline, so the same journal
+    # `PermissionEngine` writes through is the one `explain_last_action`
+    # reads back. Two instances would be harmless but confusing.
+    runtime.tool_journal = ToolJournal(runtime.require_db())
     runtime.permissions = PermissionEngine(
         bus,
-        ToolJournal(runtime.require_db()),
+        runtime.tool_journal,
         allow_danger=settings.allow_danger_tools,
     )
     # `ask_user` reaches this through `runtime`, because `ToolContext` carries
@@ -324,6 +343,8 @@ async def _start_conversation(settings: Settings) -> None:
 
     _start_memory_scheduler(settings, settings_store, providers, availability)
     _start_proactivity_scheduler(settings, ollama, local_default.id)
+    _start_reminders(runtime.require_conversation())
+    _start_clipboard_watcher()
     await _start_adoption(settings_store, providers)
 
     await _build_listener(settings, settings_store)
@@ -372,7 +393,7 @@ def _build_tts(settings: Settings) -> KokoroTTS | None:
             await engine.start()
         except SpeechUnavailable as exc:
             # Missing weights is a setup step, not a crash. She types instead.
-            log.warning("tts.unavailable", error=str(exc))
+            log.warning("tts.unavailable", error=str(exc), exc_info=True)
         except Exception:
             log.exception("tts.warm_failed")
 
@@ -396,7 +417,7 @@ def _build_stt(settings: Settings) -> WhisperSTT | None:
         try:
             await engine.start()
         except TranscriptionUnavailable as exc:
-            log.warning("stt.unavailable", error=str(exc))
+            log.warning("stt.unavailable", error=str(exc), exc_info=True)
         except Exception:
             log.exception("stt.warm_failed")
 
@@ -435,18 +456,33 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
             )
             mode = WakeMode.PHRASE
         else:
-            wake = OpenWakeWord(models_dir, threshold=settings.wake_word_threshold)
+            # **A calibrated threshold has to survive a restart**, or the
+            # slider is a control whose effect quietly evaporates. The stored
+            # row wins over the config default; the config default is what
+            # was ever readable before the calibration step existed.
+            stored = await store.get(WAKE_WORD_THRESHOLD, None)
+            threshold = (
+                float(stored)
+                if isinstance(stored, int | float)
+                else settings.wake_word_threshold
+            )
+            wake = OpenWakeWord(models_dir, threshold=threshold)
             try:
                 await wake.start()
             except Exception as exc:  # noqa: BLE001 — never fatal
-                log.warning("wakeword.unavailable", error=str(exc), falling_back_to="phrase")
+                log.warning(
+                    "wakeword.unavailable",
+                    error=str(exc),
+                    falling_back_to="phrase",
+                    exc_info=True,
+                )
                 wake, mode = None, WakeMode.PHRASE
 
     vad = SileroVAD()
     try:
         await asyncio.to_thread(vad.start)
     except Exception as exc:  # noqa: BLE001 — no VAD means no hands-free, not no sidecar
-        log.warning("listener.unavailable", error=str(exc))
+        log.warning("listener.unavailable", error=str(exc), exc_info=True)
         return
 
     listener = Listener(
@@ -460,6 +496,14 @@ async def _build_listener(settings: Settings, store: SettingsStore) -> None:
         armed_window_s=settings.armed_window_s,
     )
     runtime.listener = listener
+
+    # **The two halves of answering a question out loud.** The broker can
+    # now read a question aloud, and the listener offers every transcript to
+    # it before the wake-phrase gate — so an answer needs no name, and an
+    # utterance that is not an answer still becomes an ordinary turn.
+    if runtime.questions is not None:
+        runtime.questions.set_voice(runtime.require_conversation().speak)
+        listener.set_answer_sink(runtime.questions.answer_from_speech)
 
     # The user's answer from last time, not the config default: turning the
     # microphone on is a decision worth remembering.
@@ -695,6 +739,35 @@ def _start_proactivity_scheduler(
     scheduler.start()
 
 
+def _start_reminders(conversation: ConversationService) -> None:
+    """The loop that fires reminders, deliberately separate from proactivity.
+
+    Delivery is `send_proactive` unchanged, so a reminder is an ordinary
+    `messages` row with `proactive=1` and inherits the `turn.rate` thumbs for
+    free. What it does *not* inherit is that scheduler's gates — see
+    `core/reminder_scheduler.py` for why a solicited message must not be
+    filtered by machinery built to suppress unsolicited ones.
+    """
+    scheduler = ReminderScheduler(
+        db=runtime.require_db(),
+        deliver=lambda text: conversation.send_proactive(text, trigger="reminder"),
+    )
+    runtime.reminders = scheduler
+    scheduler.start()
+
+
+def _start_clipboard_watcher() -> None:
+    """Record what gets copied, minus what looks like a credential."""
+    db = runtime.require_db()
+
+    async def remember(content: str, source: str | None) -> None:
+        await clipboard_store.remember(db, content, source=source)
+
+    watcher = ClipboardWatcher(remember=remember, read_text=clipboard_tool.read_text)
+    runtime.clipboard_watcher = watcher
+    watcher.start()
+
+
 def _build_indexer(settings: Settings) -> None:
     """Start reading documents in the background, if that is wanted.
 
@@ -752,6 +825,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await runtime.memory_scheduler.stop()
         if runtime.proactivity_scheduler is not None:
             await runtime.proactivity_scheduler.stop()
+        if runtime.reminders is not None:
+            await runtime.reminders.stop()
+        if runtime.clipboard_watcher is not None:
+            await runtime.clipboard_watcher.stop()
         if runtime.adoption is not None:
             await runtime.adoption.stop()
         if runtime.questions is not None:
@@ -858,6 +935,14 @@ def _port_is_free(host: str, port: int) -> bool:
 
 def main() -> None:
     """Console entrypoint for ``python -m sidecar.main``."""
+    # **Before anything else, including logging setup.** `--selftest` has to
+    # work in a bundle that is too broken to start, which is the only situation
+    # it is for. It binds no port and opens no database.
+    if "--selftest" in sys.argv:
+        from sidecar import selftest
+
+        raise SystemExit(selftest.run())
+
     settings = get_settings()
     # Configure early so uvicorn's own startup lines land in the log file too.
     # configure_logging is idempotent; lifespan calls it again after ensure_dirs.

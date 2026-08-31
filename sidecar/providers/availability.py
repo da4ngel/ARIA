@@ -33,10 +33,23 @@ log = structlog.get_logger(__name__)
 DISCOVERY_MAX_AGE = timedelta(hours=24)
 
 # Which credential unlocks which provider. Ollama needs none.
-_KEY_FOR: dict[ProviderName, CredentialKey] = {
-    ProviderName.OPENAI: CredentialKey.OPENAI,
-    ProviderName.GEMINI: CredentialKey.GEMINI,
-    ProviderName.OPENROUTER: CredentialKey.OPENROUTER,
+#
+# **A tuple, because Bedrock accepts either of two credential shapes** — a
+# Bedrock API key (a bearer token) or an AWS access key that has to be signed
+# with. Any one of them present unlocks the provider; requiring a single named
+# key would grey out every Bedrock model for whichever half of the users hold
+# the other kind.
+_KEY_FOR: dict[ProviderName, tuple[CredentialKey, ...]] = {
+    ProviderName.OPENAI: (CredentialKey.OPENAI,),
+    ProviderName.GEMINI: (CredentialKey.GEMINI,),
+    ProviderName.OPENROUTER: (CredentialKey.OPENROUTER,),
+    ProviderName.BEDROCK: (
+        CredentialKey.BEDROCK,
+        # The secret alone is not a credential, so the *id* is what is checked:
+        # a half-entered pair reads as "not configured" rather than as a key
+        # that will fail at the first turn.
+        CredentialKey.AWS_ACCESS_KEY_ID,
+    ),
 }
 
 
@@ -61,7 +74,9 @@ class AvailabilityService:
 
     def refresh_keys(self) -> None:
         """Re-read the Credential Manager. Call after any key change."""
-        self._keys = {p: bool(get_key(k)) for p, k in _KEY_FOR.items()}
+        self._keys = {
+            p: any(bool(get_key(k)) for k in keys) for p, keys in _KEY_FOR.items()
+        }
         log.info(
             "availability.keys",
             **{str(p): present for p, present in self._keys.items()},

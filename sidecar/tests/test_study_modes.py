@@ -83,13 +83,23 @@ def test_exam_is_the_only_sub_mode_that_withholds_answers() -> None:
 async def test_learn_renders_exactly_what_study_rendered_before_sub_modes(
     database: Database,
 ) -> None:
-    """Nobody who never opens the panel pays a token for this feature — the
-    same guarantee NORMAL keeps for `ConversationMode`."""
+    """Nobody who never opens the panel pays a token for this feature - the
+    same guarantee NORMAL keeps for `ConversationMode`.
+
+    **The second assertion used to be that the block held no newline**,
+    which was a proxy for "Learn contributes nothing" and stopped being one
+    the moment the base block legitimately grew a line of its own - the
+    boundary clause that stops her describing things outside the map as
+    being in his file. A proxy that fails when its subject is *not* what
+    changed has stopped measuring what it names, so this asserts the
+    property directly: Learn's own line is empty, and passing a policy for
+    it changes nothing.
+    """
     subject_id = await _mapped(database)
     state = await _state(database, subject_id)
 
+    assert policy_for(StudySubMode.LEARN).line == ""
     assert study.render(state) == study.render(state, policy_for(StudySubMode.LEARN))
-    assert "\n" not in study.render(state), "Learn adds no second line"
 
 
 @pytest.mark.asyncio
@@ -147,16 +157,30 @@ async def test_a_covered_scope_names_every_covered_concept(database: Database) -
 async def test_a_next_scope_block_stays_short_however_big_the_syllabus(
     database: Database,
 ) -> None:
-    """Learn is the common case and its block must not grow with the map."""
-    subject_id = await study.ensure_subject(database, "Wide")
-    await study.add_concepts(database, subject_id, [(f"Concept {i}", "") for i in range(40)])
-    state = await _state(database, subject_id)
-    for concept in state.concepts:
-        await study.record_answer(database, concept.id, correct=False)
+    """Learn is the common case and its block must not grow with the map.
 
-    rendered = study.render(await _state(database, subject_id), policy_for(StudySubMode.LEARN))
+    **Asserted as growth, not as an absolute length.** The flat `< 300` this
+    replaced was passing by 25 characters after the boundary clause landed —
+    a constant that has nothing to do with the syllabus size, so the cap was
+    about to start failing for a reason it was never written to catch.
+    Comparing a four-concept map against a forty-concept one measures the
+    thing the name promises and is indifferent to everything else in there.
+    """
+    small = await study.ensure_subject(database, "Small")
+    await study.add_concepts(database, small, [(f"Concept {i}", "") for i in range(4)])
+    wide = await study.ensure_subject(database, "Wide")
+    await study.add_concepts(database, wide, [(f"Concept {i}", "") for i in range(40)])
+    for subject_id in (small, wide):
+        for concept in (await _state(database, subject_id)).concepts:
+            await study.record_answer(database, concept.id, correct=False)
 
-    assert len(rendered) < 300, rendered
+    learn = policy_for(StudySubMode.LEARN)
+    short = study.render(await _state(database, small), learn)
+    long = study.render(await _state(database, wide), learn)
+
+    # Ten times the map, and the block may differ only by the concept names
+    # `NAMES_IN_BLOCK` allows — never by ten times anything.
+    assert len(long) - len(short) < 60, (short, long)
 
 
 # ── the three edits ────────────────────────────────────────────────────

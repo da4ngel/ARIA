@@ -17,7 +17,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { Sidebar, type Section } from '@/components/Sidebar'
 
-const SECTIONS: Section[] = ['history', 'voice', 'files', 'tools', 'memory', 'study', 'settings']
+const SECTIONS: Section[] = ['history', 'voice', 'files', 'clipboard', 'tools', 'memory', 'study', 'activity', 'settings']
 
 function rail(overrides: Partial<Parameters<typeof Sidebar>[0]> = {}) {
   return (
@@ -52,7 +52,9 @@ describe('every section is reachable', () => {
       files: 'Files',
       tools: 'Tools',
       memory: 'Memory',
-      study: 'Study',
+      clipboard: 'Clipboard',
+  study: 'Study',
+  activity: 'Activity',
       settings: 'Settings',
     }
     fireEvent.click(screen.getByText(labels[section]))

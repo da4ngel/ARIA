@@ -19,13 +19,14 @@ const PROVIDER_LABEL: Record<string, string> = {
   openai: 'OpenAI',
   gemini: 'Gemini',
   openrouter: 'OpenRouter (free tier)',
+  bedrock: 'Amazon Bedrock',
 }
 
 // Rendering maps over this array, so a provider missing from it is **invisible**
 // — there is no fallback that lists the leftovers. OpenRouter goes last: it is
 // the fallback tier, 50 requests a day, and nothing in it is routed to until it
 // has passed measurement.
-const PROVIDER_ORDER = ['ollama', 'openai', 'gemini', 'openrouter']
+const PROVIDER_ORDER = ['ollama', 'openai', 'gemini', 'bedrock', 'openrouter']
 
 const BIAS_LABEL: Record<RoutingBias, string> = {
   fastest: 'Fastest',

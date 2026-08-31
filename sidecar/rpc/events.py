@@ -98,6 +98,24 @@ class Event(StrEnum):
     #: faster. Confirmed with Eyaas before building it.
     MODE_SUGGESTED = "mode.suggested"
 
+    #: What the wake word scored a frame at, while calibration is armed.
+    #: `{score, threshold, fired}`.
+    #:
+    #: **Only while armed**, and it disarms itself. Frames arrive 12.5 times a
+    #: second and this runs beside Whisper, Kokoro and a 7B model; broadcasting
+    #: a number nobody is looking at, forever, is exactly the kind of cost
+    #: `VoiceAura` was rewritten to avoid.
+    WAKE_SCORE = "wake.score"
+
+    #: One step of a first-run download — an Ollama pull, the voice weights,
+    #: the wake word. `{what, received, total, percent, done, note}`.
+    #:
+    #: **A progress event, not a return value, because the work outlives the
+    #: RPC that starts it.** A 4.7GB pull answered as one reply would sit
+    #: silent for minutes, which is the failure the wizard exists to avoid —
+    #: and the IPC layer times out at 30s regardless.
+    SETUP_PROGRESS = "setup.progress"
+
     #: She needs a decision before she can carry on, and is offering the
     #: choices rather than a paragraph. Answered over the `question.answer`
     #: RPC; the turn is genuinely waiting, unlike `MODE_SUGGESTED`, which is

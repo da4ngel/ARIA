@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel
@@ -63,6 +63,12 @@ class RoutingRecord(BaseModel):
     latency_ms: int | None = None
     tool_called: str | None = None
     tool_ok: bool | None = None
+    # **None means nobody counted, and it is not the same as zero.**
+    # Every provider that reports usage populates these on the final delta;
+    # OpenRouter reports none at all. A turn recorded as 0 tokens would drag
+    # every average down and hide the fact that it went unmeasured.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class ModelVerdict(BaseModel):
@@ -98,8 +104,9 @@ class RoutingLog:
                     INSERT INTO routing_log
                         (message_id, session_id, model, provider, local, stage,
                          detail, bias, spoken, tool_shaped, chars, latency_ms,
-                         tool_called, tool_ok, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         tool_called, tool_ok, prompt_tokens, completion_tokens,
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.message_id,
@@ -116,6 +123,8 @@ class RoutingLog:
                         record.latency_ms,
                         record.tool_called,
                         None if record.tool_ok is None else int(record.tool_ok),
+                        record.prompt_tokens,
+                        record.completion_tokens,
                         _now(),
                     ),
                 )
@@ -224,3 +233,114 @@ class RoutingLog:
             )
             for r in rows
         ]
+
+    async def usage_since(self, since: str) -> dict[str, Any]:
+        """What has been spent since `since` (an ISO-8601 UTC stamp).
+
+        **Aggregates in SQL and prices in Python**, because the rates live in
+        `providers/pricing.py` and a price table inside a query is a price
+        table nobody can find. The query returns per-model rows; the caller
+        turns tokens into money.
+
+        `unpriced` is a first-class number rather than an omission: it is how
+        many turns had real tokens that no rate covers, and a dashboard that
+        hides it is a dashboard reporting a total it knows is short.
+        """
+
+        def _query(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            return conn.execute(
+                """
+                SELECT model,
+                       provider,
+                       MAX(local) AS local,
+                       COUNT(*) AS turns,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                       -- Turns where nobody reported usage. Counted separately
+                       -- from the token sums, which COALESCE to 0 and would
+                       -- otherwise make "no data" indistinguishable from "free".
+                       SUM(CASE WHEN prompt_tokens IS NULL
+                                 AND completion_tokens IS NULL
+                                THEN 1 ELSE 0 END) AS uncounted,
+                       COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+                FROM routing_log
+                WHERE created_at >= ?
+                GROUP BY model, provider
+                ORDER BY turns DESC
+                """,
+                (since,),
+            ).fetchall()
+
+        try:
+            rows = await self._db.run(_query)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("routing.usage_failed", error=str(exc))
+            return {"models": [], "turns": 0}
+
+        return {
+            "models": [
+                {
+                    "model": str(r["model"]),
+                    "provider": str(r["provider"]),
+                    "local": bool(r["local"]),
+                    "turns": int(r["turns"]),
+                    "prompt_tokens": int(r["prompt_tokens"]),
+                    "completion_tokens": int(r["completion_tokens"]),
+                    "uncounted": int(r["uncounted"]),
+                    "avg_latency_ms": round(float(r["avg_latency_ms"])),
+                }
+                for r in rows
+            ],
+            "turns": sum(int(r["turns"]) for r in rows),
+        }
+
+    async def recent_turns(self, limit: int = 20) -> list[dict[str, Any]]:
+        """The last few routing decisions, for "why did it pick that".
+
+        Everything needed to explain a turn is already in the row — `stage` and
+        `detail` are the router's own `RouteReason`, written so a row explains
+        itself without the code that produced it.
+        """
+
+        def _query(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            return conn.execute(
+                """
+                SELECT id, message_id, session_id, model, provider, local, stage,
+                       detail, bias, spoken, tool_shaped, chars, latency_ms,
+                       tool_called, tool_ok, prompt_tokens, completion_tokens,
+                       rating, created_at
+                FROM routing_log
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+
+        try:
+            rows = await self._db.run(_query)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("routing.recent_failed", error=str(exc))
+            return []
+        return [dict(r) for r in rows]
+
+    async def for_message(self, message_id: int) -> dict[str, Any] | None:
+        """The routing row that produced one message."""
+
+        def _query(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT * FROM routing_log WHERE message_id = ? ORDER BY id DESC LIMIT 1",
+                (message_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+        try:
+            return await self._db.run(_query)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("routing.lookup_failed", error=str(exc))
+            return None

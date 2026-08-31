@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -321,6 +322,10 @@ class Listener:
         self._bus = bus
         self.barge_in_enabled = barge_in
         self.armed_window_s = armed_window_s
+        #: Monotonic deadline for wake-score reporting. Zero means off, which
+        #: is what it always is unless somebody is looking at the calibration
+        #: step right now.
+        self._calibrating_until = 0.0
 
         self._state = ListenerState.OFF
         self._utterance: Utterance | None = None
@@ -333,6 +338,10 @@ class Listener:
         self._frames_since = time.monotonic()
         self._window: asyncio.Task[None] | None = None
         self._needs_name = True
+        #: Offered every transcript before the wake-phrase gate; returns
+        #: whether it was consumed as the answer to a spoken question.
+        #: Injected rather than reaching for `runtime`, so a test drives it.
+        self._answer_spoken: Callable[[str], bool] | None = None
         self._armed_until = 0.0
         # Whether sound is actually coming out of the speakers, reported by the
         # renderer that owns the audio graph.
@@ -358,6 +367,16 @@ class Listener:
     def mode(self) -> WakeMode:
         return self._mode
 
+    @property
+    def wake(self) -> WakeWord | None:
+        """The wake model, or None in PHRASE mode - which is the default.
+
+        Exposed so the threshold can be changed on a running listener rather
+        than only at construction. `None` is a real answer, not a failure:
+        PHRASE mode gates on the transcript and has no model at all.
+        """
+        return self._wake
+
     async def set_playing(self, playing: bool) -> None:
         """Told by the renderer when audio starts and stops coming out.
 
@@ -377,6 +396,16 @@ class Listener:
         if not playing:
             await self._unduck()
         log.debug("listener.playing", playing=playing)
+
+    def calibrate(self, seconds: float) -> None:
+        """Report wake scores on the bus for the next `seconds`.
+
+        **Self-disarming, and that is deliberate.** A flag somebody has to
+        turn off is one that gets left on — and this one broadcasts on every
+        frame, 12.5 times a second, beside Whisper and a 7B model. Zero
+        disarms it immediately, for closing the step.
+        """
+        self._calibrating_until = time.monotonic() + seconds if seconds > 0 else 0.0
 
     @property
     def wake_phrase(self) -> str:
@@ -507,7 +536,22 @@ class Listener:
         # `feed` returns 0.0 while debounced, so a single phrase cannot open
         # capture twice.
         frame = (np.clip(samples, -1.0, 1.0) * 32767).astype("int16")
-        if await self._wake.feed(frame) >= self._wake.threshold:
+        score = await self._wake.feed(frame)
+        fired = score >= self._wake.threshold
+        if self._calibrating_until > time.monotonic():
+            # **Only while calibration is armed.** A threshold is unpickable
+            # without seeing what your own voice in your own room actually
+            # scores, and the number is otherwise invisible — it exists for
+            # one frame inside this comparison and is thrown away.
+            await self._bus.broadcast(
+                Event.WAKE_SCORE,
+                {
+                    "score": round(score, 3),
+                    "threshold": self._wake.threshold,
+                    "fired": fired,
+                },
+            )
+        if fired:
             # The model firing *is* the confirmation, so this lights up
             # immediately and the transcript is not asked for the name again.
             await self._begin_capture(reason="wake", preroll=False, needs_name=False)
@@ -568,6 +612,10 @@ class Listener:
         if not needs_name:
             await self._bus.set_state(AssistantState.LISTENING)
         log.info("listener.capturing", reason=reason)
+
+    def set_answer_sink(self, sink: Callable[[str], bool] | None) -> None:
+        """Where a spoken answer to a pending question should go."""
+        self._answer_spoken = sink
 
     async def _rearm(self) -> bool:
         """Go back to waiting for the question, if there is time left on the
@@ -718,6 +766,18 @@ class Listener:
             log.info("listener.empty_transcript")
             if not await self._rearm():
                 await self._bus.set_state(AssistantState.IDLE)
+            return
+
+        # **She just asked something out loud, so an answer needs no name.**
+        # Checked before the wake-phrase gate for exactly that reason: with
+        # `_needs_name` still true, "the second one" would be dropped as
+        # room noise. `answer_from_speech` returns False when the utterance
+        # is not an answer, and it then falls through to the ordinary path —
+        # so changing the subject mid-quiz is not a trap.
+        if text and self._answer_spoken is not None and self._answer_spoken(text):
+            log.info("listener.answered_question", heard=text)
+            await self._bus.broadcast(Event.HEARD, {"text": text})
+            await self._bus.set_state(AssistantState.IDLE)
             return
 
         if self._mode is WakeMode.PHRASE and self._needs_name and not addressed:

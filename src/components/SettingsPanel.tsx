@@ -19,6 +19,13 @@ const KEY_LABEL: Record<string, string> = {
   openai_api_key: 'OpenAI',
   gemini_api_key: 'Gemini',
   openrouter_api_key: 'OpenRouter',
+  bedrock_api_key: 'Amazon Bedrock',
+  aws_access_key_id: 'AWS access key ID',
+  aws_secret_access_key: 'AWS secret access key',
+  aws_session_token: 'AWS session token',
+  imap_host: 'Mail server',
+  imap_user: 'Mail address',
+  imap_password: 'Mail app password',
   brave_api_key: 'Brave Search',
   tavily_api_key: 'Tavily',
 }
@@ -27,9 +34,33 @@ const KEY_HELP: Record<string, string> = {
   openai_api_key: 'platform.openai.com → API keys',
   gemini_api_key: 'aistudio.google.com/apikey',
   openrouter_api_key: 'openrouter.ai/keys — free models, 50 requests a day',
+  bedrock_api_key: 'console.aws.amazon.com/bedrock → API keys. This alone is enough.',
+  aws_access_key_id: 'Only if you have no Bedrock API key — an IAM key, signed instead.',
+  aws_secret_access_key: 'The secret half of the access key above. Both or neither.',
+  aws_session_token: 'Temporary credentials only. Leave empty for a normal IAM key.',
+  imap_host: "'gmail', 'outlook', or your own IMAP server's hostname",
+  imap_user: 'The address to sign in with',
+  imap_password: 'An APP password, not your account password. Read-only; she cannot send.',
   brave_api_key: 'brave.com/search/api — free tier',
   tavily_api_key: 'tavily.com — free tier, built for this',
 }
+
+// Where Bedrock offers text models today. Not exhaustive on purpose — a
+// complete list is thirty entries of noise, and these are the regions with
+// the widest model selection. `models.bedrock` accepts any string, so
+// nothing here limits what the sidecar can be pointed at.
+const BEDROCK_REGIONS = [
+  'us-east-1',
+  'us-east-2',
+  'us-west-2',
+  'eu-west-1',
+  'eu-west-2',
+  'eu-central-1',
+  'ap-south-1',
+  'ap-southeast-1',
+  'ap-southeast-2',
+  'ap-northeast-1',
+]
 
 /** Which keys are for reaching the web rather than for answering. */
 const SEARCH_KEYS = new Set(['brave_api_key', 'tavily_api_key'])
@@ -38,6 +69,12 @@ interface OnlineState {
   enabled: boolean
   backend: string | null
   key_present: boolean
+}
+
+/** `models.bedrock` — the region, and which credential shape is stored. */
+interface BedrockState {
+  region: string
+  credential: 'api_key' | 'sigv4' | 'none'
 }
 
 interface BrowserState {
@@ -134,16 +171,28 @@ export function SettingsPanel({
   onKeysChanged,
   mode,
   setMode,
+  onReopenSetup,
 }: {
   onClose: () => void
   onKeysChanged: () => void
   mode: PermissionMode
   setMode: (next: PermissionMode) => Promise<void>
+  /** Reopen the first-run wizard. It is the only place that offers the
+   *  model pull and the weight downloads, so it has to be reachable after
+   *  somebody has clicked past it once. */
+  onReopenSetup: () => void
 }): JSX.Element {
   const [keys, setKeys] = useState<CredentialStatus[]>([])
   const [online, setOnline] = useState<OnlineState | null>(null)
   const [browser, setBrowser] = useState<BrowserState | null>(null)
+  const [bedrock, setBedrock] = useState<BedrockState | null>(null)
   const [browserBusy, setBrowserBusy] = useState(false)
+  // **Read from the OS, never stored.** Auto-start lives in the registry's
+  // Run key; a copy kept here would still read as on after somebody turned
+  // it off in Task Manager. `null` until the first read answers.
+  const [autoStart, setAutoStart] = useState<boolean | null>(null)
+  const [diagnostics, setDiagnostics] = useState<string | null>(null)
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -152,6 +201,18 @@ export function SettingsPanel({
       setKeys(result.keys)
       setOnline(await window.aria.call<OnlineState>('settings.online', {}))
       setBrowser(await window.aria.call<BrowserState>('browser.setup', {}))
+      setBedrock(await window.aria.call<BedrockState>('models.bedrock', {}))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [])
+
+  const setRegion = useCallback(async (region: string) => {
+    try {
+      // The reply is authoritative: the sidecar normalises and stores it,
+      // and re-lists the models, because which models exist is a property
+      // of the region.
+      setBedrock(await window.aria.call<BedrockState>('models.bedrock', { region }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -195,6 +256,29 @@ export function SettingsPanel({
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    void window.aria.getAutoStart().then(setAutoStart)
+  }, [])
+
+  const toggleAutoStart = useCallback(async () => {
+    if (autoStart === null) return
+    // Take what the OS reports back rather than what was asked for: the write
+    // can fail (a policy, a locked registry) and a switch that shows the
+    // request instead of the result is a switch that lies.
+    setAutoStart(await window.aria.setAutoStart(!autoStart))
+  }, [autoStart])
+
+  const exportDiagnostics = useCallback(async () => {
+    setDiagnosticsBusy(true)
+    try {
+      // Naming the file is the whole point: an export whose location you have
+      // to go hunting for is one nobody attaches to the bug report.
+      setDiagnostics(await window.aria.exportDiagnostics())
+    } finally {
+      setDiagnosticsBusy(false)
+    }
+  }, [])
 
   const save = useCallback(
     async (key: string, value: string | null) => {
@@ -248,6 +332,48 @@ export function SettingsPanel({
         </p>
       </div>
 
+      {/* Start with Windows. Off by default — an assistant that installs
+          itself into your login without asking is one people uninstall. */}
+      {autoStart !== null && (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoStart}
+          aria-label="Start with Windows"
+          onClick={() => void toggleAutoStart()}
+          className={`rim interactive mb-4 flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left ${
+            autoStart ? 'bg-aria-accent/10' : 'raised'
+          }`}
+        >
+          <span className="min-w-0">
+            <span
+              className={`block text-small font-medium ${
+                autoStart ? 'text-aria-accent' : 'text-aria-text'
+              }`}
+            >
+              Start with Windows
+            </span>
+            <span className="mt-0.5 block text-micro text-aria-muted">
+              {autoStart
+                ? 'She starts in the tray at login. No window until you ask for one.'
+                : 'She only runs when you open her.'}
+            </span>
+          </span>
+          <span
+            aria-hidden
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+              autoStart ? 'bg-aria-accent/50' : 'bg-white/10'
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-aria-text transition-all ${
+                autoStart ? 'left-[1.125rem]' : 'left-0.5'
+              }`}
+            />
+          </span>
+        </button>
+      )}
+
       {/* Online mode next, because it is the only other switch here that
           changes what she can do rather than which model answers. */}
       {online && (
@@ -293,6 +419,36 @@ export function SettingsPanel({
             />
           </span>
         </button>
+      )}
+
+      {/* **Only once a Bedrock credential exists.** For everyone else this is
+          a region selector for a provider they do not use, and Settings is
+          already long. But for someone whose key was issued outside us-east-1
+          it is the difference between "every Bedrock model is greyed out" and
+          a working provider — the region is in the hostname, and a key is
+          refused outside the region that issued it. */}
+      {bedrock && bedrock.credential !== 'none' && (
+        <div className="rim raised mb-4 rounded-xl px-3 py-2.5">
+          <span className="block text-small font-medium text-aria-text">Amazon Bedrock</span>
+          <p className="mt-0.5 text-micro text-aria-muted">
+            Using {bedrock.credential === 'api_key' ? 'a Bedrock API key' : 'an AWS access key'}.
+            Models differ by region, and a key is refused outside the region that issued it.
+          </p>
+          <label className="mt-2 flex items-center gap-2 text-micro text-aria-dim">
+            Region
+            <select
+              value={bedrock.region}
+              onChange={(event) => void setRegion(event.target.value)}
+              className="rim interactive rounded-lg bg-aria-sunk px-2 py-1 text-micro text-aria-text"
+            >
+              {BEDROCK_REGIONS.map((region) => (
+                <option key={region} value={region}>
+                  {region}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       )}
 
       {/* browser_click/browser_fill/etc. connect to a browser that is
@@ -382,6 +538,48 @@ export function SettingsPanel({
       </p>
 
       {error && <p className="mt-2 text-tiny text-aria-bad">{error}</p>}
+
+      {/* The wizard is the only place that offers the model pull and the
+          weight downloads, and it is dismissible — so without this it would
+          be reachable exactly once per install. */}
+      <div className="rim raised mt-4 rounded-xl px-3 py-2.5">
+        <span className="block text-small font-medium text-aria-text">Setup</span>
+        <p className="mt-0.5 text-micro text-aria-muted">
+          What this machine has, and the downloads for what it does not — a local model, her
+          voice, the wake word.
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            onReopenSetup()
+            onClose()
+          }}
+          className="mt-2 rounded rim px-2 py-1 text-micro text-aria-muted hover:text-aria-text"
+        >
+          Open setup
+        </button>
+      </div>
+
+      {/* Last, because it is the thing you reach for when something else on
+          this page has already gone wrong. Also in the tray, for when the
+          window itself is the thing that is not working. */}
+      <div className="rim raised mt-4 rounded-xl px-3 py-2.5">
+        <span className="block text-small font-medium text-aria-text">Diagnostics</span>
+        <p className="mt-0.5 text-micro text-aria-muted">
+          A zip with the logs, health and versions — no API key values, no conversation.
+        </p>
+        <button
+          type="button"
+          disabled={diagnosticsBusy}
+          onClick={() => void exportDiagnostics()}
+          className="mt-2 rounded rim px-2 py-1 text-micro text-aria-muted hover:text-aria-text disabled:opacity-40"
+        >
+          {diagnosticsBusy ? 'Exporting…' : 'Export diagnostics'}
+        </button>
+        {diagnostics && (
+          <p className="mt-1.5 break-all text-micro text-aria-dim">Written to {diagnostics}</p>
+        )}
+      </div>
 
       <p className="mt-4 text-micro leading-relaxed text-aria-muted">
         Stored in Windows Credential Manager, never in the repo or a .env file. Only the last four

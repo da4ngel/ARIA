@@ -1,0 +1,75 @@
+# The installer. BUILD_SPEC §9 Phase 9's goal line is "One installer."
+#
+# Ordering is not optional: `extraResources` copies a PyInstaller bundle that
+# must already exist. `npm run dist` expresses that (dist:sidecar, then the
+# renderer build, then this) so it is not something to remember.
+
+appId: com.eyaas.aria
+productName: ARIA
+copyright: Copyright (c) 2026 Eyaas
+
+directories:
+  output: release
+  buildResources: resources
+
+# `out/**` is electron-vite's build (main, preload, renderer). Nothing else in
+# the repo belongs inside the app — the sidecar ships as an external resource.
+files:
+  - out/**
+  - package.json
+
+# `asar: true` is safe only because the sidecar is external. A packed archive
+# is not a real filesystem path, and `spawn` needs one.
+asar: true
+
+extraResources:
+  # Stage 2 resolves `process.resourcesPath/sidecar/aria-sidecar.exe`.
+  - from: packaging/dist/aria-sidecar
+    to: sidecar
+  # The window icon is loaded at runtime by path (`APP_ICON` in main.ts).
+  # `win.icon` below only dresses the .exe and the installer.
+  - from: resources
+    to: resources
+    filter:
+      - '**/*'
+
+win:
+  target: nsis
+  icon: resources/icon.ico
+  # There is no code-signing certificate for this project, so the installer
+  # will show a SmartScreen warning until reputation accrues. Stated here
+  # rather than discovered at install time.
+
+nsis:
+  # `oneClick: false` so there is a visible install location and an uninstall
+  # entry. `perMachine: false` keeps it per-user: no elevation prompt, and
+  # %LOCALAPPDATA% stays the right home for her data.
+  oneClick: false
+  perMachine: false
+  # **`allowToChangeInstallationDirectory` crashes the installer, and it was
+  # set to true here for a day.** Double-clicking `ARIA Setup 0.1.0.exe` died
+  # instantly with an access violation (0xc0000005) at offset 0x1581 in NSIS's
+  # own `System.dll` — no window, no message, nothing but three Application
+  # Error records in the event log.
+  #
+  # Diagnosed by bisection rather than by guessing, and the icon was the first
+  # suspect eliminated: `resources/icon.ico` is hand-written and every one of
+  # its seven images is PNG-compressed, which older tools do choke on. A
+  # two-line NSIS script compiled with that icon and a `System::Call` ran
+  # clean, so it was neither the icon nor the plugin.
+  #
+  #   `/S` (silent)                  -> exit 0, installs correctly
+  #   interactive, no directory page -> runs
+  #   interactive, directory page    -> access violation
+  #
+  # So it is the assisted installer's directory page specifically. Losing the
+  # folder picker costs little: `perMachine: false` already fixes the install
+  # under %LOCALAPPDATA%\Programs, which is the conventional per-user location
+  # and where the uninstall entry points. A crashing installer costs
+  # everything.
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ARIA
+  installerIcon: resources/icon.ico
+  uninstallerIcon: resources/icon.ico

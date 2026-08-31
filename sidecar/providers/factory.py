@@ -17,6 +17,7 @@ agreeing about what "openrouter" means.
 from __future__ import annotations
 
 from sidecar.providers.base import LLMProvider
+from sidecar.providers.bedrock import BedrockProvider
 from sidecar.providers.catalog import ModelInfo, ProviderName
 from sidecar.providers.gemini import GeminiProvider
 from sidecar.providers.ollama import OllamaProvider
@@ -38,6 +39,12 @@ def for_provider(name: ProviderName, *, ollama_url: str | None = None) -> LLMPro
         return GeminiProvider()
     if name is ProviderName.OPENROUTER:
         return OpenRouterProvider()
+    if name is ProviderName.BEDROCK:
+        # Constructed on the default region; `main.py` moves it to whatever
+        # Settings holds once the store is open. There is no settings access
+        # here, and there should not be — this file builds clients, and the
+        # gate scripts that call it have no database at all.
+        return BedrockProvider()
     raise ValueError(
         f"No client is built for provider {name!r}. Add one in providers/factory.py "
         f"— it is deliberately an error rather than a default."

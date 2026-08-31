@@ -19,7 +19,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { Orb } from '@/components/Orb'
 import type { AssistantState } from '@/types/bridge'
 
-export type Section = 'history' | 'voice' | 'files' | 'tools' | 'memory' | 'study' | 'settings'
+export type Section =
+  | 'history'
+  | 'voice'
+  | 'files'
+  | 'clipboard'
+  | 'tools'
+  | 'memory'
+  | 'study'
+  | 'activity'
+  | 'settings'
 
 const COLLAPSE_KEY = 'aria.sidebar.collapsed'
 
@@ -165,6 +174,14 @@ export function Sidebar({
         onClick={() => onSelect('files')}
       />
       <Item
+        icon={<IconClipboard />}
+        label="Clipboard"
+        collapsed={collapsed}
+        active={active === 'clipboard'}
+        disabled={!connected}
+        onClick={() => onSelect('clipboard')}
+      />
+      <Item
         icon={<IconTool />}
         label="Tools"
         collapsed={collapsed}
@@ -187,6 +204,14 @@ export function Sidebar({
         active={active === 'study'}
         disabled={!connected}
         onClick={() => onSelect('study')}
+      />
+      <Item
+        icon={<IconActivity />}
+        label="Activity"
+        collapsed={collapsed}
+        active={active === 'activity'}
+        disabled={!connected}
+        onClick={() => onSelect('activity')}
       />
 
       {/* The section's own content, in the menu rather than beside it. It
@@ -314,6 +339,23 @@ function IconHistory(): JSX.Element {
 /** An open book. The one glyph here that had to survive being 14px wide —
  *  a stack of pages reads as noise at that size, so it is two facing leaves
  *  and a spine, which is still a book at a glance. */
+function IconClipboard(): JSX.Element {
+  return (
+    <svg {...stroke} aria-hidden>
+      <rect x="4" y="3.5" width="8" height="11" rx="1.5" />
+      <path d="M6.5 3.5V2.5h3v1" />
+    </svg>
+  )
+}
+
+function IconActivity(): JSX.Element {
+  return (
+    <svg {...stroke} aria-hidden>
+      <path d="M2 12.5 5.5 6l3 4L11 4l3 8.5" />
+    </svg>
+  )
+}
+
 function IconStudy(): JSX.Element {
   return (
     <svg {...stroke} aria-hidden>

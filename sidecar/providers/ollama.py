@@ -14,7 +14,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 import structlog
@@ -84,6 +84,52 @@ def _tool_calls_of(message: dict[str, Any]) -> list[ToolCall]:
             )
         )
     return calls
+
+
+class PullProgress(NamedTuple):
+    """One line of `/api/pull`, in the terms a progress bar needs.
+
+    `total` is `None` on every status-only line — "pulling manifest",
+    "verifying sha256 digest", "success". A consumer that treated a missing
+    total as zero would slam the bar back to the start between layers.
+    """
+
+    status: str
+    completed: int | None
+    total: int | None
+    done: bool
+
+    @property
+    def percent(self) -> float | None:
+        if not self.total or self.completed is None:
+            return None
+        return round(min(1.0, self.completed / self.total) * 100, 1)
+
+
+def _parse_pull_line(line: str) -> PullProgress | None:
+    """One NDJSON line, or None for keep-alive blanks and unparseable noise."""
+    raw = line.strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # Ollama reports a failed pull in-band, with a 200 and an `error` key,
+    # so a status-only reader would call a missing model a success.
+    if error := payload.get("error"):
+        raise ProviderUnavailable(f"Ollama could not pull the model: {error}")
+    status = str(payload.get("status", ""))
+    completed = payload.get("completed")
+    total = payload.get("total")
+    return PullProgress(
+        status=status,
+        completed=int(completed) if isinstance(completed, int) else None,
+        total=int(total) if isinstance(total, int) else None,
+        done=status == "success",
+    )
 
 
 class OllamaProvider:
@@ -184,6 +230,39 @@ class OllamaProvider:
                     yield delta
                     if delta.done:
                         return
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(self._unreachable_message(exc)) from exc
+
+    async def pull(self, model: str) -> AsyncIterator[PullProgress]:
+        """Stream `POST /api/pull`, yielding progress as it lands.
+
+        **Nothing in this repo had ever called `/api/pull`.** The first-run
+        wizard is the reason it exists: telling somebody to open a terminal
+        and run `ollama pull qwen2.5:7b` is not a wizard, and a 4.7GB download
+        with no progress bar is indistinguishable from a hang.
+
+        The response is NDJSON, one object per line. Layer lines carry
+        `total`/`completed`; status-only lines ("pulling manifest",
+        "verifying sha256 digest", "success") carry neither, so a consumer
+        must not assume every line moves a bar.
+
+        **No timeout on the read.** The default `READ_TIMEOUT_S` is sized for
+        a chat token, and Ollama goes quiet between layers on a slow link —
+        a stalled connection is what `httpx` would report, and it would be
+        wrong. Cancellation is what stops this, not a clock.
+        """
+        try:
+            async with self._client.stream(
+                "POST",
+                "/api/pull",
+                json={"model": model, "stream": True},
+                timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
+            ) as response:
+                await self._raise_for_stream_status(response)
+                async for line in response.aiter_lines():
+                    progress = _parse_pull_line(line)
+                    if progress is not None:
+                        yield progress
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(self._unreachable_message(exc)) from exc
 

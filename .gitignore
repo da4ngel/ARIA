@@ -4,6 +4,8 @@ data/
 # Packaging output (Phase 9). The spec is source; a 464MB bundle is not.
 packaging/dist/
 packaging/build/
+# The installer itself. electron-builder's output directory.
+release/
 
 # Node
 node_modules/
@@ -32,3 +34,9 @@ Thumbs.db
 
 # TS incremental build info
 *.tsbuildinfo
+
+# Credential exports downloaded from AWS. The key is in Windows Credential
+# Manager once stored (BUILD_SPEC §11); the file must never reach the repo.
+*api-key*.csv
+*accessKeys*.csv
+credentials.csv
