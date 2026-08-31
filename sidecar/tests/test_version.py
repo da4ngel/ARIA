@@ -27,41 +27,47 @@ def _package_version() -> str:
     return str(json.loads((REPO_ROOT / "package.json").read_text(encoding="utf8"))["version"])
 
 
-def test_the_fallback_matches_package_json() -> None:
-    """**The drift guard.** Bump `package.json` and this fails until the
-    fallback follows, which is the only moment anybody would think to."""
-    assert handlers.FALLBACK_VERSION == _package_version()
+def test_the_reported_version_is_package_jsons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Derived, not restated.**
+
+    The first version of this asserted the *literal* equalled `package.json`
+    and went red when it did not. That was a real drift guard and it also
+    meant every release edited two files in lockstep, on the one action that
+    happens most often. Reading the manifest makes drift impossible rather
+    than merely detected — so a version bump is one line, and this asserts
+    the property that actually matters.
+    """
+    monkeypatch.delenv("ARIA_APP_VERSION", raising=False)
+    assert handlers._detect_version() == _package_version()  # noqa: SLF001
 
 
-def test_electron_wins_when_it_says_anything(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An installed app is whatever electron-updater last installed, and the
-    sidecar ships inside it — so the number Electron holds is the true one and
-    a stale constant must not override it."""
+def test_the_literal_is_only_for_a_frozen_run_with_no_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`--selftest` on the bundled exe is exactly this: frozen, no Electron,
+    and no `package.json` anywhere beside it."""
+    monkeypatch.delenv("ARIA_APP_VERSION", raising=False)
+    monkeypatch.setattr(handlers, "REPO_ROOT", tmp_path)
+
+    assert handlers._detect_version() == handlers.FALLBACK_VERSION  # noqa: SLF001
+
+
+def test_electron_wins_over_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once packaged, Electron is the only thing that knows.
+
+    The sidecar is frozen inside the app and cannot see `package.json` at
+    all — and after an update the app is whatever electron-updater last
+    installed, so a value read from anywhere else would be stale.
+    """
     monkeypatch.setenv("ARIA_APP_VERSION", "9.9.9")
-    import importlib
-
-    reloaded = importlib.reload(handlers)
-    try:
-        assert reloaded.SIDECAR_VERSION == "9.9.9"
-    finally:
-        # The module registers every RPC method at import, and a reload with
-        # the variable still set would leave the whole process reporting 9.9.9.
-        monkeypatch.delenv("ARIA_APP_VERSION", raising=False)
-        importlib.reload(handlers)
+    assert handlers._detect_version() == "9.9.9"  # noqa: SLF001
 
 
 def test_an_empty_value_falls_back_rather_than_reporting_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`ARIA_APP_VERSION=` is what a shell gives you for an unset variable it
-    still exports. Reporting "" as the version is worse than reporting a
-    slightly stale number."""
+    """`ARIA_APP_VERSION=` is what a shell gives you for a variable it exports
+    without setting. Reporting "" as the version is worse than reporting a
+    slightly stale one."""
     monkeypatch.setenv("ARIA_APP_VERSION", "")
-    import importlib
-
-    reloaded = importlib.reload(handlers)
-    try:
-        assert reloaded.SIDECAR_VERSION == handlers.FALLBACK_VERSION
-    finally:
-        monkeypatch.delenv("ARIA_APP_VERSION", raising=False)
-        importlib.reload(handlers)
+    assert handlers._detect_version() == _package_version()  # noqa: SLF001

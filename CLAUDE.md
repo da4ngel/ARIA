@@ -5528,6 +5528,23 @@ exists only because somebody typed `pip install` once are the same class of
 thing — a build that works because of the state of one computer. Both are
 guarded now, in `packaging.test.ts`.
 
+### The drift guard was right and the friction was wrong
+`SIDECAR_VERSION` first shipped as a literal with a test asserting it equalled
+`package.json` — a real guard, and it meant **every release had to edit two
+files in lockstep**, on the one action that happens most often. The first
+attempt at a version bump proved it: the commit said *"new version 1.1-tst"*
+and had not touched `package.json` at all.
+
+`_detect_version()` derives it instead — `ARIA_APP_VERSION` from Electron,
+then `package.json` on disk, then the literal. **Drift is now impossible
+rather than detected**, and a bump is one line. The literal survives for
+exactly one case: frozen *and* started without Electron, which is what
+`aria-sidecar-debug.exe --selftest` does.
+
+Worth keeping as a general point: a guard that makes the routine action
+harder gets worked around, and a value that can be *derived* should never be
+restated and then policed.
+
 ### The first green run shipped an update feed nobody could fetch
 Second run, every step **success**: the bundle built on a runner for the first
 time, `--selftest` passed on it, Publish succeeded, `v0.1.0` was tagged. And:

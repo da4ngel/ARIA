@@ -8,6 +8,7 @@ than a stub that pretends to work.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -23,26 +24,52 @@ log = structlog.get_logger(__name__)
 
 Handler = Callable[[dict[str, Any]], Awaitable[Any]]
 
+#: sidecar/rpc/handlers.py -> sidecar/rpc/ -> sidecar/ -> repo root.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 _METHODS: dict[str, Handler] = {}
 
 _STARTED_AT = time.monotonic()
 
-#: The version this build believes it is, for `system.health` and the
-#: diagnostics export.
-#:
-#: **Electron is authoritative, and this constant is the fallback.** It was a
-#: bare literal until auto-update existed, entirely independent of
-#: `package.json` - they agreed only by coincidence, and the first version bump
-#: would have separated them silently, leaving `system.health.version` and
-#: every exported diagnostic reporting a version nothing was running.
-#:
-#: `ARIA_APP_VERSION` comes from `app.getVersion()`, beside the `ARIA_TOKEN`
-#: and `ARIA_DATA_DIR` Electron already sets. The literal below is what
-#: `npm run sidecar` and the gate scripts get, which have no Electron at all -
-#: and `test_version.py` fails if it drifts from `package.json`, so the two
-#: cannot part company without the suite saying so.
+def _detect_version() -> str:
+    """The version this build is part of, from whichever source can know it.
+
+    **Three sources, in the order of who is actually in a position to be
+    right**, and the ordering is the whole design:
+
+    1. `ARIA_APP_VERSION`, set by Electron from `app.getVersion()`. Once
+       packaged this is the only thing that knows — the sidecar is frozen
+       inside the app and cannot see `package.json` at all.
+    2. `package.json` itself, for `npm run sidecar` and the gate scripts,
+       which have no Electron and do have the repo on disk.
+    3. The literal below, if neither is available.
+
+    **Reading `package.json` is what makes a version bump one line.** The
+    first version of this asserted the literal *equalled* `package.json` and
+    failed the suite when it did not — a real drift guard, and it also meant
+    every release needed two files edited in lockstep, on the one action that
+    happens most often. Making the value derive from the source instead makes
+    drift impossible rather than merely detected.
+    """
+    from_electron = os.environ.get("ARIA_APP_VERSION")
+    if from_electron:
+        return from_electron
+    try:
+        manifest = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf8"))
+        version = manifest.get("version")
+        if isinstance(version, str) and version:
+            return version
+    except (OSError, ValueError):
+        # Frozen, and started without Electron - `--selftest` does exactly
+        # this. There is no manifest beside a bundled exe.
+        pass
+    return FALLBACK_VERSION
+
+
+#: Last resort only: frozen *and* launched by something other than Electron.
+#: Every other path derives the version rather than restating it.
 FALLBACK_VERSION = "0.1.0"
-SIDECAR_VERSION = os.environ.get("ARIA_APP_VERSION") or FALLBACK_VERSION
+SIDECAR_VERSION = _detect_version()
 
 
 def method(name: str) -> Callable[[Handler], Handler]:

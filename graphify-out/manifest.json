@@ -40,7 +40,7 @@
     "semantic_hash": ""
   },
   "package.json": {
-    "mtime": 1788211894.2199469,
+    "mtime": 1788214803.5313945,
     "ast_hash": "41eb8dba74d6fa9d7aea423d1b9a255d",
     "semantic_hash": ""
   },
@@ -285,8 +285,8 @@
     "semantic_hash": ""
   },
   "sidecar/rpc/handlers.py": {
-    "mtime": 1788209814.8258502,
-    "ast_hash": "1ecfe359c0ab5f8b049dcf174824c35b",
+    "mtime": 1788214759.9893203,
+    "ast_hash": "49ed0ca0f963538b04910731d229efa5",
     "semantic_hash": ""
   },
   "sidecar/rpc/protocol.py": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1788213651.0503423,
-    "ast_hash": "b363108353e2733217ad8fc08204f387",
+    "mtime": 1788214944.5821896,
+    "ast_hash": "1a94d73040e33e7e6377ea72547cb132",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1620,8 +1620,8 @@
     "semantic_hash": ""
   },
   "sidecar/tests/test_version.py": {
-    "mtime": 1788209831.185184,
-    "ast_hash": "bf587d056aea41ce9c6efd0db253c368",
+    "mtime": 1788214790.405128,
+    "ast_hash": "c3355fa4e134b5fd4e80eba66859b233",
     "semantic_hash": ""
   },
   "src/hooks/useUpdates.ts": {
