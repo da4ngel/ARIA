@@ -1,6 +1,6 @@
 {
   "name": "aria",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first Windows AI assistant. Electron UI + Python sidecar brain.",
   "author": "Eyaas",
   "license": "UNLICENSED",
