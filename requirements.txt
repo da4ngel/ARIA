@@ -126,4 +126,7 @@ playwright==1.47.*
 # Phase 5  — apscheduler==3.10.*
 # Phase 6  — anthropic==0.39.* (NOT adopted — CLAUDE.md's provider strategy is
 #            OpenAI + Gemini only, Anthropic explicitly excluded)
-# Phase 9  — pyinstaller==6.10.*
+# Phase 9  — pyinstaller==6.10.*, and it landed: see requirements-dev.txt.
+#            It builds the bundle and is never imported by it, so it is a dev
+#            dependency — shipping it inside the thing it packages would be
+#            circular and would grow the bundle for nothing.

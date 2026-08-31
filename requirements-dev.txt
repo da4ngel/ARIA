@@ -6,3 +6,10 @@ pytest==8.3.*
 pytest-asyncio==0.24.*
 ruff==0.7.*
 mypy==1.13.*
+
+# Builds the frozen sidecar (`npm run dist:sidecar`). **Undeclared until
+# 2026-09-01**, sitting in requirements.txt's "deferred" comment block a week
+# after Phase 9 shipped and several bundles had been built from it — it had
+# been installed by hand and nobody moved the line. CI was the first machine
+# that did not already have it, and the first thing to notice.
+pyinstaller==6.10.*

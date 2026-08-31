@@ -5501,6 +5501,33 @@ and it is free because the repo is public.
   renderer-only update should be a fraction of that — **unmeasured until a
   second release exists**, and stated as an expectation rather than a result.
 
+### CI's first run failed, on a script that could only ever have worked here
+Every check passed on a clean Windows runner — `pytest`, `ruff`, `mypy`,
+`npm test`, `npm run typecheck`, the renderer build — **which is the first
+time this suite has run anywhere but Eyaas's machine**, and worth the workflow
+on its own. Then:
+
+    > .venv\Scripts\python.exe -m PyInstaller packaging/sidecar.spec ...
+    The system cannot find the path specified.
+
+**`dist:sidecar` hardcoded the virtualenv.** A runner has no `.venv`, only
+`python` on PATH. It is `python -m PyInstaller` now, which works in both
+places because Eyaas's shell profile activates the venv on open.
+
+And behind it, a second failure that would have been next: **PyInstaller was
+never declared.** It was still sitting in `requirements.txt`'s *"Deferred,
+with the phase that introduces each"* block — `# Phase 9 — pyinstaller==6.10.*` —
+a week after Phase 9 shipped and several bundles had been built from it. It
+had been installed by hand at some point and nobody moved the line. It is a
+**dev** dependency: it builds the bundle and is never imported by it, so
+shipping it inside the thing it packages would be circular.
+
+**Neither is a CI bug; both are the repo's, and only a second machine could
+find them.** A script that hardcodes an interpreter and a dependency that
+exists only because somebody typed `pip install` once are the same class of
+thing — a build that works because of the state of one computer. Both are
+guarded now, in `packaging.test.ts`.
+
 ### What is proven and what is not
 Wiring, ordering, drift and CI shape are all unit-tested and mutation-checked.
 **Nothing has run against a real release, because there are none** — the

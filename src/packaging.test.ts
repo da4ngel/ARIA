@@ -239,6 +239,23 @@ describe('updating itself', () => {
     expect(WORKFLOW).toContain('--publish always')
   })
 
+  it('builds the sidecar with whatever interpreter is present', () => {
+    // **`dist:sidecar` hardcoded `.venv\Scripts\python.exe`** and CI died on
+    // its first run with "The system cannot find the path specified" — a
+    // GitHub runner has no virtualenv, only `python` on PATH. Every check
+    // before it passed, which is what made it look like a build problem
+    // rather than a script that could only ever run on one machine.
+    expect(PACKAGE.scripts['dist:sidecar']).not.toContain('.venv')
+    expect(PACKAGE.scripts['dist:sidecar']).toContain('python -m PyInstaller')
+  })
+
+  it('declares the thing that builds the bundle', () => {
+    // PyInstaller sat in requirements.txt's "deferred" comment block for a
+    // week after Phase 9 shipped and several bundles had been built from it.
+    // It had been installed by hand; CI was the first machine that had not.
+    expect(read('requirements-dev.txt')).toMatch(/^pyinstaller==/m)
+  })
+
   it('runs the whole suite on every push, published or not', () => {
     for (const check of ['pytest sidecar/tests', 'ruff check sidecar', 'mypy sidecar', 'npm test']) {
       expect(WORKFLOW).toContain(check)

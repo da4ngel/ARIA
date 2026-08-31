@@ -12,7 +12,7 @@
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
-    "dist:sidecar": ".venv\\Scripts\\python.exe -m PyInstaller packaging/sidecar.spec --noconfirm --distpath packaging/dist --workpath packaging/build",
+    "dist:sidecar": "python -m PyInstaller packaging/sidecar.spec --noconfirm --distpath packaging/dist --workpath packaging/build",
     "dist": "npm run build && electron-builder --win --publish never"
   },
   "dependencies": {
