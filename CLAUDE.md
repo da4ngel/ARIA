@@ -5528,6 +5528,28 @@ exists only because somebody typed `pip install` once are the same class of
 thing — a build that works because of the state of one computer. Both are
 guarded now, in `packaging.test.ts`.
 
+### The first green run shipped an update feed nobody could fetch
+Second run, every step **success**: the bundle built on a runner for the first
+time, `--selftest` passed on it, Publish succeeded, `v0.1.0` was tagged. And:
+
+    GET releases/latest/download/latest.yml  ->  404
+    GET /repos/da4ngel/ARIA/releases         ->  []
+
+**electron-builder publishes a *draft* by default**, and a draft is invisible
+to everyone not signed in as the owner — including electron-updater, which
+reads `latest.yml` off the latest *published* release. So auto-update would
+have found nothing, forever, with nothing anywhere red to say so.
+
+**A pipeline that reports "published" and ships a feed nobody can reach is
+worse than one that fails.** `releaseType: release` is written out with the
+reason, and `packaging.test.ts` holds it — the same treatment
+`verifyUpdateCodeSignature` got, and for the same reason: the defaults that
+matter most here are the ones nothing surfaces.
+
+It is also why the tag gate needs watching. The tag exists now, so CI will
+never rebuild 0.1.0 — the draft has to be published by hand once, and the next
+version proves the rest.
+
 ### What is proven and what is not
 Wiring, ordering, drift and CI shape are all unit-tested and mutation-checked.
 **Nothing has run against a real release, because there are none** — the

@@ -40,8 +40,8 @@
     "semantic_hash": ""
   },
   "package.json": {
-    "mtime": 1788209911.7493715,
-    "ast_hash": "ef8c74135d9377b02c9c51f40c23cc18",
+    "mtime": 1788211894.2199469,
+    "ast_hash": "41eb8dba74d6fa9d7aea423d1b9a255d",
     "semantic_hash": ""
   },
   "postcss.config.js": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1788210835.2837033,
-    "ast_hash": "ff47455508f76a6d461818fcfa262015",
+    "mtime": 1788213651.0503423,
+    "ast_hash": "b363108353e2733217ad8fc08204f387",
     "semantic_hash": ""
   },
   "README.md": {
@@ -670,14 +670,14 @@
     "semantic_hash": "7f3036e5be16e741935bb1d6ae5d4527"
   },
   "requirements-dev.txt": {
-    "mtime": 1785980392.2560337,
-    "ast_hash": "0c2fa5f74b736f3f9612d163fffaa83e",
-    "semantic_hash": "0c2fa5f74b736f3f9612d163fffaa83e"
+    "mtime": 1788211894.218413,
+    "ast_hash": "4e569d9f9c2b91d8182a14b878ef1c2a",
+    "semantic_hash": ""
   },
   "requirements.txt": {
-    "mtime": 1786608427.3023033,
-    "ast_hash": "b50325bee7a4c9443f61a2a64246283a",
-    "semantic_hash": "b50325bee7a4c9443f61a2a64246283a"
+    "mtime": 1788211894.2179081,
+    "ast_hash": "2f2d0e7dbe64e3c847372f7c27e0f4da",
+    "semantic_hash": ""
   },
   "scripts/gate_tool_selection.py": {
     "mtime": 1787105641.9210424,
@@ -1555,13 +1555,13 @@
     "semantic_hash": ""
   },
   "src/packaging.test.ts": {
-    "mtime": 1788210200.988767,
-    "ast_hash": "cf952bb53301de04b38c889ac8bfd6e3",
+    "mtime": 1788213631.3265946,
+    "ast_hash": "d5f8801e552bc5abbf2a0f648dee827f",
     "semantic_hash": ""
   },
   "electron-builder.yml": {
-    "mtime": 1788210136.7653196,
-    "ast_hash": "614ebe63ecccbaf7ebc94f78e1f4f373",
+    "mtime": 1788213631.1985333,
+    "ast_hash": "1fdcb63e0c34de5603cc09ce91e41d37",
     "semantic_hash": ""
   },
   "sidecar/core/setup.py": {

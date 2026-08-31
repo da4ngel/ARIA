@@ -41,6 +41,20 @@ publish:
   provider: github
   owner: da4ngel
   repo: ARIA
+  # **Without this the whole feature is silently dead.** electron-builder
+  # publishes a *draft* by default, and a draft is invisible to everyone who
+  # is not signed in as the owner — including electron-updater, which reads
+  # `latest.yml` off the latest *published* release.
+  #
+  # Observed exactly that on the first green run: every step succeeded,
+  # `v0.1.0` was tagged, the Publish step reported success, and
+  # `releases/latest/download/latest.yml` returned **404**. A pipeline that
+  # says "published" and ships a feed nobody can fetch is worse than one that
+  # fails, because nothing anywhere is red.
+  #
+  # A draft would also mean a manual click per release, which is the opposite
+  # of what this was built for.
+  releaseType: release
 
 win:
   target: nsis

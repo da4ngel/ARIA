@@ -266,6 +266,15 @@ describe('updating itself', () => {
     expect(BUILDER).toContain('provider: github')
     expect(BUILDER).toContain('owner: da4ngel')
   })
+
+  it('publishes a real release, not a draft', () => {
+    // **The one that makes the difference between working and silently
+    // dead.** electron-builder drafts by default, and a draft is invisible
+    // to electron-updater — which reads `latest.yml` off the latest
+    // *published* release. Observed: a fully green run, a pushed tag, a
+    // successful Publish step, and a 404 on the update feed.
+    expect(BUILDER).toContain('releaseType: release')
+  })
 })
 
 describe('the installer', () => {
