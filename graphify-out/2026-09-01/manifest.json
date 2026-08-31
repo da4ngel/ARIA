@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1788204992.8882854,
-    "ast_hash": "7fb1d0e5fc743f907b327ba0782a8466",
+    "mtime": 1788205491.924915,
+    "ast_hash": "ae0f221c08315d89d23545a95a8f1073",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1295,13 +1295,13 @@
     "semantic_hash": ""
   },
   "sidecar/tests/test_study_tools.py": {
-    "mtime": 1788204693.6507072,
-    "ast_hash": "ffa6d592cc293021beec319c40ca93e0",
+    "mtime": 1788205322.713457,
+    "ast_hash": "72bb1887e7ec3a4df09b26dc5407ce31",
     "semantic_hash": ""
   },
   "sidecar/tools/study.py": {
-    "mtime": 1788004838.3331475,
-    "ast_hash": "a605f1943a5bfc59d5ad3e69deb62910",
+    "mtime": 1788205335.9242682,
+    "ast_hash": "0754b07f12dd0fd27c9df912cb623312",
     "semantic_hash": ""
   },
   "sidecar/core/study_modes.py": {

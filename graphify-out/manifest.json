@@ -10,8 +10,8 @@
     "semantic_hash": "d98cc836d2537dec9b922b4fddda9a4b"
   },
   "electron/main.ts": {
-    "mtime": 1788161999.2743578,
-    "ast_hash": "d5e317a04faa96443e2b55bb1dfb4233",
+    "mtime": 1788210223.7329297,
+    "ast_hash": "631d6ad37fdb6bf031a887f200f56fd1",
     "semantic_hash": ""
   },
   "electron/overlay.ts": {
@@ -20,8 +20,8 @@
     "semantic_hash": ""
   },
   "electron/preload.ts": {
-    "mtime": 1788159694.97318,
-    "ast_hash": "f9cdce4b29220fc4be177abd9805accb",
+    "mtime": 1788210024.5527637,
+    "ast_hash": "db2f3b8ddf2f520f5a533ad37e718586",
     "semantic_hash": ""
   },
   "electron/rpc.ts": {
@@ -30,8 +30,8 @@
     "semantic_hash": "6a64ddee1c56aef69c5ed96f16a9bbe2"
   },
   "electron/sidecar.ts": {
-    "mtime": 1788203050.7722752,
-    "ast_hash": "e4754cd4f1afda22ea78733bc73166fb",
+    "mtime": 1788209981.934286,
+    "ast_hash": "8f869c1394ada11fcd917b244efefcf1",
     "semantic_hash": ""
   },
   "electron/tray.ts": {
@@ -40,8 +40,8 @@
     "semantic_hash": ""
   },
   "package.json": {
-    "mtime": 1788159320.26958,
-    "ast_hash": "2707e17ec87a609ad7f21e211fa05d97",
+    "mtime": 1788209911.7493715,
+    "ast_hash": "ef8c74135d9377b02c9c51f40c23cc18",
     "semantic_hash": ""
   },
   "postcss.config.js": {
@@ -285,8 +285,8 @@
     "semantic_hash": ""
   },
   "sidecar/rpc/handlers.py": {
-    "mtime": 1788166757.7063394,
-    "ast_hash": "f69e22a728425fb9892f82b6cbc1d766",
+    "mtime": 1788209814.8258502,
+    "ast_hash": "1ecfe359c0ab5f8b049dcf174824c35b",
     "semantic_hash": ""
   },
   "sidecar/rpc/protocol.py": {
@@ -515,8 +515,8 @@
     "semantic_hash": ""
   },
   "src/components/SettingsPanel.tsx": {
-    "mtime": 1788162164.6209462,
-    "ast_hash": "bac9afdfc7482eca9d97ab2d240470a7",
+    "mtime": 1788210076.628879,
+    "ast_hash": "e134d6b3fa0324cfe2c39ca93d28275f",
     "semantic_hash": ""
   },
   "src/components/Shortcuts.tsx": {
@@ -620,8 +620,8 @@
     "semantic_hash": "5a66ef3ff2c27cdc3861acc826b43cdc"
   },
   "src/types/bridge.d.ts": {
-    "mtime": 1788159694.9917822,
-    "ast_hash": "902eda36994cc1cb665ab7769ce230c2",
+    "mtime": 1788210024.5527637,
+    "ast_hash": "751b1e6ebf25771b3890a892bfcdeb86",
     "semantic_hash": ""
   },
   "tsconfig.json": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1788205491.924915,
-    "ast_hash": "ae0f221c08315d89d23545a95a8f1073",
+    "mtime": 1788210835.2837033,
+    "ast_hash": "ff47455508f76a6d461818fcfa262015",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1169,11 +1169,6 @@
     "ast_hash": "2284a5afaa59fa0c960e9ba904cd8d4c",
     "semantic_hash": ""
   },
-  "image.png": {
-    "mtime": 1787501492.2511952,
-    "ast_hash": "1e7b331f86abe1e9e7dfe27bc542a192",
-    "semantic_hash": ""
-  },
   "sidecar/tests/test_probes.py": {
     "mtime": 1787114505.6146097,
     "ast_hash": "5012a7c3bc2afd89c2e39ac84fc6f5d4",
@@ -1560,13 +1555,13 @@
     "semantic_hash": ""
   },
   "src/packaging.test.ts": {
-    "mtime": 1788202990.4482205,
-    "ast_hash": "4deb3415e30bb34747e84674b5d80fb9",
+    "mtime": 1788210200.988767,
+    "ast_hash": "cf952bb53301de04b38c889ac8bfd6e3",
     "semantic_hash": ""
   },
   "electron-builder.yml": {
-    "mtime": 1788159320.164022,
-    "ast_hash": "bf2134584d0f52a6074ba31d171cba82",
+    "mtime": 1788210136.7653196,
+    "ast_hash": "614ebe63ecccbaf7ebc94f78e1f4f373",
     "semantic_hash": ""
   },
   "sidecar/core/setup.py": {
@@ -1615,8 +1610,28 @@
     "semantic_hash": ""
   },
   "electron/sidecar.test.ts": {
-    "mtime": 1788203107.9388034,
-    "ast_hash": "64c1cdc9d54a3b9fda30cb5e1f42f5c4",
+    "mtime": 1788209996.6984282,
+    "ast_hash": "14ee01576f2c896d641716abc821e974",
+    "semantic_hash": ""
+  },
+  "electron/updater.ts": {
+    "mtime": 1788209901.100106,
+    "ast_hash": "fae89705be07e12e6a7b425689125244",
+    "semantic_hash": ""
+  },
+  "sidecar/tests/test_version.py": {
+    "mtime": 1788209831.185184,
+    "ast_hash": "bf587d056aea41ce9c6efd0db253c368",
+    "semantic_hash": ""
+  },
+  "src/hooks/useUpdates.ts": {
+    "mtime": 1788210048.1846218,
+    "ast_hash": "b23f7665407e191074ca31a2e22dcbcc",
+    "semantic_hash": ""
+  },
+  ".github/workflows/release.yml": {
+    "mtime": 1788210116.236487,
+    "ast_hash": "e96542ad15305c7ac8964df66e7f3dd6",
     "semantic_hash": ""
   }
 }

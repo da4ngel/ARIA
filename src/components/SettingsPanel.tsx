@@ -9,11 +9,13 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
+import { useUpdates } from '@/hooks/useUpdates'
+
 import type { PermissionMode } from '@/hooks/usePermissionMode'
 import { MODE_COPY, MODE_OPTIONS } from '@/hooks/usePermissionMode'
 
 import { Panel } from '@/components/Panel'
-import type { CredentialStatus } from '@/types/bridge'
+import type { CredentialStatus, UpdateStatus } from '@/types/bridge'
 
 const KEY_LABEL: Record<string, string> = {
   openai_api_key: 'OpenAI',
@@ -166,6 +168,29 @@ function KeyRow({ status, onSave }: RowProps): JSX.Element {
   )
 }
 
+/** One line per state, so the card never shows two things at once. */
+function updateLine(status: UpdateStatus | null): string {
+  if (!status) return 'Reading the current version…'
+  switch (status.state) {
+    case 'checking':
+      return 'Looking for a newer version…'
+    case 'available':
+      return `Version ${status.next} found. Downloading it now.`
+    case 'downloading':
+      return `Downloading version ${status.next ?? ''} — ${status.percent ?? 0}%`
+    case 'ready':
+      return `Version ${status.next} is ready. It installs when you next quit, or restart now.`
+    case 'none':
+      return 'Up to date.'
+    case 'error':
+      // Named rather than hidden: "no network" and "the release is broken"
+      // are different problems and only the message tells them apart.
+      return status.message ?? 'The check did not complete.'
+    default:
+      return 'Checked automatically, and whenever you ask.'
+  }
+}
+
 export function SettingsPanel({
   onClose,
   onKeysChanged,
@@ -191,6 +216,7 @@ export function SettingsPanel({
   // Run key; a copy kept here would still read as on after somebody turned
   // it off in Task Manager. `null` until the first read answers.
   const [autoStart, setAutoStart] = useState<boolean | null>(null)
+  const updates = useUpdates()
   const [diagnostics, setDiagnostics] = useState<string | null>(null)
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -400,7 +426,7 @@ export function SettingsPanel({
                   describe, and the one a user would otherwise debug by asking
                   her a question and reading the refusal. */}
               {!online.enabled
-                ? 'She cannot reach the web. Nothing you say leaves this machine.'
+                ? 'She cannot reach the web. Nothing you say leaves this machine — though ARIA still checks GitHub for its own updates.'
                 : online.key_present
                   ? `She can search the web and read pages. Using ${online.backend}.`
                   : 'Add a Tavily or Brave key below — the switch alone cannot search.'}
@@ -538,6 +564,40 @@ export function SettingsPanel({
       </p>
 
       {error && <p className="mt-2 text-tiny text-aria-bad">{error}</p>}
+
+      {/* Updates, above Setup: it is the one card here whose state changes on
+          its own, and the running version is the first thing anybody looks
+          for when something is behaving oddly. */}
+      <div className="rim raised mt-4 rounded-xl px-3 py-2.5">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-small font-medium text-aria-text">Updates</span>
+          <span className="text-micro text-aria-faint">
+            {updates.status ? `v${updates.status.current}` : ''}
+          </span>
+        </div>
+        <p className="mt-0.5 text-micro text-aria-muted">{updateLine(updates.status)}</p>
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            disabled={updates.busy || updates.status?.state === 'downloading'}
+            onClick={() => void updates.check()}
+            className="rounded rim px-2 py-1 text-micro text-aria-muted hover:text-aria-text disabled:opacity-40"
+          >
+            {updates.busy ? 'Checking…' : 'Check for updates'}
+          </button>
+          {/* Only ever an offer. Quitting normally installs it anyway, so
+              nobody has to click this to end up updated. */}
+          {updates.status?.state === 'ready' && (
+            <button
+              type="button"
+              onClick={() => void updates.install()}
+              className="interactive rounded bg-aria-accent/90 px-2 py-1 text-micro text-white"
+            >
+              Restart now
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* The wizard is the only place that offers the model pull and the
           weight downloads, and it is dismissible — so without this it would

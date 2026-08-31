@@ -51,6 +51,8 @@ const BUILDER = read('electron-builder.yml')
 const CONFIG_PY = read('sidecar/config.py')
 const PACKAGE = JSON.parse(read('package.json')) as {
   scripts: Record<string, string>
+  dependencies: Record<string, string>
+  devDependencies?: Record<string, string>
 }
 
 describe('where the data lives', () => {
@@ -189,6 +191,63 @@ describe('the first run', () => {
     // do — into an ONNX parse error on every launch, which does not.
     expect(SETUP_PY).toContain('target.with_name(target.name + ".part")')
     expect(SETUP_PY).toContain('partial.replace(target)')
+  })
+})
+
+describe('updating itself', () => {
+  const UPDATER = read('electron/updater.ts')
+  const WORKFLOW = read('.github/workflows/release.yml')
+
+  it('requires electron-updater at runtime, not as a build tool', () => {
+    // Main `require`s it when the app launches, so it has to be a production
+    // dependency — electron-builder only bundles those into the asar.
+    expect(PACKAGE.dependencies).toHaveProperty('electron-updater')
+    expect(PACKAGE.devDependencies ?? {}).not.toHaveProperty('electron-updater')
+  })
+
+  it('stops and waits for the sidecar before installing', () => {
+    // **The one thing electron-updater cannot know.** The installer
+    // overwrites `resources/sidecar/aria-sidecar.exe`, and Windows will not
+    // overwrite a file a live process still holds open — so a plain `stop()`,
+    // which only sends a kill, races the installer into a half-updated app.
+    const install = MAIN.slice(MAIN.indexOf('async function installUpdate'))
+    const body = install.slice(0, install.indexOf('\n}'))
+    expect(body).toContain('await sidecar.stopAndWait()')
+    expect(body.indexOf('stopAndWait')).toBeLessThan(body.indexOf('quitAndInstall'))
+  })
+
+  it('offers a restart rather than taking one', () => {
+    // Decided with Eyaas: download quietly, then offer. `autoInstallOnAppQuit`
+    // is what makes somebody who never clicks the button still end up
+    // updated, without anything interrupting a conversation.
+    expect(UPDATER).toContain('autoDownload = true')
+    expect(UPDATER).toContain('autoInstallOnAppQuit = true')
+  })
+
+  it('does nothing in a development build', () => {
+    // electron-updater throws without an installed app, and that throw would
+    // come out of the module import rather than a call.
+    expect(UPDATER).toContain('if (!this.supported) return')
+    expect(UPDATER).toContain('app.isPackaged')
+  })
+
+  it('publishes only a version nobody has released', () => {
+    // Gated on the tag, not on a diff, so a job that fails halfway can be
+    // re-run without shipping twice.
+    expect(WORKFLOW).toContain('refs/tags/v$version')
+    expect(WORKFLOW).toContain("if: steps.gate.outputs.publish == 'true'")
+    expect(WORKFLOW).toContain('--publish always')
+  })
+
+  it('runs the whole suite on every push, published or not', () => {
+    for (const check of ['pytest sidecar/tests', 'ruff check sidecar', 'mypy sidecar', 'npm test']) {
+      expect(WORKFLOW).toContain(check)
+    }
+  })
+
+  it('says where updates come from instead of inferring it', () => {
+    expect(BUILDER).toContain('provider: github')
+    expect(BUILDER).toContain('owner: da4ngel')
   })
 })
 

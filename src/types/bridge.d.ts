@@ -20,6 +20,17 @@ export interface SidecarEvent {
   params: Record<string, unknown>
 }
 
+/** Mirrors `electron/updater.ts`. One shape, so the card never has to infer
+ *  a state from a combination of fields. */
+export interface UpdateStatus {
+  state: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'none' | 'error'
+  /** The running version, always. */
+  current: string
+  next?: string
+  percent?: number
+  message?: string
+}
+
 /** A row from the `messages` table, as `chat.history` returns it. */
 export interface StoredMessage {
   id: number
@@ -256,6 +267,13 @@ export interface AriaApi {
   isMaximized: () => Promise<boolean>
   /** Including when the OS did it — Win+Up, snap, a double click. */
   onWindowMaximized: (handler: (maximized: boolean) => void) => Unsubscribe
+  /** The running version and where an update has got to. */
+  updateStatus: () => Promise<UpdateStatus>
+  checkForUpdates: () => Promise<UpdateStatus>
+  /** Quit and install. Stops the sidecar and waits for it first — the
+   *  installer overwrites the sidecar's own exe. */
+  installUpdate: () => Promise<void>
+  onUpdateStatus: (handler: (status: UpdateStatus) => void) => Unsubscribe
   /** Write a diagnostics zip (logs, health, versions — never a credential
    *  value) and resolve with its path, or null if the sidecar is down. */
   exportDiagnostics: () => Promise<string | null>

@@ -8,6 +8,8 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
+import type { UpdateStatus } from './updater'
+
 export type BrainStatus =
   | 'starting'
   | 'connecting'
@@ -100,6 +102,24 @@ const api = {
   /** Mode changes, including ones main initiates. */
   onWindowMode: (handler: (expanded: boolean) => void): Unsubscribe =>
     subscribe('aria:window-mode', handler),
+
+  /** What the updater last reported. The card renders this shape directly. */
+  updateStatus: (): Promise<UpdateStatus> =>
+    ipcRenderer.invoke('aria:update-status') as Promise<UpdateStatus>,
+
+  /** The button. Resolves with whatever the check ended on. */
+  checkForUpdates: (): Promise<UpdateStatus> =>
+    ipcRenderer.invoke('aria:check-for-updates') as Promise<UpdateStatus>,
+
+  /** Quit and install what was downloaded. **Stops the sidecar and waits for
+   *  it first** — the installer overwrites the sidecar's own exe, and Windows
+   *  will not overwrite a file a live process holds open. */
+  installUpdate: (): Promise<void> => ipcRenderer.invoke('aria:install-update') as Promise<void>,
+
+  /** Checking, downloading, ready — pushed as it happens, so the card is not
+   *  polling a six-hour timer. */
+  onUpdateStatus: (handler: (status: UpdateStatus) => void): Unsubscribe =>
+    subscribe('aria:update-status', handler),
 
   /** Write a diagnostics zip and resolve with its path, or null if the
    *  sidecar could not be reached — which is itself worth reporting. */

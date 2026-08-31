@@ -26,7 +26,23 @@ Handler = Callable[[dict[str, Any]], Awaitable[Any]]
 _METHODS: dict[str, Handler] = {}
 
 _STARTED_AT = time.monotonic()
-SIDECAR_VERSION = "0.1.0"
+
+#: The version this build believes it is, for `system.health` and the
+#: diagnostics export.
+#:
+#: **Electron is authoritative, and this constant is the fallback.** It was a
+#: bare literal until auto-update existed, entirely independent of
+#: `package.json` - they agreed only by coincidence, and the first version bump
+#: would have separated them silently, leaving `system.health.version` and
+#: every exported diagnostic reporting a version nothing was running.
+#:
+#: `ARIA_APP_VERSION` comes from `app.getVersion()`, beside the `ARIA_TOKEN`
+#: and `ARIA_DATA_DIR` Electron already sets. The literal below is what
+#: `npm run sidecar` and the gate scripts get, which have no Electron at all -
+#: and `test_version.py` fails if it drifts from `package.json`, so the two
+#: cannot part company without the suite saying so.
+FALLBACK_VERSION = "0.1.0"
+SIDECAR_VERSION = os.environ.get("ARIA_APP_VERSION") or FALLBACK_VERSION
 
 
 def method(name: str) -> Callable[[Handler], Handler]:

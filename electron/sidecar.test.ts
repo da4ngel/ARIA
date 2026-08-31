@@ -24,6 +24,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spawn = vi.fn()
 
+/** How the fake child's `exit` listener is delivered. Tests that care about
+ *  the wait swap this out; the rest never register one. */
+let exitHook: (handler: () => void) => void = () => {}
+
 vi.mock('node:child_process', () => ({
   spawn: (...args: unknown[]) => {
     spawn(...args)
@@ -33,8 +37,13 @@ vi.mock('node:child_process', () => ({
       stdout: null,
       stderr: null,
       on: () => {},
+      once: (event: string, handler: () => void) => {
+        if (event === 'exit') exitHook(handler)
+      },
       removeAllListeners: () => {},
       kill: () => {},
+      exitCode: null,
+      signalCode: null,
     }
   },
 }))
@@ -56,6 +65,7 @@ function build(frozenExe: string | null) {
     host: '127.0.0.1',
     port: 8765,
     dev: frozenExe === null,
+    appVersion: '1.2.3',
     onReady: () => {},
     onDown: () => {},
   })
@@ -63,8 +73,47 @@ function build(frozenExe: string | null) {
 
 beforeEach(() => {
   spawn.mockClear()
+  exitHook = () => {}
   // Nothing is listening, so `start()` spawns rather than adopting.
   vi.stubGlobal('fetch', () => Promise.reject(new Error('nothing there')))
+})
+
+describe('stopping before an update installs', () => {
+  it('waits for the process to actually be gone', async () => {
+    // **The whole reason `stopAndWait` exists.** `quitAndInstall` runs the
+    // NSIS installer, which overwrites `resources/sidecar/aria-sidecar.exe` —
+    // and Windows will not overwrite a file a live process still holds open.
+    // `stop()` sends a kill and returns immediately, so a plain `stop()`
+    // before installing races the installer into a half-updated app.
+    const fired: Array<() => void> = []
+    exitHook = (handler) => fired.push(handler)
+    const sidecar = build(null)
+    await sidecar.start()
+
+    let settled = false
+    const waiting = sidecar.stopAndWait(10_000).then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    for (const handler of fired) handler()
+    await waiting
+    expect(settled).toBe(true)
+  })
+
+  it('gives up rather than blocking the quit forever', async () => {
+    // A kill that never completes must not be the thing that stops somebody
+    // quitting. The timeout bounds the wait; it is not a claim about the
+    // process.
+    exitHook = () => {}
+    const sidecar = build(null)
+    await sidecar.start()
+
+    const started = Date.now()
+    await sidecar.stopAndWait(60)
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
 })
 
 describe('what the sidecar spawns', () => {
@@ -92,6 +141,17 @@ describe('what the sidecar spawns', () => {
     expect(command).toBe('C:\\app\\resources\\sidecar\\aria-sidecar.exe')
     expect(args).toEqual([])
     expect(options.cwd).toBe('C:\\data')
+  })
+
+  it('tells the sidecar which version it is part of', async () => {
+    // The sidecar cannot see `package.json` once frozen, so without this its
+    // own constant drifts the first time auto-update bumps a version and
+    // `system.health` starts naming a build nobody is running.
+    const sidecar = build(null)
+    await sidecar.start()
+    sidecar.stop()
+    const options = spawn.mock.calls[0][2] as { env: Record<string, string> }
+    expect(options.env.ARIA_APP_VERSION).toBe('1.2.3')
   })
 
   it('tells the sidecar where its data lives, in both builds', async () => {

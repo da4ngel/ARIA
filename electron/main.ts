@@ -22,6 +22,7 @@ import {
 import { type BrainStatus, RpcClient, type RpcNotification } from './rpc'
 import { createOverlay, type OverlayHandle } from './overlay'
 import { Sidecar } from './sidecar'
+import { Updater, type UpdateStatus } from './updater'
 import { createTray, type TrayHandle } from './tray'
 
 const WINDOW_WIDTH = 420
@@ -152,6 +153,7 @@ const sidecar = new Sidecar({
   host: '127.0.0.1',
   port: 8765,
   dev: isDev,
+  appVersion: app.getVersion(),
   onReady: () => {
     // Fires on every healthy poll, not just the first. Only reconnect when the
     // token actually changed — i.e. the sidecar was respawned.
@@ -162,6 +164,30 @@ const sidecar = new Sidecar({
     sendToRenderer('aria:log', { level: 'warn', message: reason })
   },
 })
+
+/**
+ * Auto-update. Constructed here so its status can reach the renderer through
+ * the same `sendToRenderer` every other event uses; started only once the
+ * sidecar is up, in `whenReady`.
+ */
+const updater = new Updater({
+  onStatus: (status: UpdateStatus) => sendToRenderer('aria:update-status', status),
+})
+
+/**
+ * Install the update that has been downloaded, sidecar first.
+ *
+ * **The order is the whole point.** `quitAndInstall` runs the NSIS installer,
+ * which overwrites `resources/sidecar/aria-sidecar.exe` — and Windows will not
+ * overwrite a file a live process still holds open. Killing the sidecar and
+ * *waiting* for it is what stops a half-updated install, and nothing in
+ * electron-updater knows the sidecar exists.
+ */
+async function installUpdate(): Promise<void> {
+  rpc.stop()
+  await sidecar.stopAndWait()
+  updater.quitAndInstall()
+}
 
 const rpc = new RpcClient({
   url: sidecar.rpcUrl,
@@ -647,6 +673,10 @@ function registerIpc(): void {
   // sidecar would give us two answers that can disagree — a setting somebody
   // turned off in Task Manager would still read as on. Rule 1 is about
   // *conversation, memory and task* state; this is neither.
+  ipcMain.handle('aria:update-status', () => updater.current)
+  ipcMain.handle('aria:check-for-updates', () => updater.check())
+  ipcMain.handle('aria:install-update', () => installUpdate())
+
   ipcMain.handle('aria:export-diagnostics', () => exportDiagnostics())
 
   ipcMain.handle('aria:get-auto-start', () => app.getLoginItemSettings().openAtLogin)
@@ -724,6 +754,11 @@ if (!singleInstance) {
     }
     rpc.start()
 
+    // **After the sidecar, deliberately.** An update check is a network round
+    // trip and the first thing anybody wants is a window that works; the
+    // updater delays its own first check on top of this.
+    updater.start()
+
     if (!startHidden) showWindow()
   })
 
@@ -732,6 +767,7 @@ if (!singleInstance) {
   })
 
   app.on('will-quit', () => {
+    updater.stop()
     overlay?.destroy()
     globalShortcut.unregisterAll()
     rpc.stop()

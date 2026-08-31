@@ -51,6 +51,9 @@ export interface SidecarOptions {
   host: string
   port: number
   dev: boolean
+  /** `app.getVersion()`. Passed through so the sidecar reports the same
+   *  number the app does — see `ARIA_APP_VERSION` below. */
+  appVersion: string
   onReady: () => void
   onDown: (reason: string) => void
 }
@@ -159,6 +162,11 @@ export class Sidecar {
       env: {
         ...process.env,
         ARIA_TOKEN: this.token,
+        // **Electron is authoritative about the version, and the sidecar
+        // cannot see `package.json` once frozen.** Without this, its own
+        // constant drifts the first time auto-update bumps a version, and
+        // `system.health` starts naming a build nobody is running.
+        ARIA_APP_VERSION: this.options.appVersion,
         ARIA_HOST: this.options.host,
         ARIA_PORT: String(this.options.port),
         ARIA_DEV: String(this.options.dev),
@@ -326,5 +334,41 @@ export class Sidecar {
     if (this.restartTimer) clearTimeout(this.restartTimer)
     this.restartTimer = null
     this.killChild()
+  }
+
+  /**
+   * Stop, and wait for the process to actually be gone.
+   *
+   * **This exists for exactly one caller: installing an update.**
+   * `quitAndInstall` quits and immediately runs the NSIS installer, which
+   * overwrites `resources/sidecar/aria-sidecar.exe` — and Windows will not
+   * let it overwrite a file a live process still has open. `stop()` sends a
+   * kill and returns straight away, so without this the installer can start
+   * while the sidecar is still exiting, and the result is a half-updated
+   * install rather than an error anybody sees.
+   *
+   * Nothing in electron-updater knows the sidecar exists; this is ours to
+   * get right.
+   *
+   * Resolves either way. A kill that never completes must not be the thing
+   * that stops somebody quitting the app — the timeout is a bound on the
+   * wait, not a guarantee about the process.
+   */
+  stopAndWait(timeoutMs = 5_000): Promise<void> {
+    const child = this.child
+    this.stop()
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(done, timeoutMs)
+      // `killChild` removed the supervision listener, so this is the only
+      // thing waiting on it and cannot race the restart policy.
+      child.once('exit', done)
+    })
   }
 }

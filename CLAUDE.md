@@ -5396,6 +5396,122 @@ re-writing the line, never by reaching for a command that reads from HEAD** —
 in a tree where HEAD is weeks behind, those are not the same operation.
 
 
+## She updates herself now (2026-09-01)
+
+    npm test                         # 288
+    pytest sidecar/tests -q          # 1673
+    # and, once: bump the version, push, watch an installed 0.1.0 become 0.1.1
+
+A **Check for updates** button in Settings, and installed copies that keep
+themselves current from GitHub Releases. **Most of it already existed and
+nobody had noticed**: electron-builder infers `app-update.yml` from the git
+remote, so every build since the installer shipped has carried
+`provider: github, owner: da4ngel, repo: ARIA`, and written a `latest.yml`
+with the version, size and sha512 beside the exe. What was missing was the
+dependency, the wiring, any UI, and CI.
+
+**The repo being public is what makes this simple**, and it is worth stating
+because the private case is a different feature: release assets are fetched
+anonymously, so no token has to ship inside the app.
+
+Three decisions, taken with Eyaas:
+
+| | |
+|---|---|
+| publish when | `package.json`'s version changes on master — **not every push** |
+| on finding one | download quietly, then **offer** a restart; install on quit otherwise |
+| online mode | **exempt**, and the Settings copy changed to say so |
+
+### The version was in two places and about to disagree
+`SIDECAR_VERSION = "0.1.0"` was a bare literal in `handlers.py`, entirely
+independent of `package.json`. **They agreed only by coincidence.** The first
+auto-update bump happens in `package.json` alone, and from that moment
+`system.health.version` and every diagnostics export name a version nothing is
+running — which is worse than no version at all, because it sends whoever
+reads the bug report to the wrong code.
+
+Electron passes `ARIA_APP_VERSION` beside the `ARIA_TOKEN` and `ARIA_DATA_DIR`
+it already sets, and the literal survives as the fallback for `npm run
+sidecar` and the gate scripts, which have no Electron. `test_version.py`
+asserts the fallback equals `package.json`, so the two cannot part company
+without the suite saying so — the drift guard `tray.test.ts` and
+`icon.test.ts` already are for the palette. Checked by actually bumping the
+version to 0.2.0: red, and green again on revert.
+
+**The version was also displayed nowhere in the app.** `app.getVersion()` had
+never been called. The Updates card leads with it, because it is the first
+thing anybody looks for when something is behaving oddly.
+
+### The sidecar holds its own executable open
+`quitAndInstall` quits and immediately runs the NSIS installer, which
+overwrites `resources/sidecar/aria-sidecar.exe` — and **Windows will not
+overwrite a file a live process still has open.** `Sidecar.stop()` sends a
+kill and returns straight away, so installing after a plain `stop()` races the
+installer into a half-updated app: no error, no dialog, an install that is
+part one version and part another.
+
+`stopAndWait()` waits for the child's `exit` event with a 5s bound, and
+`installUpdate()` in `main.ts` is ordered around it. **Nothing in
+electron-updater knows the sidecar exists**; this is entirely ours to get
+right, which is why it has two tests and a mutation check rather than a
+comment. Reverting to `stop()` fails exactly the ordering test.
+
+It resolves either way. A kill that never completes must not be the thing that
+stops somebody quitting — the timeout bounds the wait, it does not claim
+anything about the process.
+
+### Unsigned, said out loud
+electron-updater checks a downloaded installer's publisher name against the
+installed app's. With no certificate there is no publisher name on either
+side, so the check has nothing to compare and would be skipped by default —
+but `verifyUpdateCodeSignature: false` is written into
+`electron-builder.yml` anyway, because leaving the most security-relevant line
+in the file implicit is how it gets changed by accident.
+
+**What actually guards the download is HTTPS plus the sha512 in `latest.yml`.
+The honest consequence: anyone who can push to this repo can ship code to
+every install.** That is the cost of not having a certificate, and it is
+recorded rather than discovered.
+
+### The online-mode promise had to change, not be quietly broken
+Settings said *"She cannot reach the web. Nothing you say leaves this
+machine."* That is true of conversations and was about to be false of the app.
+Confirmed with Eyaas that updates are exempt — and the sentence now names the
+update check, because **a promise that quietly stops being true is worse than
+one that was never made.**
+
+### CI, which this repo has never had
+`.github/workflows/release.yml`, on `windows-latest` — the sidecar bundles
+pywin32, mss and the Win32 calls in `tools/`, so nothing else can build it,
+and it is free because the repo is public.
+
+- **The full suite runs on every push, published or not.** That is worth
+  having on its own: it has only ever run on one machine, and several bugs
+  this week were green locally until something else touched them.
+- **Publishing is gated on whether `v<version>` is already a tag**, not on a
+  diff against the previous commit — so a job that fails halfway can be re-run
+  without shipping twice.
+- The 10-minute PyInstaller build runs only when publishing, and
+  `--selftest` runs on the result before it is uploaded. A bundle that cannot
+  load its own subsystems is not a release, and CI is the one place that check
+  costs nothing.
+- **Differential updates come free.** electron-builder already writes a
+  `.blockmap` beside the installer and electron-updater fetches only changed
+  blocks. Most of the 258MB is the Python sidecar, which changes rarely, so a
+  renderer-only update should be a fraction of that — **unmeasured until a
+  second release exists**, and stated as an expectation rather than a result.
+
+### What is proven and what is not
+Wiring, ordering, drift and CI shape are all unit-tested and mutation-checked.
+**Nothing has run against a real release, because there are none** — the
+GitHub releases list is empty. The end-to-end gate cannot be faked: bump the
+version, push, and watch an installed 0.1.0 find, download and install 0.1.1.
+Only that exercises `latest.yml`, the blockmap differential, and the
+unsigned-verification assumption — and afterwards `%LOCALAPPDATA%\\ARIA\\data`
+has to still be there, which is the entire reason it lives outside the install
+directory.
+
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -5488,6 +5604,16 @@ proactivity triggers, the file-browser panel, superseded-fact pruning, and a
 PyInstaller bundle that builds and runs. **41 tools** (`type_text` and the
 upload path add none — an upload is the user handing something over, not a
 tool). See the section above.
+
+**She updates herself, 2026-09-01** — a Check for updates button and installed
+copies that keep current from GitHub Releases. Most of it already existed:
+electron-builder has been writing `app-update.yml` and `latest.yml` since the
+installer shipped. Two real findings came out of building the rest: the
+sidecar's version was a bare literal that would have started naming a build
+nobody was running on the first bump, and **the sidecar holds its own
+executable open**, so installing without waiting for it to exit races the NSIS
+installer into a half-updated app. **50 tools, no migration.** Nothing has run
+against a real release, because there are none yet.
 
 **The UI was looked at 2026-09-01, closing the oldest item in this file** —
 and it found a blank-window bug on its first run: one panel throwing unmounted

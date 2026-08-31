@@ -33,9 +33,28 @@ extraResources:
     filter:
       - '**/*'
 
+# Where `--publish always` sends the installer, and where `app-update.yml`
+# points every installed copy. electron-builder infers this from the git
+# remote, and it is written out anyway: the whole feature depends on it, and
+# a value that appears by inference is one nobody notices changing.
+publish:
+  provider: github
+  owner: da4ngel
+  repo: ARIA
+
 win:
   target: nsis
   icon: resources/icon.ico
+  # **Stated rather than inferred.** electron-updater checks a downloaded
+  # installer's publisher name against the installed app's; with no
+  # certificate there is no publisher name on either side, so the check has
+  # nothing to compare and would be skipped anyway — but leaving that to a
+  # default is leaving the most security-relevant line in the file implicit.
+  #
+  # What actually guards the download is HTTPS plus the sha512 in
+  # `latest.yml`. The honest consequence: anyone who can push to this repo
+  # can ship code to every install. That is the cost of no certificate.
+  verifyUpdateCodeSignature: false
   # There is no code-signing certificate for this project, so the installer
   # will show a SmartScreen warning until reputation accrues. Stated here
   # rather than discovered at install time.

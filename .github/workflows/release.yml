@@ -1,0 +1,95 @@
+# Test every push; publish a release only when the version changes.
+#
+# **The first CI this repo has ever had.** Step 3 is worth having on its own —
+# the full suite has only ever run on one machine, and several bugs this week
+# were "green locally" right up until something else touched them.
+#
+# Publishing is gated on the tag rather than on a diff of `package.json`, so a
+# job that fails halfway can be re-run without shipping twice. `windows-latest`
+# because the sidecar is a PyInstaller bundle of Windows-only libraries
+# (pywin32, mss, the Win32 calls in `tools/`), and free because the repo is
+# public.
+
+name: release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write # creating the release and the tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          npm ci
+
+      # ── the checks, on every push ──────────────────────────────────
+      # Deliberately not piped. A piped `pytest` returns *tail's* exit code,
+      # which hid a real failure in this project once already.
+      - name: Python
+        run: |
+          pytest sidecar/tests -q
+          ruff check sidecar
+          mypy sidecar
+
+      - name: Renderer
+        run: |
+          npm test
+          npm run typecheck
+          npx electron-vite build
+
+      # ── publish, only for a version nobody has released ────────────
+      - name: Is this version already out?
+        id: gate
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already tagged — nothing to publish."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "v$version is new — building the installer."
+          fi
+
+      # ~10 minutes and ~530MB of bundle, so it runs only when publishing.
+      - name: Build the sidecar
+        if: steps.gate.outputs.publish == 'true'
+        run: npm run dist:sidecar
+
+      - name: The bundle can still load everything
+        if: steps.gate.outputs.publish == 'true'
+        run: packaging\dist\aria-sidecar\aria-sidecar-debug.exe --selftest
+
+      - name: Publish
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --publish always
+
+      - name: Tag it
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        run: |
+          git tag "v${{ steps.gate.outputs.version }}"
+          git push origin "v${{ steps.gate.outputs.version }}"
