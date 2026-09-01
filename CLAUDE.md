@@ -5578,6 +5578,233 @@ has to still be there, which is the entire reason it lives outside the install
 directory.
 
 
+## The reply renderer, and the markdown that was being read aloud (2026-09-01)
+
+    npm test                                     # 337
+    pytest sidecar/tests -q                      # 1713
+    python scripts/look_at_the_ui.py <url>       # torture test + a frame clock
+
+Asked for "a proper markdown rendering layer", on the premise that assistant
+text was displayed as raw or near-raw text. **That premise was wrong, and the
+audit is the useful part.** `Markdown.tsx` has rendered markdown since the
+retheme. What was actually wrong was different, and worse.
+
+### It re-parsed the whole reply on every token, and that is what shipped
+`useConversation` appends each token to a growing string, so `react-markdown`
+re-parsed the entire document every time. `memo` cannot help — the text really
+is new. Measured over one 8,000-character reply through the real pipeline:
+
+| | naive (**what shipped**) | block-split + memo | + the lean grammars |
+|---|---|---|---|
+| parse CPU over the reply | **10.3 s** | 0.91 s | **0.53 s** |
+| per token | 5.15 ms | 0.46 ms | **0.26 ms** |
+| worst single frame | **29.5 ms — blown** | 3.5 ms | **3.4 ms** |
+
+One full parse of the finished document is 13-17ms **on its own** — a whole
+frame before React or the DOM are involved, on a machine also running Whisper,
+Kokoro and a 7B model.
+
+`Markdown.blocks.ts` splits the buffer at block boundaries and each block is
+memoised on its own text. Every block but the last is finished, so its memo
+bails out — and **because `react-markdown` parses during render, a bail-out is
+a skipped parse.** Only the trailing block re-parses.
+
+- **The splitter must not break what a blank line is allowed to sit inside.**
+  Fenced code, loose lists (`- a` / blank / `- b` is *one* list, and split
+  naively an ordered one restarts its numbering at 1), and blockquotes spanning
+  paragraphs. A wrong split is not a slow answer, it is a different answer.
+- **A half-written fence is virtually closed for rendering.** Without it a code
+  block is a paragraph of raw source until its closing fence arrives and then
+  snaps into a `<pre>` — a visible reflow on every code block in every reply.
+  With it nothing moves when the real fence lands, because the shape was
+  already right. Confirmed on screen mid-stream.
+- **No cache outlives the component.** A `Map` keyed by block text would grow
+  for the life of the process; React's own memo is scoped to the mounted turn,
+  and that is the shape the measurement above used.
+
+### Measured in the browser, not only in Node
+`scripts/look_at_the_ui.py` gained a torture-test message and a **streaming
+replay** that pushes real `token` events down the real path with the frame
+clock running — so the number includes React and the DOM, which the Node
+figures deliberately do not.
+
+**Five runs, because one is an anecdote** — the discipline this file already
+records for `gate_tool_selection.py`, where a three-probe difference read as a
+finding and turned out to be narrower than each model's own spread. A frame
+clock on a machine also running a dev server is at least as noisy:
+
+    398 tokens | worst frame gap 7.6-13.8ms (median 7.9) | frames over 32ms: 0-0
+
+An early run reported 41.7ms and two dropped frames; across five it does not
+reproduce. **Report the spread.**
+
+### The bundle: -151 KB, which is not the 363 that was recorded
+`rehype-highlight` does `import {common} from 'lowlight'` at module scope, so
+all 37 grammars compile in whatever `subset` is passed — `subset` narrows
+*detection*, never the bundle. CLAUDE.md measured that at +363KB and declined
+to fix it, on the reasoning that it is read off local disk.
+
+What changed the answer is the second measurement: those grammars are also the
+**dominant parse cost** (13.25ms with highlighting, 6.30ms without), and the
+trailing block re-parses per token. So this was never only bytes.
+
+`Markdown.highlight.ts` registers 17 grammars through `createLowlight`.
+**Total renderer JS 1436.8 -> 1285.9 KB, main chunk 967.7 -> 816.8.** That is
+−151 KB, not −363: seventeen grammars and highlight.js's core still ship. The
+recorded 363 was `common` *plus* the core, and only the difference between 37
+and 17 was ever recoverable. Stated because the obvious reading of the old note
+is that all of it comes back.
+
+- **An untagged fence is no longer auto-detected.** Detection runs every
+  registered grammar and picks a winner — seventeen parses per token while a
+  fence is open — and colouring a fence the model did not label is a guess
+  about what the code *is*. This file already declines to print a guessed
+  language for that exact reason: *"a wrong language in the header is worse
+  than none — it is a claim about the code."* Doing it in colour is the same
+  claim. The three behaviours the plugin handled — `no-highlight`, an unknown
+  language falling through rather than throwing, and the `hljs-*` class prefix
+  `index.css` maps onto the palette — each have a test.
+
+### `rehype-sanitize` was asked for and should not be added
+react-markdown 9 does not render raw HTML at all without `rehype-raw`, which is
+absent, and `dangerouslySetInnerHTML` appears nowhere in `src/`. Adding a
+sanitiser would be a dependency guarding a hole that does not exist. **A test
+that plants `<script>` and an `onerror` attribute stands in its place**, which
+is the thing that actually has to stay true.
+
+### Links in replies did nothing when clicked
+A plain `<a href>` has no `target`, so it fires `will-navigate` in
+`electron/main.ts`, which **blocks it and logs a warning nobody sees**.
+`setWindowOpenHandler` — which does call `shell.openExternal` — only fires for
+`target="_blank"`. So every link she has ever produced was inert. One
+attribute, no main-process change. `urlTransform` is also tightened to
+http/https/mailto; react-markdown's default additionally permits `irc`, `ircs`
+and `xmpp`, which this app has no handler for. An unsafe scheme renders as
+**text**, not as a dead link.
+
+### Three more defects, none of them in the layer that was asked about
+- **Replies rendered at 13px.** `Markdown` set `text-small`, silently
+  overriding the `text-body` its parent applied — so `text-body` in
+  `ConversationView` was dead code and nobody was reading 15px text.
+- **The streaming shimmer never moved.** `animation.shimmer` was declared in
+  the Tailwind config with **no `@keyframes shimmer` anywhere**, and nothing
+  used `animate-shimmer`. `@keyframes ring` was missing the same way, so the
+  focus ring's documented arrival animation has never run either. The two tests
+  guarding the shimmer asserted the gradient's *presence* — a spelling check,
+  and it passed throughout.
+- **`.streaming` collapsed the hierarchy.** `color: transparent` with
+  `background-clip: text` is inherited by every descendant, so headings, bold
+  and links lost their colour while streaming and snapped back on completion —
+  a flash on every reply, and the only reason a `.streaming pre` exemption had
+  to exist to keep code legible. Removed; the caret is the whole affordance.
+  `ring` got its missing keyframes rather than being deleted.
+
+### The caret is CSS, so a screenshot is the only instrument
+It is an `::after` on the reply's last element — a sibling `<span>` lands
+*below* the text, because `react-markdown` emits block elements. jsdom cannot
+see a pseudo-element and no unit test can assert one, so it was verified with
+`getComputedStyle(el, '::after')`: 2x15px, `rgb(109, 140, 255)`, the accent.
+
+**That check found a real gap.** When a reply's last block is code, the caret
+sat on the `overflow-hidden` wrapper and was clipped — invisible exactly when
+ARIA's replies most often end. It now moves inside the `<pre>`, with the
+wrapper's own suppressed via `:has(pre)`. Both cases measured.
+
+### The measure was 98 characters
+`--reading: 46rem` is where the *column* ends and the composer shares it, so
+the two keep agreeing. At body size that is ~98 characters, far past where the
+eye reliably finds the next line — and it only got wider when the window
+learned to maximise. `--prose: 33rem` caps the prose alone; `--reading`, the
+composer and the user bubbles are untouched. **Measured in the browser at 528px
+/ 65 characters**, rather than asserted.
+
+`src/styles/prose.ts` holds every per-element decision and **deliberately names
+no colour of its own** — every value is an `aria-*` class resolving through
+`tokens.js`. Its test rejects raw hex, raw Tailwind palette colours, bare
+keywords like `text-white`, and any `-aria-` token not actually in `COLORS`.
+
+### Markdown was being read aloud, in both directions
+**Neither speech path stripped anything.** `SpeechStream.feed` took
+`delta.text` unmodified; `voice.speak` was handed `turn.content` verbatim from
+the transcript; `split_for_speech` splits on sentence punctuation and never
+removed a character. Kokoro has been receiving `**bold**`, backticks, `###`,
+table pipes and **whole code fences** since Phase 2.
+
+`providers/speech_text.py`, applied in `SpeechStream.feed` — which is also what
+`speak` calls, so one function fixes both paths.
+
+- **It cannot be applied per delta, and it cannot be applied per chunk.** Per
+  delta it never sees a marker split across two of them, and `**bold**`
+  routinely arrives as `**bo` then `ld**`. Per chunk it never sees a code
+  fence, which spans many sentences — `split_for_speech` would read the code
+  out line by line long before the closing fence arrived. So it runs on the
+  buffer at drain, and `settled_for_speech` holds back anything that *could* be
+  the first half of something.
+- **A link has two halves and releasing between them is a real bug**, found by
+  driving the actual stream rather than the function: holding only until the
+  `]` arrived let `[the docs]` through as literal text, and the `(url)` that
+  followed was converted separately. Held now until both halves are present.
+- **A code block is named, not read.** Thirty lines is over a minute of speech
+  nobody can act on; silently dropping it would leave a reply that skips from
+  "here is how" to the next paragraph. A bare URL becomes "a link" for the same
+  reason — unusable by ear, and longer to say than the sentence around it.
+- What is kept is the *words*: emphasis, inline code and link labels are all
+  read, because "run `npm run dev`" is useless without the command.
+
+**Both mutation checks failed only their own unit tests and left
+`test_conversation.py` entirely green** — exactly the shape of gap this file
+keeps finding (`affect_state`, `procedures`, `record_new_offers`: a thing
+written, tested, and called by nothing). Four integration tests now drive a
+real `SpeechStream`, and it was one of them that found the link bug.
+
+### `package.json` had been gutted in the working tree
+Every script, every devDependency, `electron-updater` and the 0.1.1 version
+bump were gone; `npm run dev`, `npm test` and `npm run typecheck` all failed
+with "Missing script", and an `npm install` would have pruned `node_modules`.
+HEAD was intact and the diff was 37 deletions against 2 insertions, both of
+them the downgraded version line and a lost newline — so restoring from HEAD
+lost nothing. **The standing warning about `git checkout` in this tree is about
+not destroying uncommitted work; it is not a rule against ever reading from
+HEAD.** Check the diff, then decide.
+
+### The UI harness was pointed at another project's app
+`scripts/look_at_the_ui.py` defaults to `:5173`, and `:5173` was serving
+**FloodSense-LK** — a different project's dev server. Every rail click timed
+out and the first set of "torture test" screenshots were of somebody else's
+dashboard. Nothing about ARIA was being measured, and the streaming replay
+returned confident numbers from a page that ignored every event.
+
+The harness takes a URL argument, so it can be pointed at a static server over
+`out/renderer` — which is also the production build, and needs no Electron
+window to appear on anybody's screen:
+
+    npx electron-vite build
+    (cd out/renderer && python -m http.server 5199 --bind 127.0.0.1) &
+    python scripts/look_at_the_ui.py http://127.0.0.1:5199
+
+**A default port is a guess about what is running on it.** Check the title in
+the first screenshot before trusting anything below it.
+
+- **And the compact shots had never been honest.** `useWindowMode` mirrors
+  Electron rather than measuring the viewport, and the stub answered
+  `isExpanded: true` always — so every 420px shot showed the 208px labelled
+  rail the real companion window does not have. That is the layout bug this
+  file already records fixing, invisible in the instrument built to catch it.
+  The bridge takes a `COMPACT` flag now.
+
+### Not done, and named
+- **Nothing here has been seen in the real Electron window.** The harness is a
+  browser: no acrylic, no frameless chrome, no tray. `npm run dev` must be
+  restarted fully to see it, and the case that decides the glass alpha — the
+  window over a bright white editor — still needs a real launch.
+- **`speech_text` has not been heard.** It is tested and mutation-checked, but
+  no audio has been synthesised from its output on this machine; whether a code
+  block reads naturally in context is a judgement only listening can make.
+- **KaTeX is out**, deliberately: bundled fonts and a parser, against a change
+  that is otherwise removing 151 KB.
+- The `.hljs` colour mapping in `index.css` is unchanged and untouched by the
+  highlighter swap — the class prefix is the contract, and it has a test.
+
 ## Current phase
 Phase 2 signed off by Eyaas after live testing (2026-08-07).
 Phase 3 built and exercised against real models. Phase 4 built: name search,
@@ -5670,6 +5897,21 @@ proactivity triggers, the file-browser panel, superseded-fact pruning, and a
 PyInstaller bundle that builds and runs. **41 tools** (`type_text` and the
 upload path add none — an upload is the user handing something over, not a
 tool). See the section above.
+
+**The reply renderer, 2026-09-01.** Asked for a markdown layer on the premise
+that replies showed raw text; the premise was wrong and the audit was the
+deliverable. What was actually wrong: the whole reply re-parsed on **every
+token** (10.3s of parse CPU and a 29.5ms worst frame over one 8,000-character
+reply, measured), **links did nothing when clicked** because a plain anchor
+hits `will-navigate` rather than `setWindowOpenHandler`, replies rendered at
+13px because `text-small` overrode the `text-body` above it, the streaming
+shimmer had **no keyframes and never moved**, and **markdown was being read
+aloud** — `**bold**`, backticks and whole code fences straight to Kokoro since
+Phase 2, on both speech paths. Block-splitting with per-block memo, 17
+grammars via `createLowlight` (bundle 1436.8 -> 1285.9 KB), `prose.ts`,
+`--prose` at a measured 65 characters, and `providers/speech_text.py`. **50
+tools, no migration.** Verified in a browser rather than asserted: median
+worst frame gap 7.9ms over five runs, zero dropped frames.
 
 **She updates herself, 2026-09-01** — a Check for updates button and installed
 copies that keep current from GitHub Releases. Most of it already existed:

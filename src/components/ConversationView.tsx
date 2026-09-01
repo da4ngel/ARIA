@@ -178,15 +178,13 @@ function AssistantTurn({
           {state === 'thinking' ? 'Thinking…' : 'Working…'}
         </p>
       ) : waiting ? null : (
-        <div className={`text-body ${turn.streaming ? 'streaming' : ''}`}>
-          <Markdown text={turn.content} />
-          {turn.streaming && (
-            <span
-              aria-hidden
-              className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[0.15em] animate-caret bg-aria-accent align-middle"
-            />
-          )}
-        </div>
+        // Size and colour come from `prose.ts` now, not from here. The old
+        // `text-body` on this div was dead — `Markdown` set `text-small` over
+        // it, so every reply rendered at 13px rather than the 15 this line
+        // believed it was asking for. The caret moved into the component too,
+        // where it can attach to the last element instead of starting a new
+        // line beneath it.
+        <Markdown text={turn.content} streaming={turn.streaming} />
       )}
 
       {turn.error && <p className="text-tiny text-aria-bad">{turn.error}</p>}

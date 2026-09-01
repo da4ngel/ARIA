@@ -57,6 +57,7 @@ from sidecar.providers.base import (
 from sidecar.providers.catalog import ModelInfo
 from sidecar.providers.connectivity import connectivity
 from sidecar.providers.health import HealthTracker
+from sidecar.providers.speech_text import settled_for_speech, speech_text
 from sidecar.providers.tts import TextToSpeech, shorten_for_speech, split_for_speech
 from sidecar.rpc.events import AssistantState, Event, EventBus
 from sidecar.state import runtime
@@ -190,7 +191,14 @@ class SpeechStream:
         self._tts = tts
         self._bus = bus
         self._started = started
+        #: Speakable text, already stripped of markdown and ready to split.
         self._buffer = ""
+        #: What the model actually sent, minus whatever has been converted.
+        #: Deltas arrive a few characters at a time, so a bold span routinely
+        #: lands as "**bo" then "ld**" — stripping each delta as it came would
+        #: match neither half and read the asterisks aloud. `settled_for_speech`
+        #: holds an unfinished marker here until the rest of it arrives.
+        self._raw = ""
         self._index = 0
         self._tasks: list[asyncio.Task[None]] = []
         # Phase 8: the turn's affect-derived nudge, applied to every chunk this
@@ -205,12 +213,19 @@ class SpeechStream:
 
     def feed(self, text: str) -> None:
         if self.active:
-            self._buffer += text
+            self._raw += text
 
     async def drain(self, turn_id: str) -> None:
         """Emit every chunk the buffer can currently yield."""
         if not self.active:
             return
+        # **Markdown is removed here, not in `feed` and not per chunk.** Per
+        # delta it cannot see a marker split across two of them; per chunk it
+        # cannot see a code fence, which spans many sentences and would be
+        # read out line by line before its closing fence ever arrived.
+        settled, self._raw = settled_for_speech(self._raw)
+        if settled:
+            self._buffer += speech_text(settled)
         while True:
             chunk, self._buffer = split_for_speech(self._buffer, is_first=self._index == 0)
             if not chunk:
@@ -221,6 +236,12 @@ class SpeechStream:
         """Speak whatever is left, then wait for the synthesisers to land."""
         if not self.active:
             return
+        # Whatever was held back as possibly-unfinished never will be now, so
+        # it is converted as it stands — an unclosed fence is a code block that
+        # simply stopped, which is exactly how `speech_text` reads it.
+        if self._raw:
+            self._buffer += speech_text(self._raw)
+            self._raw = ""
         tail = self._buffer.strip()
         self._buffer = ""
         # The tail never passed through `split_for_speech` — the model simply

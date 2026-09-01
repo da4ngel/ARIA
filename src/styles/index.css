@@ -41,6 +41,19 @@ html.roomy {
      the column edge is; two numbers would drift and the input would stop
      lining up with the thing it answers. */
   --reading: 46rem;
+
+  /* **How wide a line of prose is allowed to get, which is not the same
+     question.** `--reading` is where the *column* ends, and the composer
+     shares it so the input lines up with the thing it answers. At body size
+     that column is around 98 characters — far past the 45-75 where the eye
+     reliably finds the start of the next line, and it only got wider when the
+     window learned to maximise.
+
+     So the prose inside a reply is capped separately and nothing else moves.
+     In `rem` for the same reason everything else here is: it grows with the
+     `roomy` class, so the line stays the same number of *characters* rather
+     than becoming a longer one. */
+  --prose: 33rem;
 }
 
 html,
@@ -146,42 +159,52 @@ textarea {
     pointer-events: none;
   }
 
-  /* Text that is still arriving. A slow light travels along it, so a long
-     reply reads as being written rather than as having stalled — the caret
-     alone says "not finished", this says "still going".
+  /* **Streaming text is styled exactly like finished text, deliberately.**
+     There used to be a gradient here — `background-clip: text` with a
+     transparent colour — described as "a slow light travels along it". Two
+     things were wrong with it. It never moved: `animation.shimmer` was
+     declared in the Tailwind config with **no `@keyframes shimmer` anywhere**,
+     and nothing ever used `animate-shimmer`, so it was a static diagonal band.
+     And `color: transparent` is inherited by every descendant, so headings,
+     bold and links lost their colour while streaming and snapped back on
+     completion — a flash on every reply, and the reason a `.streaming pre`
+     exemption had to exist at all to keep code legible.
 
-     `background-clip: text` on a gradient, which is one composited layer and
-     no JavaScript: this sits in a conversation that also runs Whisper, Kokoro
-     and a 7B model, and a per-frame effect here would be the wrong trade. */
-  .streaming {
-    background: linear-gradient(
-      100deg,
-      theme('colors.aria.text') 40%,
-      theme('colors.aria.dim') 50%,
-      theme('colors.aria.text') 60%
-    );
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+     The caret at the end of the text is the whole affordance now. A per-token
+     effect on the thing being read is jitter rather than polish, and this runs
+     beside Whisper, Kokoro and a 7B model. */
+
+  /* The caret at the end of a reply that is still arriving.
+     Attached with `::after` to the last element rather than rendered as a
+     sibling, because a sibling lands *below* the text: `react-markdown`
+     renders block elements, so a span after them starts a new line and the
+     caret floats under the paragraph instead of following the last word.
+
+     This is the whole streaming affordance. Reduced motion is covered by the
+     blanket at the foot of this file, which leaves it a static bar rather than
+     a blinking one — still visible, still saying "not finished". */
+  .is-streaming > :last-child::after,
+  .is-streaming > :last-child > pre::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: theme('colors.aria.accent');
+    animation: caret 1.1s ease-in-out infinite;
   }
 
-  /* **Code is exempt, and this was a real bug for an hour.**
-     `background-clip: text` with a transparent colour is inherited by every
-     descendant, so a fenced block inside a streaming reply rendered
-     transparent — clipped to the *container's* gradient rather than drawn.
-     Invisible unless you happened to watch a reply containing code arrive. */
-  .streaming pre,
-  .streaming code,
-  .streaming pre *,
-  .streaming code * {
-    background-image: none;
-    -webkit-background-clip: border-box;
-    background-clip: border-box;
-    color: inherit;
-  }
-  .streaming pre {
-    color: theme('colors.aria.dim');
+  /* A reply whose last block is code puts the caret *inside* the block, at
+     the end of the code. The wrapper is `overflow-hidden` with a header and a
+     footer button, so a caret on the wrapper itself is clipped or stranded on
+     a line of its own — measured with `getComputedStyle(el, '::after')`, which
+     is the only instrument for a pseudo-element: jsdom cannot see one, so no
+     unit test can. ARIA's replies end in a code block constantly, and the
+     signal that a reply is still arriving must not be the thing that
+     disappears exactly then. */
+  .is-streaming > :last-child:has(pre)::after {
+    content: none;
   }
 
   /* Syntax highlighting, on this palette rather than a stock theme.

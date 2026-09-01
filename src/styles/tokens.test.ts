@@ -159,30 +159,37 @@ describe('the palette', () => {
   })
 })
 
-describe('the streaming shimmer', () => {
+describe('streaming', () => {
   const CSS = readFileSync(join(process.cwd(), 'src/styles/index.css'), 'utf8')
 
-  it('does not reach code', () => {
-    // **A real bug for an hour.** `.streaming` sets `background-clip: text`
-    // with a transparent colour, and every descendant inherits it — so a
-    // fenced block inside a streaming reply rendered transparent, clipped to
-    // the *container's* gradient rather than drawn.
-    //
-    // Invisible unless you happened to watch a reply containing code arrive,
-    // which is exactly the kind of thing that needs a test rather than an eye.
-    const exemption = CSS.slice(CSS.indexOf('.streaming pre'))
-
-    expect(CSS).toContain('.streaming pre')
-    expect(CSS).toContain('.streaming code')
-    expect(exemption.slice(0, 400)).toContain('background-clip: border-box')
-    expect(exemption.slice(0, 400)).toContain('color: inherit')
+  it('marks unfinished text with a caret rather than a gradient', () => {
+    // There used to be a `background-clip: text` shimmer here, and the two
+    // tests that stood in this place asserted the gradient's *presence*. Both
+    // passed throughout, and neither could see that it had never animated:
+    // `animation.shimmer` was declared with no `@keyframes shimmer` anywhere.
+    // A test that reads a CSS string is a spelling check.
+    expect(CSS).toContain('.is-streaming > :last-child::after')
+    expect(CSS).toContain("theme('colors.aria.accent')")
   })
 
-  it('still applies to ordinary prose', () => {
-    // The exemption must not have turned the whole effect off.
-    const rule = CSS.slice(CSS.indexOf('.streaming {'), CSS.indexOf('.streaming pre'))
-    expect(rule).toContain('background-clip: text')
-    expect(rule).toContain('color: transparent')
+  /** CSS with its comments removed.
+   *
+   *  **A negative assertion has to be made against code, not prose.** The
+   *  first version of the test below failed on the comment that *explains*
+   *  the removed gradient, which naturally contains the very string it
+   *  forbids. This project has now hit that in three files and two
+   *  languages — `test_email.py` grew `code_only()` after a scan for "SMTP"
+   *  matched the docstring saying there is none, and `packaging.test.ts`
+   *  grew the TypeScript equivalent. This is the CSS one. */
+  const code = (css: string): string => css.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  it('does not paint the reply with a colour every child inherits', () => {
+    // `color: transparent` on the container was inherited by every descendant,
+    // so headings, bold and links lost their colour while streaming and
+    // snapped back on completion — a flash on every reply, and the reason a
+    // `.streaming pre` exemption had to exist to keep code legible at all.
+    expect(code(CSS)).not.toMatch(/color:\s*transparent/)
+    expect(code(CSS)).not.toMatch(/-clip:\s*text/)
   })
 })
 

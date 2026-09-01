@@ -18,6 +18,7 @@ which is what three sessions of unseen work actually needs checking for.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,64 @@ OUT = Path(__file__).resolve().parent.parent / "data" / "ui-shots"
 #: which blurs the desktop. A browser's default white page under a 62% tint
 #: reads as flat grey and makes the whole app look like a different colour
 #: than it is. This stands in for the blurred desktop.
+#: One message carrying every construct at once, including the two that
+#: only ever go wrong while streaming: a fence that has not closed, and a
+#: URL long enough to widen a column that is not capped.
+TORTURE = "\n".join([
+    '# Heading one, which renders at the same step as two',
+    '',
+    '## Heading two',
+    '',
+    'Ordinary prose with **bold**, *italic*, ***both***, ~~struck through~~',
+    'and `inline code` in it. A very long unbroken URL, which must not widen',
+    "column: https://example.com/" + "a" * 180,
+    '',
+    '### Heading three',
+    '',
+    '1. An ordered item with `code` inside **bold** inside it, long enough that',
+    '   it wraps and the second line aligns to the text, not to the number.',
+    '2. A second item.',
+    '   - A nested item, which steps in but never down in size.',
+    '     - And a third level.',
+    '3. A third item.',
+    '',
+    '#### Heading four, carried by weight alone',
+    '',
+    '> A blockquote containing a list:',
+    '>',
+    '> - first quoted point',
+    '> - second quoted point',
+    '',
+    '| Model | Provider | TTFT | Notes |',
+    '| --- | --- | --- | --- |',
+    '| qwen2.5:7b | ollama | 340ms | local, free |',
+    '| gpt-5.4-nano | openai | 700ms | fabricated nothing in the battery |',
+    '| gemini-flash-lite | gemini | 1236ms | quota-limited on the free tier |',
+    '',
+    '---',
+    '',
+    '```python',
+    'def solve(n: int) -> int:',
+    "    'Three code blocks, three languages.'",
+    '    return sum(i * i for i in range(n))',
+    '```',
+    '',
+    '```powershell',
+    "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'aria.exe' }",
+    '```',
+    '',
+    '```sql',
+    'SELECT subject_id, name, level FROM concept_mastery WHERE level < 3;',
+    '```',
+    '',
+    'A [link](https://example.com), a [refused one](javascript:alert(1)), and',
+    'an unterminated fence below:',
+    '',
+    '```typescript',
+    'export function splitBlocks(text: string): string[] {',
+    "  const lines = text.split('\\n')",
+])
+
 GROUND = "html { background: #0b1410 !important; }"
 def _chromium() -> str | None:
     """Playwright's own Chromium, whichever build is installed.
@@ -65,7 +124,13 @@ BRIDGE = r"""
     'system.health': { status: 'ok', version: '0.1.0', uptime_s: 42, db: true,
                        ollama: true, models: ['qwen2.5:7b'], everything: false,
                        gpu_free_mb: 4096, pending_probes: [] },
-    'chat.history': { messages: [] },
+    'chat.history': { messages: TORTURE_TEXT
+      ? [{ id: 1, role: 'user', content: 'show me everything' },
+         { id: 2, role: 'assistant', content: TORTURE_TEXT }]
+      : [] },
+    // Needed for the streaming replay: `useConversation` will not accept
+    // a token whose turn id it does not recognise.
+    'chat.send': { turn_id: 't1', session_id: 's1' },
     'chat.sessions': { sessions: [
       { id: 's1', title: 'Why is the sky blue', started_at: now, kind: 'chat', message_count: 6 },
       { id: 's2', title: 'Information Security', started_at: now, kind: 'study',
@@ -164,6 +229,11 @@ BRIDGE = r"""
     'permissions.mode': { mode: 'auto' },
   };
 
+  // Lets the replay push real `token` events down the real path, rather
+  // than rendering the component in isolation and calling it streaming.
+  window.__emit = (method, params) =>
+    listeners.event.forEach((h) => h({ method, params }));
+
   window.aria = {
     getStatus: () => Promise.resolve('connected'),
     onStatus: (h) => { setTimeout(() => h('connected'), 0); return () => {}; },
@@ -178,7 +248,11 @@ BRIDGE = r"""
     restartBrain: () => {},
     hide: () => {}, minimize: () => {},
     setExpanded: () => Promise.resolve(true),
-    isExpanded: () => Promise.resolve(true),
+    // **Compact is Electron's answer, not the viewport's.** `useWindowMode`
+    // mirrors main rather than measuring, so resizing the page alone left
+    // every 420px shot showing a 208px labelled rail the real companion
+    // window never has — the exact layout bug CLAUDE.md records fixing.
+    isExpanded: () => Promise.resolve(!COMPACT),
     setMaximized: () => Promise.resolve(false),
     isMaximized: () => Promise.resolve(false),
     pickFiles: () => Promise.resolve([]),
@@ -188,6 +262,45 @@ BRIDGE = r"""
   };
 })();
 """
+
+
+#: One streaming replay: real `token` events down the real path, with the
+#: frame clock running. The parser numbers in `Markdown.blocks.ts` were
+#: measured in Node; this is the one that includes React and the DOM.
+REPLAY_JS = """async (text) => {
+                 const frames = [];
+                 let running = true;
+                 const tick = (t) => { frames.push(t); if (running) requestAnimationFrame(tick); };
+                 requestAnimationFrame(tick);
+
+                 // ~4 characters a token, which is what a real stream looks like.
+                 const started = performance.now();
+                 for (let i = 0; i < text.length; i += 4) {
+                   window.__emit('token', { turn_id: 't1', text: text.slice(i, i + 4) });
+                   await new Promise((r) => setTimeout(r, 0));
+                 }
+                 const elapsed = performance.now() - started;
+                 window.__emit('turn.complete', { turn_id: 't1', full_text: text });
+                 running = false;
+
+                 let worst = 0;
+                 for (let i = 1; i < frames.length; i += 1) {
+                   worst = Math.max(worst, frames[i] - frames[i - 1]);
+                 }
+                 const dropped = frames.slice(1).filter((f, i) => f - frames[i] > 32).length;
+                 return {
+                   tokens: Math.ceil(text.length / 4),
+                   elapsed_ms: Math.round(elapsed),
+                   frames: frames.length,
+                   worst_gap_ms: Math.round(worst * 10) / 10,
+                   dropped,
+                 };
+               }"""
+
+
+def _replay(page: object, text: str) -> dict:
+    """Stream `text` into the open turn and report what the frames did."""
+    return page.evaluate(REPLAY_JS, text)  # type: ignore[attr-defined]
 
 
 def main() -> int:
@@ -202,7 +315,8 @@ def main() -> int:
         page.on("console", lambda m: errors.append(f"console.{m.type}: {m.text}")
                 if m.type == "error" else None)
         # Pass 1: the wizard, which deliberately covers everything else.
-        page.add_init_script("const WIZARD = false;" + BRIDGE)
+        page.add_init_script("const WIZARD = false;const TORTURE_TEXT = null; "
+        + "const COMPACT = false;" + BRIDGE)
         page.goto(url, wait_until="networkidle")
         page.add_style_tag(content=GROUND)
         page.wait_for_timeout(1500)
@@ -215,7 +329,8 @@ def main() -> int:
         page.close()
         page = browser.new_page(viewport={"width": 1100, "height": 760})
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.add_init_script("const WIZARD = true;" + BRIDGE)
+        page.add_init_script("const WIZARD = true;const TORTURE_TEXT = null; "
+        + "const COMPACT = false;" + BRIDGE)
         page.goto(url, wait_until="networkidle")
         page.add_style_tag(content=GROUND)
         page.wait_for_timeout(1500)
@@ -235,9 +350,159 @@ def main() -> int:
                 page.screenshot(path=str(OUT / f"FAIL-{label.lower()}.png"))
 
         # Compact, the size the companion window actually is.
-        page.set_viewport_size({"width": 420, "height": 600})
-        page.wait_for_timeout(500)
+        page.close()
+        page = browser.new_page(viewport={"width": 420, "height": 600})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script(
+            "const WIZARD = true; const TORTURE_TEXT = null; const COMPACT = true;" + BRIDGE
+        )
+        page.goto(url, wait_until="networkidle")
+        page.add_style_tag(content=GROUND)
+        page.wait_for_timeout(1200)
         page.screenshot(path=str(OUT / "02-compact.png"))
+
+        # ── the markdown torture test ──────────────────────────────
+        # Every construct at once, including the two that only go wrong while
+        # streaming: an unterminated fence, and a URL long enough to widen a
+        # column that is not capped.
+        page.close()
+        page = browser.new_page(viewport={"width": 1100, "height": 760})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script(
+            "const WIZARD = true; const COMPACT = false; const TORTURE_TEXT = "
+            + json.dumps(TORTURE) + ";" + BRIDGE
+        )
+        page.goto(url, wait_until="networkidle")
+        page.add_style_tag(content=GROUND)
+        page.wait_for_timeout(1500)
+
+        scroller = ".overflow-y-auto"
+        # The transcript follows the stream, so it mounts at the bottom.
+        # Walk it from the top or the first shot is the last screen.
+        page.evaluate(f"document.querySelector('{scroller}')?.scrollTo(0, 0)")
+        page.wait_for_timeout(400)
+        for index in range(5):
+            page.screenshot(path=str(OUT / f"md-{index}.png"))
+            page.evaluate(
+                f"document.querySelector('{scroller}')?.scrollBy(0, 700)"
+            )
+            page.wait_for_timeout(350)
+
+        # The reply is capped at `--prose`; the column is not. Reported rather
+        # than eyeballed, because "about 68 characters" is the whole point of
+        # having a separate measure at all.
+        measure = page.evaluate(
+            """(() => {
+                 const p = document.querySelector('p[class*="overflow-wrap"]');
+                 if (!p) return null;
+                 const px = p.getBoundingClientRect().width;
+                 const size = parseFloat(getComputedStyle(p).fontSize);
+                 const probe = document.createElement('span');
+                 probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+                 probe.style.font = getComputedStyle(p).font;
+                 probe.textContent = '0'.repeat(100);
+                 p.appendChild(probe);
+                 const ch = probe.getBoundingClientRect().width / 100;
+                 probe.remove();
+                 return { px: Math.round(px), size, ch: Math.round(px / ch) };
+               })()"""
+        )
+        print(f"prose measure: {measure}")
+
+        # Compact, where 15px body and a 33rem cap have to coexist in 420px —
+        # and where the rail is icons-only, which only Electron knows.
+        page.close()
+        page = browser.new_page(viewport={"width": 420, "height": 600})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script(
+            "const WIZARD = true; const COMPACT = true; const TORTURE_TEXT = "
+            + json.dumps(TORTURE) + ";" + BRIDGE
+        )
+        page.goto(url, wait_until="networkidle")
+        page.add_style_tag(content=GROUND)
+        page.wait_for_timeout(1200)
+        page.evaluate("document.querySelector('.overflow-y-auto')?.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "md-compact.png"))
+        page.evaluate("document.querySelector('.overflow-y-auto')?.scrollBy(0, 1400)")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "md-compact-code.png"))
+
+        # Maximised, with the `roomy` class the real window sets.
+        page.close()
+        page = browser.new_page(viewport={"width": 1900, "height": 1000})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script(
+            "const WIZARD = true; const COMPACT = false; const TORTURE_TEXT = "
+            + json.dumps(TORTURE) + ";" + BRIDGE
+        )
+        page.goto(url, wait_until="networkidle")
+        page.add_style_tag(content=GROUND)
+        page.wait_for_timeout(1200)
+        page.evaluate("document.documentElement.classList.add('roomy')")
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "md-roomy.png"))
+        page.evaluate("document.documentElement.classList.remove('roomy')")
+
+        # ── the streaming replay ───────────────────────────────────
+        # Real `token` events down the real path, one at a time, with the
+        # frame clock running. The parser measurements were taken in Node;
+        # this is the one that includes React and the DOM.
+        page.close()
+        page = browser.new_page(viewport={"width": 1100, "height": 760})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script("const WIZARD = true;const TORTURE_TEXT = null; "
+        + "const COMPACT = false;" + BRIDGE)
+        page.goto(url, wait_until="networkidle")
+        page.add_style_tag(content=GROUND)
+        page.wait_for_timeout(1200)
+
+        page.get_by_role("textbox").first.fill("stream it")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(400)
+
+        # **Five runs, because one is an anecdote.** This project already
+        # records that discipline for `gate_tool_selection.py`, where a
+        # three-probe difference read as a finding and turned out to be
+        # narrower than each model's own spread. A frame clock on a machine
+        # that is also running a dev server and a 7B model is at least as
+        # noisy, so the spread is reported rather than a single best run.
+        runs = []
+        for _ in range(5):
+            page.evaluate("window.__emit('turn.reset', { turn_id: 't1' })")
+            page.wait_for_timeout(200)
+            runs.append(_replay(page, TORTURE))
+        worst = sorted(r["worst_gap_ms"] for r in runs)
+        dropped = sorted(r["dropped"] for r in runs)
+        print(
+            f"streaming replay x5: {runs[0]['tokens']} tokens | "
+            f"worst frame gap {worst[0]}-{worst[-1]}ms (median {worst[2]}) | "
+            f"frames over 32ms {dropped[0]}-{dropped[-1]}"
+        )
+        timings = _replay(page, TORTURE)
+        page.wait_for_timeout(400)
+        page.screenshot(path=str(OUT / "md-streamed.png"))
+
+        # **Caught mid-reply, because the caret is CSS only.** It is an
+        # `::after` on the last element, which jsdom cannot see and no unit
+        # test can assert — a screenshot is the only instrument for it. Also
+        # the one place to check that a fence still arriving already reads as
+        # a code block rather than as a paragraph of source.
+        page.evaluate("window.__emit('turn.reset', { turn_id: 't1' })")
+        page.wait_for_timeout(200)
+        page.evaluate(
+            """(text) => {
+                 for (let i = 0; i < text.length; i += 4) {
+                   window.__emit('token', { turn_id: 't1', text: text.slice(i, i + 4) });
+                 }
+               }""",
+            TORTURE[: TORTURE.index("```typescript") + 60],
+        )
+        page.wait_for_timeout(500)
+        page.evaluate("document.querySelector('.overflow-y-auto')?.scrollTo(0, 99999)")
+        page.wait_for_timeout(300)
+        page.screenshot(path=str(OUT / "md-midstream.png"))
+        print(f"last run in detail: {timings}")
 
         browser.close()
 

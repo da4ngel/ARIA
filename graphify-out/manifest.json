@@ -40,8 +40,8 @@
     "semantic_hash": ""
   },
   "package.json": {
-    "mtime": 1788214803.5313945,
-    "ast_hash": "41eb8dba74d6fa9d7aea423d1b9a255d",
+    "mtime": 1788266374.0313275,
+    "ast_hash": "f0fc0a5df039d2d129208d9dcd770228",
     "semantic_hash": ""
   },
   "postcss.config.js": {
@@ -120,8 +120,8 @@
     "semantic_hash": ""
   },
   "sidecar/core/conversation.py": {
-    "mtime": 1788004815.8303869,
-    "ast_hash": "379e6203a08a55d112ea6b2b98a58704",
+    "mtime": 1788267128.359457,
+    "ast_hash": "dd400ca32a23d0cdd52861e3ab5c0362",
     "semantic_hash": ""
   },
   "sidecar/core/listener.py": {
@@ -460,8 +460,8 @@
     "semantic_hash": ""
   },
   "src/components/ConversationView.tsx": {
-    "mtime": 1787224047.4635704,
-    "ast_hash": "377db2bf83b10722e3212b64caf8ad69",
+    "mtime": 1788266270.0686412,
+    "ast_hash": "ebb9280a3479dfe2a3d29a0f6da72308",
     "semantic_hash": ""
   },
   "src/components/EmptyState.test.tsx": {
@@ -495,8 +495,8 @@
     "semantic_hash": ""
   },
   "src/components/Markdown.tsx": {
-    "mtime": 1787190499.1142907,
-    "ast_hash": "b88a924bf1d25fcb4646f030001e8582",
+    "mtime": 1788266654.468048,
+    "ast_hash": "3abf90ab619726080d2a721f44a928bf",
     "semantic_hash": ""
   },
   "src/components/ModelPicker.test.tsx": {
@@ -650,8 +650,8 @@
     "semantic_hash": "c3528e851f2196c6fd1565215d51d3d4"
   },
   "CLAUDE.md": {
-    "mtime": 1788214944.5821896,
-    "ast_hash": "1a94d73040e33e7e6377ea72547cb132",
+    "mtime": 1788268777.711309,
+    "ast_hash": "68399cd34df9eab22018abe804b30d61",
     "semantic_hash": ""
   },
   "README.md": {
@@ -1120,8 +1120,8 @@
     "semantic_hash": ""
   },
   "src/styles/tokens.test.ts": {
-    "mtime": 1787225134.9295983,
-    "ast_hash": "d7509b840fff83485415bd2794e54326",
+    "mtime": 1788266351.7153876,
+    "ast_hash": "afbeb83838602c142adefb4ba4995aaa",
     "semantic_hash": ""
   },
   "sidecar/eval/__init__.py": {
@@ -1165,8 +1165,8 @@
     "semantic_hash": ""
   },
   "tailwind.config.mjs": {
-    "mtime": 1787225188.9954548,
-    "ast_hash": "2284a5afaa59fa0c960e9ba904cd8d4c",
+    "mtime": 1788265900.4739463,
+    "ast_hash": "e398f247363876d2cbdb53a5490492a8",
     "semantic_hash": ""
   },
   "sidecar/tests/test_probes.py": {
@@ -1250,8 +1250,8 @@
     "semantic_hash": ""
   },
   "src/components/Markdown.test.tsx": {
-    "mtime": 1787190531.9402308,
-    "ast_hash": "1fa60dba6e825ff8c0d2ac371d523b95",
+    "mtime": 1788266567.547299,
+    "ast_hash": "b87c90e123cc2218bd43de7a64dee74c",
     "semantic_hash": ""
   },
   "src/components/WindowControls.test.tsx": {
@@ -1590,8 +1590,8 @@
     "semantic_hash": ""
   },
   "scripts/look_at_the_ui.py": {
-    "mtime": 1788202347.9484868,
-    "ast_hash": "d3dcf36719ed386a30a85b5af2820c6f",
+    "mtime": 1788268429.858273,
+    "ast_hash": "bf74566390309c81678d26e6988e7da8",
     "semantic_hash": ""
   },
   "sidecar/tests/test_wake_threshold.py": {
@@ -1632,6 +1632,46 @@
   ".github/workflows/release.yml": {
     "mtime": 1788210116.236487,
     "ast_hash": "e96542ad15305c7ac8964df66e7f3dd6",
+    "semantic_hash": ""
+  },
+  "sidecar/providers/speech_text.py": {
+    "mtime": 1788267567.488749,
+    "ast_hash": "3a2f3e47b300b030baf912c202d7eeea",
+    "semantic_hash": ""
+  },
+  "sidecar/tests/test_speech_text.py": {
+    "mtime": 1788267581.6264524,
+    "ast_hash": "14dba21218eaa77f334a82bd1dca1b64",
+    "semantic_hash": ""
+  },
+  "src/components/Markdown.blocks.test.ts": {
+    "mtime": 1788265876.0199838,
+    "ast_hash": "008968cfe3197790f85fec1b12a320fe",
+    "semantic_hash": ""
+  },
+  "src/components/Markdown.blocks.ts": {
+    "mtime": 1788265853.9186568,
+    "ast_hash": "a93d98fcc4a6617c02cd1248b283891d",
+    "semantic_hash": ""
+  },
+  "src/components/Markdown.highlight.ts": {
+    "mtime": 1788266069.238504,
+    "ast_hash": "9889cb9f995e04b1a343539f5ce9b08b",
+    "semantic_hash": ""
+  },
+  "src/styles/prose.test.ts": {
+    "mtime": 1788266987.250203,
+    "ast_hash": "30371148433c0578462a6f6844149c8e",
+    "semantic_hash": ""
+  },
+  "src/styles/prose.ts": {
+    "mtime": 1788265944.313323,
+    "ast_hash": "2d2d8de971cf2919e107f69a03d5ed4f",
+    "semantic_hash": ""
+  },
+  "aria-text-rendering-prompt.md": {
+    "mtime": 1788265027.8144803,
+    "ast_hash": "59815ad0bbef4285d285d0afe053356e",
     "semantic_hash": ""
   }
 }

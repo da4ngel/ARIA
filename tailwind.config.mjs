@@ -65,6 +65,13 @@ export default {
         // `lead` heads things rather than carrying paragraphs, so it wants
         // less air than body text does.
         lead: ['1.0625rem', { lineHeight: '1.45rem' }], // 17
+        // **Headings inside a reply are section markers, not titles.** h1 and
+        // h2 both land on `head`: nothing in a transcript deserves display
+        // size, and a reply that opens with `# ` should not shout. Line-height
+        // tightens, because a heading is one or two lines and wants to read as
+        // a unit rather than as spaced-out prose.
+        head: ['1.35rem', { lineHeight: '1.3' }], // 21.6
+        subhead: ['1.15rem', { lineHeight: '1.35' }], // 18.4
         hero: ['1.75rem', { lineHeight: '2rem' }], // 28
       },
       letterSpacing: {
@@ -103,12 +110,17 @@ export default {
           '0%, 100%': { opacity: '0.25' },
           '50%': { opacity: '1' },
         },
+        // Referenced by `:focus-visible` in `index.css` since the retheme,
+        // and never defined — so the ring it documents has always snapped on.
+        ring: {
+          from: { outlineColor: 'transparent' },
+          to: { outlineColor: 'currentColor' },
+        },
       },
       animation: {
         rise: 'rise 160ms cubic-bezier(0.2, 0.8, 0.2, 1)',
         caret: 'caret 1.1s ease-in-out infinite',
-      shimmer: 'shimmer 2.4s linear infinite',
-      ring: 'ring 140ms cubic-bezier(0.2, 0.8, 0.2, 1)',
+        ring: 'ring 140ms cubic-bezier(0.2, 0.8, 0.2, 1)',
       },
     },
   },
